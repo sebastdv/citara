@@ -1,0 +1,18 @@
+{
+  "name": "citara",
+  "private": true,
+  "packageManager": "pnpm@10.30.1",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b",
+    "db:up": "docker compose up -d postgres redis",
+    "db:down": "docker compose down"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^22.7.0"
+  }
+}
