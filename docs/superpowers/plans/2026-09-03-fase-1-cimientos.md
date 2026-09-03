@@ -2030,8 +2030,11 @@ describe('MetaSender', () => {
     fetchMock.mockResolvedValue({
       ok: false, status: 401, json: async () => ({ error: { message: 'bad token' } }),
     });
-    await expect(sender.send(channel, '573001112233', { kind: 'text', body: 'x' }))
-      .rejects.toThrow(expect.not.stringContaining('TOKEN'));
+    // `toThrow` no acepta matchers asimétricos: se captura y se afirma sobre el mensaje.
+    const err = await sender.send(channel, '573001112233', { kind: 'text', body: 'x' })
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain('TOKEN');
   });
 });
 ```
@@ -2198,7 +2201,9 @@ const flow: FlowDefinition = {
 describe('advance — message y end', () => {
   it('sin estado previo arranca en el paso de entrada y emite su mensaje', () => {
     const res = advance(flow, null, null);
-    expect(res.outbound).toEqual([{ kind: 'text', body: '¡Hola! Soy el asistente.' }]);
+    // El primer mensaje es el del paso de entrada. Que haya más se comprueba
+    // en el test siguiente: message encadena con el paso que le sigue.
+    expect(res.outbound[0]).toEqual({ kind: 'text', body: '¡Hola! Soy el asistente.' });
   });
 
   it('encadena message → end en un solo turno, emitiendo ambos textos', () => {
@@ -2955,7 +2960,9 @@ describe('conversación de agendamiento (E2E del motor)', () => {
     ]);
 
     expect(await h.sessionStatus()).toBe('ended');
-    expect(await h.messageCount()).toBe(6); // 3 in + 3 out
+    // 3 entrantes + 4 salientes: el primer turno emite DOS (saludo y menú),
+    // porque `message` encadena con el paso siguiente sin esperar input.
+    expect(await h.messageCount()).toBe(7);
   });
 
   it('el traspaso a humano silencia al bot', async () => {
