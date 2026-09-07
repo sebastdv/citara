@@ -2,8 +2,8 @@
   "name": "@citara/db",
   "version": "0.0.0",
   "private": true,
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
   "dependencies": {
     "typeorm": "^0.3.20",
     "pg": "^8.13.0",

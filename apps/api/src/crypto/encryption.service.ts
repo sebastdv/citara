@@ -8,6 +8,13 @@ export class EncryptionService {
   private readonly key: Buffer;
 
   constructor(base64Key: string) {
+    // Sin esta guarda, una variable de entorno ausente llega como `undefined` y
+    // revienta dentro de Buffer.from con "The first argument must be of type
+    // string" — un error que no menciona ni la llave ni la variable, y que
+    // aparece a mitad del arranque de Nest. Falla nombrando la causa.
+    if (typeof base64Key !== 'string' || base64Key.length === 0) {
+      throw new Error('DB_ENCRYPTION_KEY no está definida');
+    }
     const key = Buffer.from(base64Key, 'base64');
     if (key.length !== KEY_BYTES) {
       throw new Error(`DB_ENCRYPTION_KEY debe medir 32 bytes, midió ${key.length}`);

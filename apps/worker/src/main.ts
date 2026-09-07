@@ -3,6 +3,13 @@
 // dependencias de los providers de AppModule (mismo motivo que en
 // apps/api/src/main.ts).
 import 'reflect-metadata';
+// La configuración se lee del entorno. En un servidor la inyecta el
+// orquestador, pero en local vive en `.env`, y sin esto el proceso arranca con
+// todas las variables en undefined y falla mucho más adentro, con un error que
+// no menciona la causa.
+import { config } from 'dotenv';
+config();
+
 import { NestFactory } from '@nestjs/core';
 import { Worker } from 'bullmq';
 // Import profundo ('@citara/api/src/app.module') no resolvía: apps/api no
