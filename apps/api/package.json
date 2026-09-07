@@ -4,6 +4,7 @@
   "private": true,
   "dependencies": {
     "@citara/db": "workspace:*",
+    "@citara/shared": "workspace:*",
     "libsodium-wrappers": "^0.8.4",
     "typeorm": "^0.3.20"
   },

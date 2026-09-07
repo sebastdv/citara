@@ -4,6 +4,6 @@
     "composite": true,
     "outDir": "./dist"
   },
-  "references": [{ "path": "../../packages/db" }],
+  "references": [{ "path": "../../packages/db" }, { "path": "../../packages/shared" }],
   "include": ["src"]
 }

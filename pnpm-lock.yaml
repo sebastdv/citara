@@ -32,6 +32,9 @@ importers:
       '@citara/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@citara/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       libsodium-wrappers:
         specifier: ^0.8.4
         version: 0.8.4
