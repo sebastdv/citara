@@ -4,6 +4,7 @@ import { createDataSource } from '@citara/db';
 import { EncryptionService } from './crypto/encryption.service';
 import { ChannelResolver } from './tenancy/channel-resolver.service';
 import { InboundQueue } from './queues/inbound.queue';
+import { InboundProcessor } from './queues/inbound.processor';
 import { IngestService } from './whatsapp/ingest.service';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 
@@ -47,6 +48,13 @@ import { WhatsappController } from './whatsapp/whatsapp.controller';
       inject: [DataSource, EncryptionService],
     },
     InboundQueue,
+    // Registrado como provider a propósito: apps/worker lo resuelve con
+    // ctx.get(InboundProcessor) (ver apps/worker/src/main.ts). Sin esta
+    // entrada, Nest arranca el módulo igual (nada más lo reclama) y el
+    // worker revienta recién al bootear con "UnknownElementException" — un
+    // fallo invisible para los tests de este archivo porque construyen el
+    // procesador a mano (`new InboundProcessor(app)`) sin pasar por Nest.
+    InboundProcessor,
     IngestService,
   ],
 })
