@@ -8,6 +8,12 @@ export interface OutboundJob {
   tenantId: string;
   channelId: string;
   conversationId: string;
+  /**
+   * Fila de `messages` que el flujo ya creó para este saliente. El envío la
+   * COMPLETA con el wamid; no crea otra. Así el mensaje existe en la
+   * conversación desde que el bot lo produce, aunque el envío tarde o falle.
+   */
+  messageId: string;
   to: string;
   idempotencyKey: string;
   content: OutboundContent;

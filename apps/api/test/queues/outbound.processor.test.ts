@@ -17,6 +17,7 @@ let tenantId: string, channelId: string;
 
 const job = (over: Partial<OutboundJob> = {}): OutboundJob => ({
   tenantId, channelId, conversationId: 'conv-placeholder',
+  messageId: 'msg-placeholder',
   to: '573001112233', idempotencyKey: 'idem-1',
   content: { kind: 'text', body: 'Hola' }, ...over,
 });
@@ -51,8 +52,16 @@ describe('OutboundProcessor', () => {
       [tenantId, contact.id, channelId],
     ));
 
+    // La fila la crea el flujo antes de encolar; el envío solo la completa.
+    const [pendiente] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, status)
+       VALUES ($1, $2, 'out', 'text', 'Hola', 'pending') RETURNING id`,
+      [tenantId, conversation.id],
+    ));
+
     const result = await processor.process(
-      job({ conversationId: conversation.id, idempotencyKey: 'idem-out-1' }),
+      job({ conversationId: conversation.id, messageId: pendiente.id,
+            idempotencyKey: 'idem-out-1' }),
     );
 
     expect(result.wamid).toBe('wamid.OUT1');
@@ -89,8 +98,15 @@ describe('OutboundProcessor', () => {
       [tenantId, contact.id, channelId],
     ));
 
+    const [pendiente] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, status)
+       VALUES ($1, $2, 'out', 'text', 'pendiente', 'pending') RETURNING id`,
+      [tenantId, conversation.id],
+    ));
+
     await processor.process(job({
       conversationId: conversation.id,
+      messageId: pendiente.id,
       idempotencyKey: 'idem-out-botones',
       content: { kind: 'buttons', body: '¿En qué te ayudo?',
                  buttons: [{ id: 'agendar', title: 'Agendar' }] },
@@ -102,6 +118,42 @@ describe('OutboundProcessor', () => {
     expect(row.type).toBe('interactive');
     // El detalle sigue disponible para quien lo necesite.
     expect(row.payload.kind).toBe('buttons');
+  });
+
+  it('actualiza la fila que ya creó el flujo en vez de insertar una segunda', async () => {
+    // `FlowRunner` inserta la fila del saliente en el momento en que el flujo
+    // lo produce —para que el panel vea el mensaje aunque el envío tarde o
+    // falle— y encola el job. Si este procesador insertara otra fila al
+    // enviar, cada mensaje del bot dejaría DOS filas en la conversación.
+    // La fila se crea una vez y se completa con el wamid cuando Meta confirma.
+    const [contact] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO contacts (tenant_id, wa_id) VALUES ($1, $2) RETURNING id`,
+      [tenantId, '573001112233'],
+    ));
+    const [conversation] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id)
+       VALUES ($1, $2, $3) RETURNING id`,
+      [tenantId, contact.id, channelId],
+    ));
+    // La fila tal como la deja el flujo: sin wamid, porque aún no se ha enviado.
+    const [pendiente] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, type, body)
+       VALUES ($1, $2, 'out', 'text', 'Hola') RETURNING id`,
+      [tenantId, conversation.id],
+    ));
+
+    await processor.process(job({
+      conversationId: conversation.id,
+      messageId: pendiente.id,
+      idempotencyKey: 'idem-out-update',
+    }));
+
+    const filas = await runInTenant(app, tenantId, (m) =>
+      m.query(`SELECT id, wamid FROM messages WHERE conversation_id = $1`,
+              [conversation.id]));
+    expect(filas).toHaveLength(1);
+    expect(filas[0].id).toBe(pendiente.id);
+    expect(filas[0].wamid).toBe('wamid.OUT1');
   });
 
   it('lanza si el canal no existe o está inactivo, sin llamar a MetaSender', async () => {

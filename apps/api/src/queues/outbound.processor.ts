@@ -22,7 +22,7 @@ export class OutboundProcessor {
   ) {}
 
   async process(job: OutboundJob): Promise<{ messageId: string; wamid: string }> {
-    const { tenantId, channelId, conversationId, to, content } = job;
+    const { tenantId, channelId, messageId, to, content } = job;
 
     // Se resuelve el canal por su id, no por phone_number_id: quien encoló
     // ya sabe a qué canal pertenece esta conversación. Sin default: si el
@@ -45,12 +45,19 @@ export class OutboundProcessor {
     const type = content.kind === 'text' ? 'text' : 'interactive';
 
     return runInTenant(this.ds, tenantId, async (m) => {
+      // UPDATE, no INSERT: la fila ya existe porque `FlowRunner` la creó al
+      // producir el mensaje. Insertar aquí dejaría DOS filas por cada mensaje
+      // del bot en la conversación que ve el cliente y el panel.
       const [saved] = await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, type, body, payload)
-         VALUES ($1, $2, $3, 'out', $4, $5, $6)
-         RETURNING id`,
-        [tenantId, conversationId, wamid, type, content.body, JSON.stringify(content)],
+        `UPDATE messages
+            SET wamid = $1, type = $2, body = $3, payload = $4, status = 'sent'
+          WHERE id = $5
+          RETURNING id`,
+        [wamid, type, content.body, JSON.stringify(content), messageId],
       );
+      if (!saved) {
+        throw new Error(`No existe la fila de mensaje ${messageId} que este envío debía completar`);
+      }
       return { messageId: saved.id, wamid };
     });
   }

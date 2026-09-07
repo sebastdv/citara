@@ -102,9 +102,13 @@ export class FlowRunner {
         // sería una trampa. El `kind` fino no se pierde: viaja en `payload`.
         const type = content.kind === 'text' ? 'text' : 'interactive';
 
-        await m.query(
-          `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, payload)
-           VALUES ($1, $2, 'out', $3, $4, $5)`,
+        // La fila se crea aquí, sin wamid: el mensaje ya existe en la
+        // conversación aunque el envío todavía no haya ocurrido. El envío la
+        // completa después con el wamid; no inserta otra.
+        const [fila] = await m.query(
+          `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, payload, status)
+           VALUES ($1, $2, 'out', $3, $4, $5, 'pending')
+           RETURNING id`,
           [job.tenantId, conversationId, type,
            'body' in content ? content.body : null, JSON.stringify({ ...content, seq: i })],
         );
@@ -120,6 +124,7 @@ export class FlowRunner {
           tenantId: job.tenantId,
           channelId: job.channelId,
           conversationId,
+          messageId: fila.id,
           to: job.message.from,
           idempotencyKey: `${messageId}:${i}`,
           content,
