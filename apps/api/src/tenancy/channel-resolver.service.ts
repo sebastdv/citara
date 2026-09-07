@@ -29,8 +29,29 @@ export class ChannelResolver {
         WHERE phone_number_id = $1 AND status = 'active'`,
       [phoneNumberId],
     );
-    if (!row) return null;
+    return row ? this.mapRow(row) : null;
+  }
 
+  /**
+   * Resuelve el canal por su id interno. El envío saliente lo necesita: el
+   * job de la cola de salida carga el channelId (no el phone_number_id),
+   * porque ya se resolvió el canal al encolar. Mismo criterio que arriba:
+   * sin default, null si no existe o está inactivo.
+   */
+  async resolveById(channelId: string): Promise<ResolvedChannel | null> {
+    const [row] = await this.ds.query(
+      `SELECT id, tenant_id, waba_id, phone_number_id, access_token_encrypted
+         FROM whatsapp_channels
+        WHERE id = $1 AND status = 'active'`,
+      [channelId],
+    );
+    return row ? this.mapRow(row) : null;
+  }
+
+  private mapRow(row: {
+    id: string; tenant_id: string; waba_id: string;
+    phone_number_id: string; access_token_encrypted: Buffer;
+  }): ResolvedChannel {
     return {
       tenantId: row.tenant_id,
       channelId: row.id,

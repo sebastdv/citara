@@ -10,3 +10,6 @@ export { AppModule } from './app.module';
 export { InboundProcessor } from './queues/inbound.processor';
 export { INBOUND_QUEUE } from './queues/inbound.queue';
 export type { InboundJob } from './queues/inbound.queue';
+export { OutboundProcessor } from './queues/outbound.processor';
+export { OUTBOUND_QUEUE } from './queues/outbound.queue';
+export type { OutboundJob } from './queues/outbound.queue';

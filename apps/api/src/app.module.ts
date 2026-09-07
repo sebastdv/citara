@@ -5,7 +5,10 @@ import { EncryptionService } from './crypto/encryption.service';
 import { ChannelResolver } from './tenancy/channel-resolver.service';
 import { InboundQueue } from './queues/inbound.queue';
 import { InboundProcessor } from './queues/inbound.processor';
+import { OutboundQueue } from './queues/outbound.queue';
+import { OutboundProcessor } from './queues/outbound.processor';
 import { IngestService } from './whatsapp/ingest.service';
+import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 
 @Module({
@@ -55,6 +58,19 @@ import { WhatsappController } from './whatsapp/whatsapp.controller';
     // fallo invisible para los tests de este archivo porque construyen el
     // procesador a mano (`new InboundProcessor(app)`) sin pasar por Nest.
     InboundProcessor,
+    {
+      // MetaSender no lleva @Injectable(): se construye a mano, igual que
+      // ChannelResolver arriba. El graphVersion viene del entorno; NUNCA el
+      // phone_number_id, que es propiedad de cada canal (ver sender.ts).
+      provide: MetaSender,
+      useFactory: () => new MetaSender(process.env.META_GRAPH_VERSION!),
+    },
+    OutboundQueue,
+    // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
+    // ctx.get(OutboundProcessor) para consumir la cola de salida. Sin esta
+    // entrada el worker arranca "bien" y revienta después con
+    // UnknownElementException, invisible para los tests de este archivo.
+    OutboundProcessor,
     IngestService,
   ],
 })
