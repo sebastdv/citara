@@ -39,6 +39,17 @@ describe('validateInput', () => {
   it('recorta el email a minúsculas', () => {
     expect(validateInput('email', ' A@B.CO ')).toEqual({ ok: true, value: 'a@b.co' });
   });
+
+  it('trata un validador desconocido como inválido, nombrándolo', () => {
+    // Las definiciones de flujo son `jsonb` que escribe el tenant, no código que
+    // revise el compilador. Sin esta rama, un `validate: 'telefono'` haría que
+    // la función devolviera undefined y que `result.ok` reventara con un
+    // TypeError lejos de la causa. El cast refleja lo que de verdad puede
+    // llegar en runtime desde la base, aunque el tipo diga otra cosa.
+    const res = validateInput('telefono' as never, '3001234567');
+    expect(res.ok).toBe(false);
+    expect(res.ok === false && res.reason).toContain('telefono');
+  });
 });
 
 describe('advance — capture', () => {
