@@ -854,6 +854,13 @@ git commit -m "feat(whatsapp): verificar firma hmac del webhook de meta en tiemp
 
 ### Task 6: Normalizador del payload de Meta
 
+> **Corrección posterior a la ejecución (ver el ledger, commit `3ad67cf`).** El código
+> de implementación que aparece más abajo tiene un defecto: promete "nunca lanza" pero
+> solo comprueba `Array.isArray` sobre `entry`. Los recorridos de `changes`, `messages`,
+> `statuses` y `contacts` no lo comprueban, y `for...of` sobre un objeto lanza
+> `TypeError`. Se corrigió degradando a lista vacía todo lo que no sea arreglo.
+> El snippet de abajo se conserva tal como se planeó; no lo copies sin esa corrección.
+
 **Files:**
 - Create: `packages/shared/src/inbound-message.ts`
 - Create: `apps/api/src/whatsapp/normalizer.ts`
