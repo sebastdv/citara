@@ -10,6 +10,7 @@ import { OutboundProcessor } from './queues/outbound.processor';
 import { IngestService } from './whatsapp/ingest.service';
 import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
+import { FlowRunner } from './flow-engine/flow-runner.service';
 
 @Module({
   controllers: [WhatsappController],
@@ -72,6 +73,14 @@ import { WhatsappController } from './whatsapp/whatsapp.controller';
     // UnknownElementException, invisible para los tests de este archivo.
     OutboundProcessor,
     IngestService,
+    // Registrado como provider por el mismo motivo que InboundProcessor y
+    // OutboundProcessor arriba: apps/worker lo resuelve con
+    // ctx.get(FlowRunner) para procesar la cola de entrada de punta a punta
+    // (persistir + avanzar el flujo + encolar la salida). Sin esta entrada
+    // el worker arranca "bien" y revienta después con
+    // UnknownElementException, invisible para los tests de este archivo
+    // porque construyen FlowRunner a mano.
+    FlowRunner,
   ],
 })
 export class AppModule {}

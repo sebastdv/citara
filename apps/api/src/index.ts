@@ -13,3 +13,8 @@ export type { InboundJob } from './queues/inbound.queue';
 export { OutboundProcessor } from './queues/outbound.processor';
 export { OUTBOUND_QUEUE } from './queues/outbound.queue';
 export type { OutboundJob } from './queues/outbound.queue';
+// FlowRunner es quien de verdad cierra el circuito de entrada: persiste el
+// mensaje entrante, avanza el flujo y encola la salida. apps/worker lo usa
+// para procesar INBOUND_QUEUE en vez de llamar a InboundProcessor a secas
+// (que solo persiste, sin ejecutar el motor de flujos).
+export { FlowRunner } from './flow-engine/flow-runner.service';

@@ -18,7 +18,7 @@ import { Worker } from 'bullmq';
 // `src/index.ts`; apps/api ya lo tiene (ver apps/api/src/index.ts) y expone
 // justo lo que este worker necesita.
 import {
-  AppModule, InboundProcessor, INBOUND_QUEUE, type InboundJob,
+  AppModule, FlowRunner, INBOUND_QUEUE, type InboundJob,
   OutboundProcessor, OUTBOUND_QUEUE, type OutboundJob,
 } from '@citara/api';
 
@@ -28,12 +28,16 @@ async function bootstrap() {
   // compita por el event loop y sature el pool de conexiones mientras la
   // base de datos queda ociosa.
   const ctx = await NestFactory.createApplicationContext(AppModule);
-  const inboundProcessor = ctx.get(InboundProcessor);
+  // FlowRunner, no InboundProcessor a secas: InboundProcessor solo persiste
+  // el mensaje entrante. FlowRunner lo envuelve, avanza el flujo con
+  // `advance()` y encola la salida — es el que cierra el circuito completo
+  // de la Task 15 (Task 9 solo cableó la persistencia).
+  const flowRunner = ctx.get(FlowRunner);
   const outboundProcessor = ctx.get(OutboundProcessor);
 
   const inboundWorker = new Worker<InboundJob>(
     INBOUND_QUEUE,
-    (job) => inboundProcessor.process(job.data),
+    (job) => flowRunner.handle(job.data),
     {
       connection: { url: process.env.REDIS_URL },
       concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10),
