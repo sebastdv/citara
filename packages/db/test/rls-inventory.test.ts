@@ -13,22 +13,45 @@ beforeAll(async () => {
 afterAll(async () => { await ds.destroy(); });
 
 /**
- * Tablas con `tenant_id` que a propósito NO llevan RLS, con el privilegio máximo
- * que `citara_app` puede tener sobre cada una.
+ * Tablas con `tenant_id` que a propósito NO llevan RLS.
  *
  * Las dos se leen o escriben ANTES de saber a qué tenant pertenece lo que llega,
  * así que una política que exija `app.tenant_id` las dejaría devolviendo cero
  * filas. La exención es correcta, pero tiene un precio: son las únicas tablas
- * donde la aplicación ve datos de todos los clientes a la vez. El contrapeso es
- * que sean lo más de solo-lectura posible, y eso es lo que se verifica abajo.
+ * donde la aplicación ve datos de todos los clientes a la vez.
  */
-const EXENTAS: Record<string, string[]> = {
-  // Se resuelve por phone_number_id antes de conocer el tenant. Solo lectura:
-  // la aplicación nunca da de alta ni modifica canales, eso es del panel.
+const EXENTAS_DE_RLS = new Set([
+  // Se resuelve por phone_number_id antes de conocer el tenant.
+  'whatsapp_channels',
+  // Puerta de idempotencia: se inserta antes de resolver el tenant.
+  'webhook_events',
+]);
+
+/**
+ * Privilegios que `citara_app` puede tener sobre CADA tabla. Es una lista
+ * cerrada a propósito: una tabla nueva que no aparezca aquí rompe la suite,
+ * y esa es la idea.
+ *
+ * El motivo es que `ALTER DEFAULT PRIVILEGES` de la migración del rol otorga
+ * SELECT/INSERT/UPDATE/DELETE a toda tabla nueva. Es un default generoso que
+ * nadie vuelve a mirar: el privilegio de más no da error, no aparece en ningún
+ * log y solo se nota el día que algo lo usa. Declararlo tabla por tabla obliga
+ * a decidir, en vez de heredar.
+ */
+const PRESUPUESTO: Record<string, string[]> = {
+  // Solo lectura: dar de alta o modificar tenants es del panel, no de la app.
+  // Con DELETE, un borrado mal armado arrastraba en cascada contactos, canales,
+  // conversaciones y mensajes del cliente, sin que RLS pudiera intervenir.
+  tenants: ['SELECT'],
+  // Tenant-scoped con RLS: la política ya filtra, la app opera con libertad.
+  contacts: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  conversations: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  messages: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  // Exentas de RLS, y por eso lo más de solo-lectura posible.
   whatsapp_channels: ['SELECT'],
-  // Puerta de idempotencia: se inserta antes de resolver el tenant. Nunca se
-  // actualiza ni se borra — un evento ya visto es historia, no estado mutable.
   webhook_events: ['SELECT', 'INSERT'],
+  // Las migraciones las corre el administrador, nunca la aplicación.
+  migrations: [],
 };
 
 describe('invariante: toda tabla con tenant_id lleva RLS', () => {
@@ -56,32 +79,40 @@ describe('invariante: toda tabla con tenant_id lleva RLS', () => {
 
     const desprotegidas = rows
       .filter((r) => !r.enabled || !r.forced)
-      .filter((r) => !(r.table_name in EXENTAS));
+      .filter((r) => !EXENTAS_DE_RLS.has(r.table_name));
     expect(desprotegidas).toEqual([]);
   });
 
-  it('las tablas exentas de RLS no tienen más privilegios de los declarados', async () => {
-    // La exención de RLS solo es defendible si esas tablas son de lectura (o de
-    // solo-inserción). El `ALTER DEFAULT PRIVILEGES` de la migración del rol da
-    // SELECT/INSERT/UPDATE/DELETE a toda tabla nueva, así que sin un REVOKE
-    // explícito una tabla exenta queda escribible entera por la aplicación: un
-    // fallo en el camino de la app podría reescribir el token de otro cliente.
-    for (const [tabla, permitidos] of Object.entries(EXENTAS)) {
-      const existe = await ds.query(
-        `SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-          WHERE n.nspname = 'public' AND c.relname = $1`, [tabla]);
-      if (existe.length === 0) continue; // aún no la crea ninguna migración
+  it('ninguna tabla da a citara_app más privilegios de los presupuestados', async () => {
+    const tablas: Array<{ table_name: string }> = await ds.query(`
+      SELECT c.relname AS table_name
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+       WHERE n.nspname = 'public' AND c.relkind = 'r'
+       ORDER BY c.relname
+    `);
+    expect(tablas.length).toBeGreaterThan(0);
 
-      const otorgados: Array<{ privilege_type: string }> = await ds.query(
-        `SELECT privilege_type FROM information_schema.role_table_grants
-          WHERE table_schema = 'public' AND table_name = $1 AND grantee = 'citara_app'`,
-        [tabla],
-      );
-      const demas = otorgados
-        .map((g) => g.privilege_type)
-        .filter((p) => !permitidos.includes(p));
-      expect({ tabla, demas }).toEqual({ tabla, demas: [] });
-    }
+    const otorgados: Array<{ table_name: string; privilege_type: string }> = await ds.query(`
+      SELECT table_name, privilege_type
+        FROM information_schema.role_table_grants
+       WHERE table_schema = 'public' AND grantee = 'citara_app'
+    `);
+
+    const real = new Map<string, string[]>();
+    for (const { table_name } of tablas) real.set(table_name, []);
+    for (const g of otorgados) real.get(g.table_name)?.push(g.privilege_type);
+
+    // Una tabla sin presupuesto declarado es un descuido, no un permiso.
+    const sinDeclarar = [...real.keys()].filter((t) => !(t in PRESUPUESTO));
+    expect(sinDeclarar).toEqual([]);
+
+    const excesos = [...real.entries()]
+      .map(([tabla, privs]) => ({
+        tabla,
+        demas: privs.filter((p) => !(PRESUPUESTO[tabla] ?? []).includes(p)).sort(),
+      }))
+      .filter((r) => r.demas.length > 0);
+    expect(excesos).toEqual([]);
   });
 
   it('la tabla raíz tenants queda fuera del inventario a propósito', async () => {
