@@ -20,7 +20,11 @@ import type { MigrationInterface, QueryRunner } from 'typeorm';
  * su GRANT de forma explícita y deliberada, no heredado de un default.
  *
  * `migrations` queda sin nada: las migraciones las corre el rol administrador,
- * nunca la aplicación.
+ * nunca la aplicación. En una base recién creada esa tabla ya nace sin
+ * privilegios para `citara_app` —TypeORM la crea ANTES de que esta migración
+ * fije los default privileges, así que no los hereda— y el REVOKE es solo
+ * defensivo. Sí limpia bases de desarrollo arrastradas, donde el
+ * `pg_default_acl` de un ciclo anterior sí alcanzó a la tabla.
  */
 export class RestrictAppPrivileges1725300700000 implements MigrationInterface {
   public async up(q: QueryRunner): Promise<void> {
@@ -29,7 +33,12 @@ export class RestrictAppPrivileges1725300700000 implements MigrationInterface {
   }
 
   public async down(q: QueryRunner): Promise<void> {
+    // Solo `tenants` se restaura: ahí los tres privilegios sí existían antes,
+    // heredados del default. Sobre `migrations` NO se otorga nada, porque en
+    // una base sana nunca los tuvo — un `down()` simétrico con el `up()` le
+    // daría a la aplicación escritura sobre la tabla de control de migraciones,
+    // que es justo lo que esta migración existe para impedir. Revertir no puede
+    // dejar el sistema con más permisos de los que tenía antes de aplicarla.
     await q.query(`GRANT INSERT, UPDATE, DELETE ON tenants TO citara_app`);
-    await q.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON migrations TO citara_app`);
   }
 }
