@@ -69,6 +69,11 @@ export function advance(
   let current: SessionState = state ?? { stepKey: flow.entry, vars: {}, status: 'active' };
   const outbound: OutboundContent[] = [];
 
+  // Una conversación en manos de un humano no recibe respuestas del bot.
+  if (current.status === 'handoff') {
+    return { state: current, outbound: [] };
+  }
+
   for (let hops = 0; ; hops++) {
     if (hops >= MAX_CHAIN) {
       throw new Error(`Ciclo detectado en el flujo '${flow.key}' tras ${MAX_CHAIN} pasos`);
@@ -138,7 +143,12 @@ export function advance(
       continue;
     }
 
-    // El único tipo pendiente es handoff (Task 14).
+    if (step.type === 'handoff') {
+      if (step.text) outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
+      return { state: { ...current, status: 'handoff' }, outbound };
+    }
+
+    // Todos los tipos de paso están cubiertos arriba.
     return { state: current, outbound };
   }
 }
