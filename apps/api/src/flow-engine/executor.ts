@@ -1,6 +1,7 @@
 import type {
   FlowDefinition, FlowStep, SessionState, OutboundContent,
 } from '@citara/shared';
+import { validateInput } from './validators';
 
 const MAX_CHAIN = 20; // pasos encadenados sin input antes de declarar ciclo
 
@@ -107,7 +108,37 @@ export function advance(
       continue;
     }
 
-    // El tipo capture se implementa en la tarea 13.
+    if (step.type === 'capture') {
+      // Sin input: es la primera vez que se llega al paso. Preguntar y esperar.
+      if (input === null) {
+        outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
+        return { state: current, outbound };
+      }
+
+      const result = validateInput(step.validate ?? 'text', input);
+
+      if (!result.ok) {
+        if (step.on_invalid) {
+          current = { ...current, stepKey: step.on_invalid };
+          input = null;
+          continue;
+        }
+        // Sin salida definida: repetir la pregunta sin avanzar.
+        outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
+        return { state: current, outbound };
+      }
+
+      // Se acumula sobre las variables existentes: no pisar lo capturado antes.
+      current = {
+        ...current,
+        vars: { ...current.vars, [step.var]: result.value },
+        stepKey: step.next,
+      };
+      input = null; // el input ya se consumió; los siguientes pasos encadenan
+      continue;
+    }
+
+    // El único tipo pendiente es handoff (Task 14).
     return { state: current, outbound };
   }
 }
