@@ -27,6 +27,15 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.20.1)
 
+  apps/api:
+    dependencies:
+      '@citara/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      typeorm:
+        specifier: ^0.3.20
+        version: 0.3.31(pg@8.23.0)
+
   packages/db:
     dependencies:
       pg:

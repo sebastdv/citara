@@ -1,0 +1,9 @@
+{
+  "name": "@citara/api",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "@citara/db": "workspace:*",
+    "typeorm": "^0.3.20"
+  }
+}

@@ -11,5 +11,10 @@ export default defineConfig({
     include: ['**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
     setupFiles: ['./vitest.setup.ts'],
+    // Varios archivos de test corren migraciones (`runMigrations()`) contra
+    // el mismo Postgres compartido en su `beforeAll`. En paralelo compiten
+    // por crear las mismas tablas/filas de `migrations` a la vez. Los test
+    // files corren en serie para que esas migraciones no compitan entre sí.
+    fileParallelism: false,
   },
 });

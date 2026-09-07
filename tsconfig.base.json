@@ -3,6 +3,13 @@
     "target": "ES2023",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    // Las migraciones las carga TypeORM con un import dinámico nativo, fuera
+    // del pipeline de vitest: Node las lee como TypeScript y su resolución ESM
+    // exige la extensión explícita en los imports relativos. Estas dos banderas
+    // dejan escribir '../rls.ts' en el fuente y que tsc lo reescriba a '.js'
+    // al emitir, en vez de tener que elegir entre compilar o ejecutar.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
