@@ -36,12 +36,20 @@ export class OutboundProcessor {
 
     const { wamid } = await this.sender.send(channel, to, content);
 
+    // `messages.type` se guarda con el MISMO vocabulario que el entrante, que
+    // es el de Meta. El panel muestra la conversación completa en una sola
+    // lista, así que una columna cuyo significado dependiera de `direction`
+    // obligaría a cada consumidor a saberlo. Botones y lista son las dos formas
+    // de un mensaje interactivo — justo lo que el entrante registra como
+    // 'interactive'. El `kind` fino no se pierde: viaja en `payload`.
+    const type = content.kind === 'text' ? 'text' : 'interactive';
+
     return runInTenant(this.ds, tenantId, async (m) => {
       const [saved] = await m.query(
         `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, type, body, payload)
          VALUES ($1, $2, $3, 'out', $4, $5, $6)
          RETURNING id`,
-        [tenantId, conversationId, wamid, content.kind, content.body, JSON.stringify(content)],
+        [tenantId, conversationId, wamid, type, content.body, JSON.stringify(content)],
       );
       return { messageId: saved.id, wamid };
     });

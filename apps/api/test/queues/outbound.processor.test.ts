@@ -70,6 +70,40 @@ describe('OutboundProcessor', () => {
     expect(rows[0].body).toBe('Hola');
   });
 
+  it('guarda el mismo vocabulario de `type` que el entrante', async () => {
+    // `messages.type` lo leen por igual las filas entrantes y las salientes: el
+    // panel de la fase 5 muestra la conversación completa en una sola lista.
+    // Si el saliente guardara su `kind` interno ('buttons', 'list') y el
+    // entrante el tipo de Meta ('interactive'), el significado de la columna
+    // dependería de `direction`, y todo el que la consulte tendría que saberlo.
+    // Botones y lista son las dos formas de un mismo mensaje interactivo, que
+    // es exactamente lo que el entrante ya registra. El `kind` fino no se
+    // pierde: queda en `payload`.
+    const [contact] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO contacts (tenant_id, wa_id) VALUES ($1, $2) RETURNING id`,
+      [tenantId, '573001112233'],
+    ));
+    const [conversation] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id)
+       VALUES ($1, $2, $3) RETURNING id`,
+      [tenantId, contact.id, channelId],
+    ));
+
+    await processor.process(job({
+      conversationId: conversation.id,
+      idempotencyKey: 'idem-out-botones',
+      content: { kind: 'buttons', body: '¿En qué te ayudo?',
+                 buttons: [{ id: 'agendar', title: 'Agendar' }] },
+    }));
+
+    const [row] = await runInTenant(app, tenantId, (m) =>
+      m.query(`SELECT type, payload FROM messages WHERE conversation_id = $1`,
+              [conversation.id]));
+    expect(row.type).toBe('interactive');
+    // El detalle sigue disponible para quien lo necesite.
+    expect(row.payload.kind).toBe('buttons');
+  });
+
   it('lanza si el canal no existe o está inactivo, sin llamar a MetaSender', async () => {
     await expect(
       processor.process(job({ channelId: '00000000-0000-0000-0000-000000000000' })),
