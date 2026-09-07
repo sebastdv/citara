@@ -47,6 +47,8 @@ const PRESUPUESTO: Record<string, string[]> = {
   contacts: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   conversations: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   messages: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  flows: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  conversation_sessions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   // Exentas de RLS, y por eso lo más de solo-lectura posible.
   whatsapp_channels: ['SELECT'],
   webhook_events: ['SELECT', 'INSERT'],

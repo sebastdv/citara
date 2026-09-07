@@ -22,17 +22,14 @@ async function adminDs(): Promise<DataSource> {
 /**
  * Vacía todo lo tenant-scoped. El orden lo resuelve CASCADE.
  *
- * NOTA: `conversation_sessions` y `flows` NO están en este TRUNCATE aunque el
- * plan original las incluía. Esas tablas las crea la Task 11; hasta entonces
- * no existen, y un TRUNCATE contra una tabla inexistente tumba con
- * "relation does not exist" el `beforeAll` de TODOS los tests de esta suite.
- * Cuando la Task 11 cree esas tablas, se añaden aquí.
+ * `conversation_sessions` y `flows` volvieron aquí en la Task 11, que es la
+ * que crea esas tablas.
  */
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE webhook_events, messages, conversations,
-             contacts, whatsapp_channels, tenants
+    TRUNCATE webhook_events, messages, conversation_sessions, conversations,
+             flows, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
 }
@@ -54,11 +51,7 @@ export async function seedChannel(): Promise<{ tenantId: string; channelId: stri
   return { tenantId: t.id, channelId: c.id };
 }
 
-/**
- * Su tabla (`flows`) todavía no existe — la crea la Task 11. Se deja escrita
- * para esa tarea; NO llamar desde ningún test hasta entonces, o el INSERT
- * falla con "relation does not exist".
- */
+/** Inserta un flujo activo y por defecto para el tenant dado. */
 export async function seedFlow(tenantId: string, definition: unknown): Promise<string> {
   const ds = await adminDs();
   const [f] = await ds.query(
