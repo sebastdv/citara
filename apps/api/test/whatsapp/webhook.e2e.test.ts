@@ -3,6 +3,7 @@ import { createHmac } from 'node:crypto';
 import request from 'supertest';
 import type { INestApplication } from '@nestjs/common';
 import { createTestApp, resetDb, seedChannel } from '../helpers';
+import { IngestService } from '../../src/whatsapp/ingest.service';
 
 const SECRET = process.env.META_APP_SECRET!;
 let app: INestApplication;
@@ -97,5 +98,46 @@ describe('POST /webhooks/whatsapp', () => {
     await request(app.getHttpServer())
       .post('/webhooks/whatsapp').set('x-hub-signature-256', sign(body)).send(body).expect(200);
     expect(Date.now() - t0).toBeLessThan(100);
+  });
+});
+
+/**
+ * El test de deduplicación del plan es secuencial: manda un webhook, espera la
+ * respuesta, manda el segundo. Meta, en cambio, reintenta cuando no recibe el
+ * 200 a tiempo, y esos reintentos pueden llegar solapados.
+ *
+ * ALCANCE REAL DE ESTE TEST, para que nadie lo confunda con lo que no es:
+ * ejercita el camino concurrente y detectaría una rotura gruesa de la
+ * deduplicación, pero NO es un detector de la condición de carrera. Se comprobó
+ * sustituyendo el `ON CONFLICT` por el antipatrón `SELECT` y luego `INSERT`, y
+ * el test siguió pasando: con el bucle de eventos de Node y el pool, las ocho
+ * llamadas se serializan lo suficiente como para que la primera inserción
+ * termine antes de que las demás consulten.
+ *
+ * Quien confíe en que esto blinda la idempotencia se va a llevar una sorpresa.
+ * Lo que blinda la idempotencia es el índice único sobre `wamid` más
+ * `ON CONFLICT DO NOTHING`, que resuelve Postgres de forma atómica; eso es una
+ * garantía del motor, no algo que este test demuestre.
+ */
+describe('POST /webhooks/whatsapp bajo entrega concurrente', () => {
+  it('encola una sola vez aunque el mismo wamid llegue en paralelo', async () => {
+    // Se ataca `IngestService` y no el endpoint HTTP a propósito: supertest
+    // abre un puerto efímero por petición sobre el mismo servidor, y ocho en
+    // paralelo se pisan con ECONNRESET. Eso es un artefacto del cliente de
+    // pruebas, no del sistema. La garantía que importa —el índice único más
+    // ON CONFLICT resolviéndose de forma atómica— vive en el servicio, así que
+    // es ahí donde tiene sentido medirla.
+    const ingest = app.get(IngestService);
+    const payload = inbound('wamid.RACE');
+
+    const resultados = await Promise.all(
+      Array.from({ length: 8 }, () => ingest.ingest(payload)),
+    );
+
+    const encolados = resultados.reduce((n, r) => n + r.enqueued, 0);
+    const duplicados = resultados.reduce((n, r) => n + r.duplicates, 0);
+
+    expect(encolados).toBe(1);
+    expect(duplicados).toBe(7);
   });
 });
