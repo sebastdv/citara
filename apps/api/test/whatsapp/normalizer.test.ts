@@ -94,3 +94,34 @@ describe('normalizeWebhook', () => {
     expect(normalizeWebhook({ hola: 'mundo' })).toEqual({ messages: [], statuses: [] });
   });
 });
+
+/**
+ * El contrato de `normalizeWebhook` dice "nunca lanza", y esa promesa es la que
+ * sostiene el endpoint del webhook: si esto revienta, Meta recibe un 500,
+ * reintenta con backoff y termina desactivando el webhook del cliente.
+ *
+ * El test de payload irreconocible del brief solo prueba `{hola:'mundo'}`, que
+ * queda atrapado por el único `Array.isArray(entries)` del código. Todo lo que
+ * viene después —`changes`, `messages`, `statuses`, `contacts`— se recorre sin
+ * comprobar que sea un arreglo, y `for...of` sobre un objeto lanza TypeError.
+ */
+describe('normalizeWebhook no lanza nunca', () => {
+  const malformados: Array<[string, unknown]> = [
+    ['changes es un objeto', { entry: [{ id: '1', changes: {} }] }],
+    ['changes es un número', { entry: [{ id: '1', changes: 5 }] }],
+    ['messages es un objeto', { entry: [{ id: '1', changes: [{ value: { messages: {} } }] }] }],
+    ['messages es una cadena', { entry: [{ id: '1', changes: [{ value: { messages: 'abc' } }] }] }],
+    ['statuses es un objeto', { entry: [{ id: '1', changes: [{ value: { statuses: {} } }] }] }],
+    ['contacts es un objeto', { entry: [{ id: '1', changes: [{ value: { contacts: {}, messages: [] } }] }] }],
+    ['entry trae null', { entry: [null] }],
+    ['payload es null', null],
+    ['payload es una cadena', 'no soy un webhook'],
+  ];
+
+  for (const [nombre, payload] of malformados) {
+    it(`devuelve listas vacías cuando ${nombre}`, () => {
+      expect(() => normalizeWebhook(payload)).not.toThrow();
+      expect(normalizeWebhook(payload)).toEqual({ messages: [], statuses: [] });
+    });
+  }
+});
