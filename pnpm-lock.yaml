@@ -56,6 +56,9 @@ importers:
       libsodium-wrappers:
         specifier: ^0.8.4
         version: 0.8.4
+      luxon:
+        specifier: ^3.7.2
+        version: 3.7.2
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2
@@ -75,6 +78,9 @@ importers:
       '@types/libsodium-wrappers':
         specifier: ^0.8.2
         version: 0.8.2
+      '@types/luxon':
+        specifier: ^3.7.6
+        version: 3.7.6
       '@types/supertest':
         specifier: ^7.2.1
         version: 7.2.1
@@ -653,6 +659,9 @@ packages:
   '@types/libsodium-wrappers@0.8.2':
     resolution: {integrity: sha512-+2IDfSULPUskSjIYfZl9suIUsIE5PXwoKZiE/j0MZWd+M9nEGvJDsk/ztMZKNhL1lBL+1CaypW0dQSjqPW2dMg==}
     deprecated: This is a stub types definition. libsodium-wrappers provides its own type definitions, so you do not need this installed.
+
+  '@types/luxon@3.7.6':
+    resolution: {integrity: sha512-6KSjliQAXK8ZLgFQO4B7iE4Rpf/B3rItzCFuXezBY/XIAGxOdLd7vRNK9/StRPwiS/yJsVbB7HKpW46B8tcEuQ==}
 
   '@types/methods@1.1.4':
     resolution: {integrity: sha512-ymXWVrDiCxTBE3+RIrrP533E70eA+9qu7zdWoHuOmGujkYtzf4HQF96b8nwHLqhuf4ykX61IGRIB38CC6/sImQ==}
@@ -2145,6 +2154,8 @@ snapshots:
   '@types/libsodium-wrappers@0.8.2':
     dependencies:
       libsodium-wrappers: 0.8.4
+
+  '@types/luxon@3.7.6': {}
 
   '@types/methods@1.1.4': {}
 
