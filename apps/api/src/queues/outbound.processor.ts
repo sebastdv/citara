@@ -108,7 +108,18 @@ export class OutboundProcessor {
         continue;
       }
 
-      if (!(await this.claim(tenantId, row.id))) continue; // otro intento la ganó
+      if (row.origin === 'bot') {
+        // El control se vuelve a medir aquí, dentro del reclamo atómico: el
+        // dueño pudo contestar mientras salía la fila anterior.
+        if (!(await this.claimBotReply(tenantId, row.id))) {
+          // O manda un humano que intervino (→ superseded), u otro intento la
+          // ganó (el CAS desde 'pending' falla y no pasa nada).
+          await this.transition(tenantId, row.id, 'pending', 'superseded');
+          continue;
+        }
+      } else if (!(await this.claim(tenantId, row.id))) {
+        continue; // otro intento la ganó
+      }
 
       let wamid: string;
       try {
@@ -154,6 +165,25 @@ export class OutboundProcessor {
   /** `pending` → `sending` de forma atómica. Solo un intento gana la fila. */
   private async claim(tenantId: string, id: string): Promise<boolean> {
     return this.transition(tenantId, id, 'pending', 'sending');
+  }
+
+  /**
+   * Reclamo de una respuesta del bot: además de seguir en `pending`, exige que
+   * no mande un humano que intervino (spec §6.3). Es la misma regla que
+   * `botRepliesSuperseded`, evaluada por Postgres en el mismo instante del
+   * reclamo; entre el reclamo y el envío queda una ventana inherente.
+   */
+  private async claimBotReply(tenantId: string, id: string): Promise<boolean> {
+    const [, affected] = (await runInTenant(this.ds, tenantId, (m) => m.query(
+      `UPDATE messages SET status = 'sending', claimed_at = now()
+        WHERE id = $1 AND status = 'pending'
+          AND NOT EXISTS (
+                SELECT 1 FROM conversations c
+                 WHERE c.id = messages.conversation_id
+                   AND c.control = 'human' AND c.human_until > now()
+                   AND c.control_reason IS DISTINCT FROM 'flow_handoff')`,
+      [id]))) as [unknown[], number];
+    return affected > 0;
   }
 
   /**

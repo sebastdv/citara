@@ -250,6 +250,21 @@ describe('OutboundProcessor', () => {
     expect((await outRows()).map((r) => r.status)).toEqual(['superseded', 'superseded']);
   });
 
+  it('si el dueño contesta mientras sale el primer mensaje, lo que sigue del bot no sale', async () => {
+    // El control se mide por fila, en el reclamo: cada envío puede tardar
+    // hasta 15 s, y leerlo una sola vez al inicio del job dejaba salir el resto.
+    const job = await seedTurn([HOLA, MENU]);
+    sender.send.mockImplementationOnce(async () => {
+      await humanTookOver('phone');
+      return { wamid: 'wamid.MID' };
+    });
+
+    await processor.process(job);
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent', 'superseded']);
+  });
+
   it('el mensaje de traspaso del propio flujo sí sale', async () => {
     const job = await seedTurn([HOLA]);
     await humanTookOver('flow_handoff');
