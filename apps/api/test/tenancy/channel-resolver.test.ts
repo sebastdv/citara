@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../../src/crypto/encryption.service';
 import { ChannelResolver } from '../../src/tenancy/channel-resolver.service';
+import { resetDb, closeHelpers } from '../helpers';
 
 let admin: DataSource, app: DataSource, enc: EncryptionService, resolver: ChannelResolver;
 let tenantId: string;
@@ -11,6 +12,9 @@ beforeAll(async () => {
   admin = createDataSource(process.env.DATABASE_ADMIN_URL!);
   await admin.initialize();
   await admin.runMigrations();
+  // Sin esto el archivo heredaba el estado del anterior y dependía del orden
+  // de ejecución: con un tenant 'salon' ya creado, el INSERT de abajo chocaba.
+  await resetDb();
 
   enc = new EncryptionService(Buffer.alloc(32, 3).toString('base64'));
   await enc.ready();
@@ -34,6 +38,7 @@ afterAll(async () => {
   await admin.query(`DELETE FROM whatsapp_channels`);
   await admin.query(`DELETE FROM tenants`);
   await admin.destroy();
+  await closeHelpers();
   await app.destroy();
 });
 

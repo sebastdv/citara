@@ -62,6 +62,12 @@ export async function seedFlow(tenantId: string, definition: unknown): Promise<s
   return f.id;
 }
 
+/** Consulta con la conexión admin (sin RLS): para afirmar sobre el estado real. */
+export async function adminQuery(sql: string, params: unknown[] = []) {
+  const ds = await adminDs();
+  return ds.query(sql, params);
+}
+
 export async function createTestApp(): Promise<INestApplication> {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
   const app = moduleRef.createNestApplication({ rawBody: true });

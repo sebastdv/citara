@@ -23,6 +23,7 @@ export default defineConfig({
     environment: 'node',
     include: ['**/*.test.ts'],
     exclude: ['**/node_modules/**', '**/dist/**'],
+    globalSetup: ['./vitest.global-setup.ts'],
     setupFiles: ['./vitest.setup.ts'],
     // Varios archivos de test corren migraciones (`runMigrations()`) contra
     // el mismo Postgres compartido en su `beforeAll`. En paralelo compiten
