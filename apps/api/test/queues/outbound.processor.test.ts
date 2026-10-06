@@ -235,6 +235,50 @@ describe('OutboundProcessor', () => {
     expect((await outRows()).map((r) => r.status)).toEqual(['sent', 'failed']);
   });
 
+  const humanTookOver = (reason: string, until = `now() + interval '1 hour'`) =>
+    adminQuery(`UPDATE conversations SET control = 'human', human_until = ${until},
+                control_reason = '${reason}'`);
+
+  it('si el dueño contestó desde el celular antes del envío, lo del bot no sale', async () => {
+    // El bot produjo el saludo y, en el mismo segundo, llegó el eco del dueño.
+    const job = await seedTurn([HOLA, MENU]);
+    await humanTookOver('phone');
+
+    await processor.process(job);
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect((await outRows()).map((r) => r.status)).toEqual(['superseded', 'superseded']);
+  });
+
+  it('el mensaje de traspaso del propio flujo sí sale', async () => {
+    const job = await seedTurn([HOLA]);
+    await humanTookOver('flow_handoff');
+
+    await processor.process(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
+  it('lo que escribe el operador sale aunque mande un humano', async () => {
+    const job = await seedTurn([HOLA]);
+    await adminQuery(`UPDATE messages SET origin = 'operator' WHERE direction = 'out'`);
+    await humanTookOver('operator');
+
+    await processor.process(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
+  it('un control humano ya vencido no reemplaza nada', async () => {
+    const job = await seedTurn([HOLA]);
+    await humanTookOver('phone', `now() - interval '1 minute'`);
+
+    await processor.process(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
+
   it('un canal inexistente o inactivo es un error permanente, sin llamar a Meta', async () => {
     const job = await seedTurn([HOLA]);
 

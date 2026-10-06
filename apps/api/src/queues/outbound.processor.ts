@@ -11,6 +11,7 @@ import { ChannelResolver } from '../tenancy/channel-resolver.service';
 import { MetaSender, MetaSendError } from '../whatsapp/sender';
 import { runInTenant } from '../tenancy/tenant-context';
 import { canSendFreeform, requiresOpenWindow } from '../conversations/session-window';
+import { botRepliesSuperseded, type ControlState } from '../conversations/control';
 import type { OutboundJob } from './outbound.queue';
 
 /** Más que el timeout del envío (15 s) con margen: pasado esto, el intento murió. */
@@ -20,7 +21,8 @@ const CLAIM_STALE_SECONDS = 60;
  * Estados de un saliente: `pending` (lo produjo el flujo) → `sending`
  * (reclamado por un envío, con `claimed_at`) → `sent`. Salidas laterales:
  * `window_closed`, `failed` (rechazo permanente, canal inválido o reintentos
- * agotados) y `unconfirmed` (pudo o no llegar a Meta; no se reenvía a ciegas).
+ * agotados), `unconfirmed` (pudo o no llegar a Meta; no se reenvía a ciegas) y
+ * `superseded` (un humano tomó la conversación antes de que saliera).
  *
  * TODA transición es compare-and-set sobre el estado previo: dos ejecuciones
  * del mismo turno (un job atascado que BullMQ re-ejecuta mientras el original
@@ -50,10 +52,12 @@ export class OutboundProcessor {
       throw new UnrecoverableError(invalid ?? 'canal inválido');
     }
 
-    const { rows, lastInboundAt } = await runInTenant(this.ds, tenantId, async (m) => {
-      const rows: { id: string; status: string; in_flight: boolean; payload: OutboundContent }[] =
+    const { rows, control, lastInboundAt } = await runInTenant(this.ds, tenantId, async (m) => {
+      const rows: {
+        id: string; status: string; in_flight: boolean; payload: OutboundContent; origin: string;
+      }[] =
         await m.query(
-          `SELECT id, status, payload,
+          `SELECT id, status, payload, origin,
                   coalesce(claimed_at > now() - make_interval(secs => $2), false) AS in_flight
              FROM messages
             WHERE reply_to_id = $1 AND direction = 'out' AND status IN ('pending', 'sending')
@@ -61,8 +65,14 @@ export class OutboundProcessor {
           [turnId, CLAIM_STALE_SECONDS],
         );
       const [conv] = await m.query(
-        `SELECT last_inbound_at FROM conversations WHERE id = $1`, [job.conversationId]);
-      return { rows, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null };
+        `SELECT last_inbound_at, control, human_until, control_reason
+           FROM conversations WHERE id = $1`, [job.conversationId]);
+      const control: ControlState = {
+        control: conv?.control ?? 'bot',
+        humanUntil: conv?.human_until ? new Date(conv.human_until) : null,
+        reason: conv?.control_reason ?? null,
+      };
+      return { rows, control, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null };
     });
 
     let sent = 0;
@@ -73,6 +83,13 @@ export class OutboundProcessor {
         if (row.in_flight) throw new Error(`Envío en curso por otro intento (fila ${row.id})`);
         // Un intento la reclamó y murió: pudo haber llegado a Meta.
         await this.transition(tenantId, row.id, 'sending', 'unconfirmed');
+        continue;
+      }
+
+      // Spec §6.3: si un humano intervino después de que el bot produjera esto,
+      // ya sobra. Se mide AHORA, justo antes de enviar.
+      if (row.origin === 'bot' && botRepliesSuperseded(control, new Date())) {
+        await this.transition(tenantId, row.id, 'pending', 'superseded');
         continue;
       }
 
