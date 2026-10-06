@@ -12,6 +12,7 @@ import { startWorkers } from '../../src/queues/workers';
 import { INBOUND_QUEUE } from '../../src/queues/inbound.queue';
 import { OUTBOUND_QUEUE } from '../../src/queues/outbound.queue';
 import { SYNC_QUEUE } from '../../src/queues/sync.queue';
+import { REMINDERS_QUEUE } from '../../src/queues/reminders.queue';
 import { echoPayload, historyPayload } from '../whatsapp/fixtures/coexistence';
 import { DEMO_FLOW } from '../../src/cli/provision';
 import { resetDb, seedChannel, seedFlow, adminQuery, closeHelpers } from '../helpers';
@@ -83,7 +84,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication({ rawBody: true });
   await app.init();
-  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE].map(
+  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE, REMINDERS_QUEUE].map(
     (name) => new Queue(name, { connection: { url: process.env.REDIS_URL } }));
 });
 
@@ -97,7 +98,7 @@ beforeEach(async () => {
   await seedFlow(tenantId, DEMO_FLOW);
   sent = [];
   failNext = null;
-  workers = startWorkers(app, { concurrency: 10 });
+  workers = startWorkers(app, { concurrency: 10, scheduleReminders: false });
 });
 
 afterAll(async () => {

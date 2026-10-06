@@ -294,6 +294,20 @@ describe('OutboundProcessor', () => {
   });
 
 
+  it('un recordatorio sale fuera de la ventana y aunque el dueño esté atendiendo', async () => {
+    const job = await seedTurn([HOLA], `now() - interval '3 days'`);
+    const [row] = await adminQuery(`SELECT id FROM messages WHERE direction = 'out'`);
+    await adminQuery(`UPDATE messages SET origin = 'reminder', type = 'template',
+      payload = '{"kind":"template","name":"recordatorio_cita_24h","language":"es","params":[]}' WHERE id = $1`, [row.id]);
+    await humanTookOver('phone');
+
+    await processor.process({ tenantId: job.tenantId, channelId: job.channelId,
+                              conversationId: job.conversationId, to: job.to, messageId: row.id });
+
+    expect(sender.send.mock.calls[0][2]).toMatchObject({ kind: 'template' });
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
   it('un canal inexistente o inactivo es un error permanente, sin llamar a Meta', async () => {
     const job = await seedTurn([HOLA]);
 

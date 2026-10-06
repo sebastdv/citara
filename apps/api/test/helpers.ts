@@ -10,6 +10,7 @@ import { AppModule } from '../src/app.module';
 import { AvailabilityService } from '../src/scheduling/availability.service';
 import { BookingService } from '../src/scheduling/booking.service';
 import { ToolRegistry } from '../src/scheduling/tools/registry';
+import { RemindersService } from '../src/scheduling/reminders.service';
 
 let admin: DataSource | null = null;
 
@@ -31,7 +32,7 @@ async function adminDs(): Promise<DataSource> {
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE webhook_events, audit_log, messages, conversation_sessions, conversations,
+    TRUNCATE reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
              flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
@@ -129,9 +130,11 @@ export async function seedContact(tenantId: string, waId = '573001112233'): Prom
 }
 
 /** Los servicios de agenda, cableados como en AppModule. Sin estado ni conexiones. */
-export function buildScheduling() {
+export function buildScheduling(ds?: DataSource) {
   const availability = new AvailabilityService();
-  const booking = new BookingService(availability);
+  // El barrido necesita la DataSource; programar y cancelar usan el EntityManager del llamador.
+  const reminders = new RemindersService(ds as DataSource);
+  const booking = new BookingService(availability, reminders);
   const tools = new ToolRegistry(availability, booking);
-  return { availability, booking, tools };
+  return { availability, reminders, booking, tools };
 }

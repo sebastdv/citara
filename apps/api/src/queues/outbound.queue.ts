@@ -5,19 +5,25 @@ import type { OutboundContent } from '@citara/shared';
 export const OUTBOUND_QUEUE = 'outbound';
 
 /**
- * Un job por TURNO, no por mensaje: el procesador envía en orden los salientes
- * que el turno dejó en `messages` (`reply_to_id = turnId`, ordenados por
- * `seq`). El contenido no viaja en Redis: las filas son la fuente de verdad, y
- * así un job jamás apunta a contenido distinto del que quedó persistido.
+ * El job no lleva contenido: las filas de `messages` son la fuente de verdad
+ * (outbox), así un job jamás apunta a contenido distinto del persistido.
  */
-export interface OutboundJob {
+interface OutboundTarget {
   tenantId: string;
   channelId: string;
   conversationId: string;
-  /** id del mensaje ENTRANTE que produjo este turno. */
-  turnId: string;
   to: string;
 }
+
+/** Las respuestas de un turno: las filas con reply_to_id = turnId, en orden de seq. */
+export interface TurnOutboundJob extends OutboundTarget { turnId: string }
+
+/** Un envío suelto (un recordatorio): la fila con id = messageId. */
+export interface MessageOutboundJob extends OutboundTarget { messageId: string }
+
+export type OutboundJob = TurnOutboundJob | MessageOutboundJob;
+
+export const outboundJobId = (job: OutboundJob) => ('turnId' in job ? job.turnId : job.messageId);
 
 @Injectable()
 export class OutboundQueue implements OnModuleDestroy {
@@ -33,11 +39,9 @@ export class OutboundQueue implements OnModuleDestroy {
     },
   });
 
-  add(job: OutboundJob) {
-    // jobId = turnId (un uuid: BullMQ rechaza ids con `:`). Evita encolar dos
-    // veces el mismo turno; NO evita re-ejecutarlo. Eso lo garantiza el
-    // procesador reclamando cada fila antes de enviarla.
-    return this.queue.add('send-turn', job, { jobId: job.turnId });
+  add(job: OutboundJob, opts: { delay?: number } = {}) {
+    // jobId = el uuid del turno o del mensaje (BullMQ rechaza ids con `:`).
+    return this.queue.add('send-turn', job, { jobId: outboundJobId(job), delay: opts.delay });
   }
 
   constructor() {

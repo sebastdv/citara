@@ -3,6 +3,7 @@ import type { EntityManager } from 'typeorm';
 // Import de VALOR: BookingService es @Injectable() y Nest resuelve
 // AvailabilityService por el design:paramtype que emite el decorador.
 import { AvailabilityService } from './availability.service';
+import { RemindersService } from './reminders.service';
 import {
   NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError,
 } from './scheduling.errors';
@@ -28,7 +29,10 @@ type Row = Record<string, any>;
 
 @Injectable()
 export class BookingService {
-  constructor(private readonly availability: AvailabilityService) {}
+  constructor(
+    private readonly availability: AvailabilityService,
+    private readonly reminders: RemindersService,
+  ) {}
 
   async book(m: EntityManager, tenantId: string, input: BookInput): Promise<Appointment> {
     const verdict = await this.availability.check(m, tenantId, {
@@ -57,7 +61,9 @@ export class BookingService {
         [tenantId, input.resourceId, input.serviceId, input.contactId, input.conversationId ?? null,
          input.startsAt, endsAt, input.customerName, input.notes ?? null]);
       await m.query(`RELEASE SAVEPOINT reservar_cita`);
-      return toAppointment(row);
+      const cita = toAppointment(row);
+      await this.reminders.scheduleFor(m, tenantId, cita.id, cita.startsAt, input.now);
+      return cita;
     } catch (err) {
       await m.query(`ROLLBACK TO SAVEPOINT reservar_cita`);
       // La carrera consultar→reservar la resuelve el motor, no un if previo.
@@ -73,6 +79,7 @@ export class BookingService {
         WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
         RETURNING ${COLUMNS}`, [appointmentId, contactId])) as [Row[], number];
     if (!rows[0]) throw new NotFoundError('esa cita');
+    await this.reminders.cancelFor(m, appointmentId);
     return toAppointment(rows[0]);
   }
 

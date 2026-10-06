@@ -37,7 +37,9 @@ export class OutboundProcessor {
   ) {}
 
   async process(job: OutboundJob): Promise<{ sent: number }> {
-    const { tenantId, channelId, turnId, to } = job;
+    const { tenantId, channelId, to } = job;
+    // Qué filas son de este job: las de un turno, o un mensaje suelto.
+    const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
 
     // Sin default ni reintentos: un canal que no existe, quedó inactivo o es
     // de otro negocio no se arregla en el siguiente intento.
@@ -48,7 +50,7 @@ export class OutboundProcessor {
         ? `El canal ${channelId} no pertenece al tenant ${tenantId}`
         : null;
     if (invalid || !channel) {
-      await this.failPending(tenantId, turnId);
+      await this.failPending(job);
       throw new UnrecoverableError(invalid ?? 'canal inválido');
     }
 
@@ -60,9 +62,9 @@ export class OutboundProcessor {
           `SELECT id, status, payload, origin,
                   coalesce(claimed_at > now() - make_interval(secs => $2), false) AS in_flight
              FROM messages
-            WHERE reply_to_id = $1 AND direction = 'out' AND status IN ('pending', 'sending')
+            WHERE ${column} = $1 AND direction = 'out' AND status IN ('pending', 'sending')
             ORDER BY seq`,
-          [turnId, CLAIM_STALE_SECONDS],
+          [key, CLAIM_STALE_SECONDS],
         );
       const [conv] = await m.query(
         `SELECT last_inbound_at, control, human_until, control_reason
@@ -133,14 +135,14 @@ export class OutboundProcessor {
         if (kind === 'window') {
           // Manda el veredicto de Meta, no nuestro reloj; aplica al turno entero.
           await this.transition(tenantId, row.id, 'sending', 'window_closed');
-          await this.closePending(tenantId, turnId, 'window_closed');
+          await this.closePending(job, 'window_closed');
           return { sent };
         }
         if (kind === 'permanent') {
           // Lo que queda del turno correría la misma suerte (mismo token,
           // misma conversación): se cierra y BullMQ no gasta intentos.
           await this.transition(tenantId, row.id, 'sending', 'failed');
-          await this.failPending(tenantId, turnId);
+          await this.failPending(job);
           throw new UnrecoverableError((err as Error).message);
         }
         // Reintentable: Meta NO lo aceptó, se libera para el siguiente
@@ -159,7 +161,7 @@ export class OutboundProcessor {
 
   /** Al agotar los reintentos: lo que no salió queda como fallido, visible. */
   failTurn(job: OutboundJob) {
-    return this.failPending(job.tenantId, job.turnId);
+    return this.failPending(job);
   }
 
   /** `pending` → `sending` de forma atómica. Solo un intento gana la fila. */
@@ -204,13 +206,13 @@ export class OutboundProcessor {
     return affected > 0;
   }
 
-  private failPending(tenantId: string, turnId: string) {
-    return this.closePending(tenantId, turnId, 'failed');
+  private failPending(job: OutboundJob) {
+    return this.closePending(job, 'failed');
   }
 
-  private closePending(tenantId: string, turnId: string, to: 'failed' | 'window_closed') {
-    return runInTenant(this.ds, tenantId, (m) => m.query(
-      `UPDATE messages SET status = $2 WHERE reply_to_id = $1 AND status = 'pending'`,
-      [turnId, to]));
+  private closePending(job: OutboundJob, to: 'failed' | 'window_closed') {
+    const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
+    return runInTenant(this.ds, job.tenantId, (m) => m.query(
+      `UPDATE messages SET status = $2 WHERE ${column} = $1 AND status = 'pending'`, [key, to]));
   }
 }

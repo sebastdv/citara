@@ -11,6 +11,9 @@ import { EchoProcessor } from '../coexistence/echo.processor';
 import { HistoryProcessor } from '../coexistence/history.processor';
 import { ContactsSyncProcessor } from '../coexistence/contacts-sync.processor';
 import { AccountUpdateProcessor } from '../coexistence/account-update.processor';
+import { RemindersService } from '../scheduling/reminders.service';
+import { RemindersQueue, REMINDERS_QUEUE } from './reminders.queue';
+import { OutboundQueue } from './outbound.queue';
 import { OutboundProcessor } from './outbound.processor';
 import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
 
@@ -22,7 +25,7 @@ import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
  */
 export function startWorkers(
   ctx: INestApplicationContext,
-  opts: { concurrency?: number } = {},
+  opts: { concurrency?: number; scheduleReminders?: boolean } = {},
 ): { close: () => Promise<void> } {
   const connection = { url: process.env.REDIS_URL };
   const concurrency = opts.concurrency ?? Number(process.env.WORKER_CONCURRENCY ?? 10);
@@ -95,7 +98,22 @@ export function startWorkers(
   sync.on('failed', (job, err) => console.error(`[sync] job ${job?.id} falló: ${err.message}`));
   sync.on('error', (err) => console.error(`[sync] error del worker: ${err.message}`));
 
+  const reminders = ctx.get(RemindersService);
+  const outboundQueue = ctx.get(OutboundQueue);
+  // Concurrencia 1: un barrido a la vez. Si el encolado falla, el siguiente
+  // barrido re-encola los huérfanos (outbox).
+  const remindersWorker = new Worker(REMINDERS_QUEUE, async () => {
+    for (const { job, delay } of await reminders.sweep(new Date())) await outboundQueue.add(job, { delay });
+  }, { connection, concurrency: 1 });
+  remindersWorker.on('failed', (job, err) => console.error(`[reminders] job ${job?.id} falló: ${err.message}`));
+  remindersWorker.on('error', (err) => console.error(`[reminders] error del worker: ${err.message}`));
+  if (opts.scheduleReminders !== false) {
+    void ctx.get(RemindersQueue).schedule()
+      .catch((err: Error) => console.error(`[reminders] no se pudo programar el barrido: ${err.message}`));
+  }
+
   return {
-    close: async () => { await inbound.close(); await outbound.close(); await sync.close(); },
+    close: async () => { await inbound.close(); await outbound.close(); await sync.close();
+      await remindersWorker.close(); },
   };
 }

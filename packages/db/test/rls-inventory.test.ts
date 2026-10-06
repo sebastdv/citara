@@ -58,6 +58,7 @@ const PRESUPUESTO: Record<string, string[]> = {
   business_hours: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   time_off: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   appointments: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  reminders: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   // Exentas de RLS, y por eso lo más de solo-lectura posible.
   whatsapp_channels: ['SELECT'],
   webhook_events: ['SELECT', 'INSERT'],
