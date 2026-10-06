@@ -79,6 +79,11 @@ export async function setDefaultFlow(
   await m.query(
     `UPDATE flows SET is_default = false WHERE tenant_id = $1 AND NOT (key = $2 AND version = $3)`,
     [tenantId, flow.key, version]);
+  // Las sesiones a medias apuntan a pasos del flujo anterior: se cierran y el
+  // siguiente mensaje de cada contacto empieza el flujo nuevo desde el inicio.
+  await m.query(
+    `UPDATE conversation_sessions SET status = 'ended', updated_at = now()
+      WHERE tenant_id = $1 AND status <> 'ended'`, [tenantId]);
   const [row] = await m.query(
     `INSERT INTO flows (tenant_id, key, version, definition, is_active, is_default)
      VALUES ($1, $2, $3, $4, true, true)

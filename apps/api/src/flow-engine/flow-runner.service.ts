@@ -15,6 +15,8 @@ import { CLOCK, type Clock } from '../clock';
 import { messageTypeOf } from '../conversations/message-type';
 
 const MAX_TOOL_HOPS = 5;
+/** Una sesión quieta más que esto se da por abandonada. */
+const SESSION_TTL_HOURS = 2;
 import { runInTenant } from '../tenancy/tenant-context';
 import {
   giveControlToHuman, humanControlExpired, humanInControl, readControl, returnControlToBot,
@@ -136,15 +138,24 @@ export class FlowRunner {
     //
     // ORDER BY updated_at (no `id`, que es un UUID sin orden temporal).
     let [sessionRow] = await m.query(
-      `SELECT id, step_key, vars, status FROM conversation_sessions
+      `SELECT id, step_key, vars, status,
+              updated_at < now() - make_interval(hours => $2) AS stale
+         FROM conversation_sessions
         WHERE conversation_id = $1 AND status <> 'ended'
         ORDER BY updated_at DESC LIMIT 1`,
-      [conversationId],
+      [conversationId, SESSION_TTL_HOURS],
     );
 
-    // Aquí ya se sabe que manda el bot. Una sesión que quedó en 'handoff' es un
-    // residuo (el control ya volvió): se cierra para no silenciar al bot.
-    if (sessionRow?.status === 'handoff') {
+    // Aquí ya se sabe que manda el bot. Una sesión es un residuo, y se cierra
+    // para empezar de nuevo, si:
+    // - quedó en 'handoff' (el control ya volvió), y silenciaría al bot;
+    // - lleva más de SESSION_TTL_HOURS sin moverse: quien vuelve horas después
+    //   no debe caer en la pregunta donde quedó ni ver horarios ya pasados;
+    // - su paso ya no existe en el flujo (tenant:apply lo cambió): si no, cada
+    //   mensaje de ese contacto fallaría para siempre.
+    const residue = sessionRow &&
+      (sessionRow.status === 'handoff' || sessionRow.stale || !(sessionRow.step_key in flow.steps));
+    if (residue) {
       await m.query(
         `UPDATE conversation_sessions SET status = 'ended', updated_at = now() WHERE id = $1`,
         [sessionRow.id]);

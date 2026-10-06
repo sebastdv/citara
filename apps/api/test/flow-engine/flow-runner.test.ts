@@ -182,4 +182,28 @@ describe('FlowRunner', () => {
 
     expect(out.map((o) => o.kind)).toEqual(['text', 'buttons']);
   });
+
+  it('una sesión abandonada hace más de 2 horas vuelve a empezar', async () => {
+    // Quien vuelve horas después no debe caer en la pregunta donde quedó, ni
+    // ver una lista de horarios que ya pasaron.
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.T1', 'Hola');
+    await say('wamid.T2', 'agendar');        // queda en pide_nombre
+    await adminQuery(`UPDATE conversation_sessions SET updated_at = now() - interval '3 hours'`);
+
+    const out = await say('wamid.T3', 'Hola');
+
+    expect(out.map((o) => o.kind)).toEqual(['text', 'buttons']);
+  });
+
+  it('una sesión parada en un paso que ya no existe vuelve a empezar en vez de fallar para siempre', async () => {
+    // Pasa cuando tenant:apply cambia o renombra pasos del flujo.
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.S1', 'Hola');
+    await adminQuery(`UPDATE conversation_sessions SET step_key = 'paso_de_la_version_vieja'`);
+
+    const out = await say('wamid.S2', 'Hola');
+
+    expect(out.map((o) => o.kind)).toEqual(['text', 'buttons']);
+  });
 });

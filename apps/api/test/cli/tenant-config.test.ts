@@ -90,4 +90,22 @@ describe('applyTenantConfig', () => {
   it('falla si el negocio no existe', async () => {
     await expect(applyTenantConfig(admin, config({ tenant: 'no-existe' }))).rejects.toThrow(/no-existe/);
   });
+
+  it('cambiar el flujo cierra las conversaciones que estaban a medias', async () => {
+    const [ch] = await adminQuery(`SELECT id FROM whatsapp_channels`);
+    const contactId = await seedContact(tenantId);
+    const [conv] = await adminQuery(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id) VALUES ($1, $2, $3) RETURNING id`,
+      [tenantId, contactId, ch.id]);
+    await applyTenantConfig(admin, config());
+    const [flow] = await adminQuery(`SELECT id FROM flows WHERE is_default`);
+    await adminQuery(
+      `INSERT INTO conversation_sessions (tenant_id, conversation_id, flow_id, step_key, status)
+       VALUES ($1, $2, $3, 'elegir_franja', 'active')`, [tenantId, conv.id, flow.id]);
+
+    await applyTenantConfig(admin, config());
+
+    const [s] = await adminQuery(`SELECT status FROM conversation_sessions`);
+    expect(s.status).toBe('ended');
+  });
 });
