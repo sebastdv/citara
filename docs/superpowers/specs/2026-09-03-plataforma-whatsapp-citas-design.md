@@ -197,7 +197,7 @@ CREATE POLICY tenant_isolation ON appointments
   **`control`** (`bot` | `human`), **`human_until`**, **`control_reason`** (`phone` |
   `flow_handoff` | `operator` | `history`)
 - `messages`: `wamid` **único** (dedup), `direction` (`in` | `out`), **`origin`**
-  (`customer` | `bot` | `phone` | `operator` | `history`), tipo, cuerpo, payload JSONB,
+  (`customer` | `bot` | `phone` | `operator` | `history` | `reminder`), tipo, cuerpo, payload JSONB,
   estado, **`occurred_at`** (hora real según Meta), `reply_to_id` y `seq` (outbox, §7.1),
   `claimed_at`
 - `webhook_events`: auditoría e idempotencia de entrada
@@ -341,7 +341,9 @@ un humano que **intervino** (`control_reason` distinto de `flow_handoff`), los s
 `origin='bot'` pendientes pasan a `superseded` y no salen. Esto cubre la carrera en que el
 dueño contesta desde el celular en el mismo segundo en que el bot produjo su respuesta.
 Cuando el control lo dio el propio flujo, su mensaje de traspaso sí sale: se produjo en
-el mismo turno que pidió el traspaso. Los mensajes `origin='operator'` siempre salen.
+el mismo turno que pidió el traspaso. Los mensajes `origin='operator'` siempre salen, y
+también los `origin='reminder'`: un recordatorio es una plantilla informativa que el
+cliente espera aunque el dueño le haya escrito hace poco.
 
 ### 6.4 Diferencia entre modalidades
 
@@ -360,7 +362,8 @@ traspasos abiertos; sin notificaciones push en v1.
   avance del flujo.
 - **Tras el commit** se encola un job por turno, con `jobId` igual al id del entrante (un
   uuid; BullMQ rechaza ids con `:`). El job no lleva contenido: las filas son la fuente
-  de verdad.
+  de verdad. Los envíos sueltos (recordatorios) usan la misma cola con un job por
+  mensaje (`jobId` = id de la fila).
 - El procesador envía las filas del turno en orden. Cada transición es
   **compare-and-set** sobre el estado previo. Dos ejecuciones del mismo turno (un job
   atascado que se re-ejecuta) nunca se pisan.
