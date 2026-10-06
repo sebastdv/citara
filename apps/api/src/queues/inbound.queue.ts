@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
-import type { InboundMessage, InboundStatus, PhoneEcho } from '@citara/shared';
+import type { AccountUpdate, InboundMessage, InboundStatus, PhoneEcho } from '@citara/shared';
 
 export const INBOUND_QUEUE = 'inbound';
 
@@ -21,6 +21,11 @@ export interface EchoJob {
 export interface StatusJob {
   tenantId: string;
   status: InboundStatus;
+}
+
+/** Aviso de Meta sobre la cuenta. Llega por WABA, sin phone_number_id. */
+export interface AccountUpdateJob {
+  update: AccountUpdate;
 }
 
 /**

@@ -15,6 +15,7 @@ import { EchoProcessor } from './coexistence/echo.processor';
 import { StatusProcessor } from './queues/status.processor';
 import { HistoryProcessor } from './coexistence/history.processor';
 import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
+import { AccountUpdateProcessor } from './coexistence/account-update.processor';
 
 @Module({
   controllers: [WhatsappController],
@@ -94,6 +95,8 @@ import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
     // Consumidores de la cola `sync`; mismo motivo que EchoProcessor.
     HistoryProcessor,
     ContactsSyncProcessor,
+    // Mismo motivo que EchoProcessor: el worker lo resuelve con ctx.get(...).
+    AccountUpdateProcessor,
   ],
 })
 export class AppModule {}
