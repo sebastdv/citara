@@ -11,6 +11,7 @@ import { IngestService } from './whatsapp/ingest.service';
 import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
+import { EchoProcessor } from './coexistence/echo.processor';
 
 @Module({
   controllers: [WhatsappController],
@@ -81,6 +82,10 @@ import { FlowRunner } from './flow-engine/flow-runner.service';
     // UnknownElementException, invisible para los tests de este archivo
     // porque construyen FlowRunner a mano.
     FlowRunner,
+    // Lo resuelve apps/worker con ctx.get(...) al despachar la cola inbound.
+    // Sin esta entrada el worker arranca y revienta después con
+    // UnknownElementException, invisible para los tests que lo construyen a mano.
+    EchoProcessor,
   ],
 })
 export class AppModule {}

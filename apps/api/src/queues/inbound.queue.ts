@@ -1,6 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
-import type { InboundMessage } from '@citara/shared';
+import type { InboundMessage, PhoneEcho } from '@citara/shared';
 
 export const INBOUND_QUEUE = 'inbound';
 
@@ -8,6 +8,13 @@ export interface InboundJob {
   tenantId: string;
   channelId: string;
   message: InboundMessage;
+}
+
+/** Lo que el negocio envió desde su celular (coexistencia). */
+export interface EchoJob {
+  tenantId: string;
+  channelId: string;
+  echo: PhoneEcho;
 }
 
 /**
