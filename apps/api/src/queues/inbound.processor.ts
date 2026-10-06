@@ -36,6 +36,13 @@ export class InboundProcessor {
   ): Promise<{ conversationId: string; messageId: string; duplicate: boolean }> {
     const { tenantId, channelId, message } = job;
 
+    // El duplicado se reconoce ANTES de tocar contactos y conversaciones: si
+    // la conversación original se cerró entre tanto, el upsert de abajo
+    // abriría una nueva y vacía para un mensaje que no le pertenece.
+    const [seen] = await m.query(
+      `SELECT id, conversation_id FROM messages WHERE wamid = $1`, [message.wamid]);
+    if (seen) return { conversationId: seen.conversation_id, messageId: seen.id, duplicate: true };
+
     const [contact] = await m.query(
       `INSERT INTO contacts (tenant_id, wa_id, name)
        VALUES ($1, $2, $3)

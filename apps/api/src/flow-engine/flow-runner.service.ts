@@ -44,12 +44,13 @@ export class FlowRunner {
     const turn = await runInTenant(this.ds, job.tenantId, async (m) => {
       const inbound = await this.inbound.persist(m, job);
 
-      // El upsert de `persist` ya bloqueó la fila de la conversación; este
-      // FOR UPDATE lo deja explícito. Dos mensajes del mismo contacto se
-      // procesan uno detrás del otro, cada uno sobre el estado que dejó el
-      // anterior, aunque el worker corra con concurrencia.
-      await m.query(`SELECT id FROM conversations WHERE id = $1 FOR UPDATE`,
-                    [inbound.conversationId]);
+      // Serialización por conversación: el upsert de `conversations` dentro
+      // de `persist` toma el lock de la fila (FOR NO KEY UPDATE) hasta el
+      // commit, así que dos mensajes del mismo contacto se procesan uno detrás
+      // del otro. NO se añade un FOR UPDATE explícito: choca con el FOR KEY
+      // SHARE que toma cualquier INSERT con FK a la conversación desde otra
+      // conexión (p. ej. una herramienta que agenda una cita), y como ese
+      // ciclo pasa por Node, Postgres no lo ve como deadlock: el job se cuelga.
 
       if (inbound.duplicate) {
         // El turno ya se procesó (es atómico con el entrante). Si su salida no

@@ -77,4 +77,17 @@ describe('InboundProcessor', () => {
       m.query(`SELECT last_inbound_at FROM conversations`));
     expect(new Date(conv.last_inbound_at).toISOString()).toBe(nuevo.toISOString());
   });
+
+  it('una reentrega no crea una conversación nueva si la original ya se cerró', async () => {
+    // El duplicado se reconoce ANTES de tocar conversaciones: si no, el upsert
+    // abre una conversación vacía para un mensaje que pertenece a la cerrada.
+    await processor.process({ tenantId, channelId, message: msg({ wamid: 'wamid.CERR' }) });
+    await runInTenant(app, tenantId, (m) => m.query(`UPDATE conversations SET status = 'closed'`));
+
+    const again = await processor.process({ tenantId, channelId, message: msg({ wamid: 'wamid.CERR' }) });
+
+    expect(again.messageId).toBe('');
+    const convs = await runInTenant(app, tenantId, (m) => m.query(`SELECT status FROM conversations`));
+    expect(convs).toEqual([{ status: 'closed' }]);
+  });
 });
