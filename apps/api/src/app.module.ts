@@ -13,6 +13,8 @@ import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
 import { EchoProcessor } from './coexistence/echo.processor';
 import { StatusProcessor } from './queues/status.processor';
+import { HistoryProcessor } from './coexistence/history.processor';
+import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
 
 @Module({
   controllers: [WhatsappController],
@@ -89,6 +91,9 @@ import { StatusProcessor } from './queues/status.processor';
     EchoProcessor,
     // Mismo motivo que EchoProcessor: el worker lo resuelve con ctx.get(...).
     StatusProcessor,
+    // Consumidores de la cola `sync`; mismo motivo que EchoProcessor.
+    HistoryProcessor,
+    ContactsSyncProcessor,
   ],
 })
 export class AppModule {}
