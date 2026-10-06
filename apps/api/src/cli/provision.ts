@@ -1,4 +1,4 @@
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import type { FlowDefinition } from '@citara/shared';
 import type { EncryptionService } from '../crypto/encryption.service';
 
@@ -64,24 +64,28 @@ export async function provisionDevTenant(
         `El phone_number_id ${input.phoneNumberId} ya pertenece a otro negocio; no se reasigna`);
     }
 
-    // Un solo flujo activo por defecto por tenant (índice flows_one_default):
-    // se apagan los demás antes de encender este.
-    await m.query(
-      `UPDATE flows SET is_default = false
-        WHERE tenant_id = $1 AND NOT (key = $2 AND version = $3)`,
-      [tenant.id, input.flow.key, FLOW_VERSION],
-    );
-    const [flow] = await m.query(
-      `INSERT INTO flows (tenant_id, key, version, definition, is_active, is_default)
-       VALUES ($1, $2, $3, $4, true, true)
-       ON CONFLICT (tenant_id, key, version) DO UPDATE
-         SET definition = EXCLUDED.definition, is_active = true, is_default = true
-       RETURNING id`,
-      [tenant.id, input.flow.key, FLOW_VERSION, JSON.stringify(input.flow)],
-    );
-
-    return { tenantId: tenant.id, channelId: channel.id, flowId: flow.id };
+    const flowId = await setDefaultFlow(m, tenant.id, input.flow, FLOW_VERSION);
+    return { tenantId: tenant.id, channelId: channel.id, flowId };
   });
+}
+
+/**
+ * Deja `flow` como el flujo activo por defecto del negocio. Un solo flujo por
+ * defecto por tenant (índice flows_one_default): se apagan los demás antes.
+ */
+export async function setDefaultFlow(
+  m: EntityManager, tenantId: string, flow: FlowDefinition, version: string,
+): Promise<string> {
+  await m.query(
+    `UPDATE flows SET is_default = false WHERE tenant_id = $1 AND NOT (key = $2 AND version = $3)`,
+    [tenantId, flow.key, version]);
+  const [row] = await m.query(
+    `INSERT INTO flows (tenant_id, key, version, definition, is_active, is_default)
+     VALUES ($1, $2, $3, $4, true, true)
+     ON CONFLICT (tenant_id, key, version) DO UPDATE
+       SET definition = EXCLUDED.definition, is_active = true, is_default = true
+     RETURNING id`, [tenantId, flow.key, version, JSON.stringify(flow)]);
+  return row.id;
 }
 
 /** Flujo de demostración: ejercita message, choice, capture, end y handoff. */

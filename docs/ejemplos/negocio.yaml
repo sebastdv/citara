@@ -1,0 +1,27 @@
+# Configuración de un negocio. Aplicar con: pnpm build && pnpm tenant:apply docs/ejemplos/negocio.yaml
+# Es declarativa: lo que no está en el archivo se desactiva (servicios, recursos) o se
+# reemplaza (horarios, ausencias). Se puede aplicar las veces que haga falta.
+tenant: demo                  # slug del negocio (dev:provision crea 'demo')
+name: Salón Demo
+timezone: America/Bogota
+human_takeover_hours: 12      # cuánto se calla el bot cuando el dueño contesta desde su celular
+booking:
+  min_lead_minutes: 60        # anticipación mínima
+  horizon_days: 60            # hasta cuántos días adelante se agenda
+  slot_granularity_minutes: 15
+services:
+  - { key: corte, name: Corte de cabello, duration_min: 30, buffer_min: 10, price_cents: 3500000 }
+  - { key: tinte, name: Tinte, duration_min: 90, buffer_min: 15 }
+resources:
+  - { key: maria, name: María, services: [corte, tinte] }
+  - key: pedro
+    name: Pedro
+    services: [corte]
+    hours:                    # horario propio: reemplaza al del negocio para Pedro
+      - { days: [tue, wed, thu, fri, sat], start: '10:00', end: '19:00' }
+hours:
+  - { days: [mon, tue, wed, thu, fri], start: '09:00', end: '18:00' }
+  - { days: [sat], start: '09:00', end: '13:00' }
+time_off:
+  - { from: '2026-12-24T00:00:00-05:00', to: '2026-12-26T00:00:00-05:00', reason: Navidad }
+flow: agenda                  # el flujo de menús incorporado
