@@ -21,9 +21,22 @@ export class EchoProcessor {
     const { tenantId, channelId, echo } = job;
 
     return runInTenant(this.ds, tenantId, async (m) => {
-      // El duplicado se reconoce antes de tocar contactos y conversaciones.
-      const [seen] = await m.query(`SELECT id FROM messages WHERE wamid = $1`, [echo.wamid]);
-      if (seen) return { messageId: seen.id, duplicate: true };
+      // El duplicado se reconoce antes de tocar contactos y conversaciones. Aun
+      // así le da el control al dueño: el mismo mensaje pudo llegar primero por
+      // el historial (origin='history'), y descartarlo dejaría al bot hablando
+      // encima de quien acaba de escribir. Es idempotente: GREATEST no acorta
+      // el plazo y la bitácora solo registra cambios.
+      const [seen] = await m.query(
+        `SELECT id, conversation_id, direction FROM messages WHERE wamid = $1`, [echo.wamid]);
+      if (seen) {
+        if (seen.direction === 'out') {
+          await giveControlToHuman(m, {
+            tenantId, conversationId: seen.conversation_id,
+            from: echo.timestamp, reason: 'phone', actor: 'phone',
+          });
+        }
+        return { messageId: seen.id, duplicate: true };
+      }
 
       // DO UPDATE (no DO NOTHING) para que RETURNING devuelva el id existente.
       const [contact] = await m.query(

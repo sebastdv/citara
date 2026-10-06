@@ -107,4 +107,23 @@ describe('HistoryProcessor', () => {
 
     expect((await controlOf('573000000004')).control).toBe('human');
   });
+
+  it('si el historial trae primero el mensaje del dueño, el eco posterior igual le da el control', async () => {
+    // Orden inverso al de 'ya llegó por eco': la fase 0 (último día) importa el
+    // mensaje del dueño y el eco del mismo wamid llega después como duplicado.
+    const at = ago(0.1);
+    await run(chunkOf('573001112233', [{ wamid: 'wamid.INV', fromCustomer: false, text: 'Ya voy', at }], 0, 10));
+    await new EchoProcessor(ds).process({ tenantId, channelId, echo: {
+      wamid: 'wamid.INV', phoneNumberId: '106540', wabaId: '102290', to: '573001112233',
+      type: 'text', text: 'Ya voy', mediaId: null, timestamp: at, raw: {} } });
+
+    expect((await controlOf('573001112233')).control).toBe('human');
+  });
+
+  it('protege al dueño desde el primer chunk, sin esperar a que termine la importación', async () => {
+    // Un historial de 180 días puede tardar en completarse; mientras tanto el
+    // bot no debe hablarle encima a quien escribió hace un rato.
+    await run(chunkOf('573000000005', [{ wamid: 'wamid.P0', fromCustomer: false, text: 'Te espero', at: ago(1) }], 0, 5));
+    expect((await controlOf('573000000005')).control).toBe('human');
+  });
 });

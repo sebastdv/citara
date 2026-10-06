@@ -17,9 +17,9 @@ export function historyComplete(chunk: HistoryChunk): boolean {
 }
 
 /**
- * Importa el historial de un número en coexistencia (spec §5.3) y, al
- * terminar, aplica la regla del dueño activo (§6.2). Corre en la cola `sync`
- * con concurrencia 1: llega en tandas grandes y no debe retrasar a nadie.
+ * Importa el historial de un número en coexistencia (spec §5.3) y, en cada
+ * chunk, aplica la regla del dueño activo (§6.2). Corre en la cola `sync`:
+ * llega en tandas grandes y no debe retrasar a nadie.
  */
 @Injectable()
 export class HistoryProcessor {
@@ -76,15 +76,16 @@ export class HistoryProcessor {
         }
       }
 
-      // La regla corre en el chunk final Y en cualquiera que llegue después:
-      // con reentregas, el final puede procesarse antes que otros.
-      const [channel] = await m.query(
-        `SELECT history_sync FROM whatsapp_channels WHERE id = $1`, [channelId]);
-      if (historyComplete(chunk) || channel?.history_sync === 'done') {
+      // La regla corre en CADA chunk, no solo al terminar: un historial de 180
+      // días puede tardar, y el dueño que escribió hace un rato debe quedar
+      // protegido desde el primer chunk. Con datos parciales la regla solo
+      // puede quedarse corta, nunca pasarse, así que aplicarla antes es seguro;
+      // y cubre también los chunks que llegan después del final (reentregas).
+      await this.applyRecentHumanRule(m, tenantId, channelId);
+      if (historyComplete(chunk)) {
         await m.query(
           `UPDATE whatsapp_channels SET history_sync = 'done' WHERE id = $1 AND history_sync <> 'done'`,
           [channelId]);
-        await this.applyRecentHumanRule(m, tenantId, channelId);
       }
       return { imported };
     });

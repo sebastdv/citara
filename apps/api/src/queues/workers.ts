@@ -77,9 +77,10 @@ export function startWorkers(
   });
   outbound.on('error', (err) => console.error(`[outbound] error del worker: ${err.message}`));
 
-  // Concurrencia 1: el historial llega en tandas y la regla del dueño activo
-  // se aplica al terminar; procesar chunks en paralelo la correría con datos
-  // a medias. Nada aquí es urgente.
+  // Concurrencia 1: el historial llega en tandas grandes y nada aquí es
+  // urgente; un solo chunk a la vez acota cuántas conversaciones bloquea la
+  // importación al mismo tiempo. (La regla del dueño activo corre en cada
+  // chunk, así que no depende de este orden.)
   const sync = new Worker<HistoryJob | ContactsSyncJob>(
     SYNC_QUEUE,
     (job) => {
