@@ -1,8 +1,11 @@
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
 import { DataSource, type EntityManager } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { runInTenant } from '../../src/tenancy/tenant-context';
 import { RemindersService } from '../../src/scheduling/reminders.service';
+import { OutboundProcessor } from '../../src/queues/outbound.processor';
+import { ChannelResolver } from '../../src/tenancy/channel-resolver.service';
+import { EncryptionService } from '../../src/crypto/encryption.service';
 import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, adminQuery,
          closeHelpers, buildScheduling } from '../helpers';
 
@@ -90,16 +93,57 @@ describe('barrido', () => {
   });
 
   it('reparte los envíos de un canal a no más de 10 por segundo', async () => {
-    // 25 citas de 30 min: jueves 10, viernes 11 y lunes 14 (el 12 es sábado, sin horario).
+    // 25 citas FUTURAS (jueves 10, viernes 11, lunes 14) cuyo recordatorio de
+    // 24 h ya venció. El de 2 h se quita para contar uno por cita.
     for (let i = 0; i < 25; i++) {
       const otro = await seedContact(tenantId, `5730000000${String(i).padStart(2, '0')}`);
       const day = [10, 11, 14][Math.floor(i / 9)], slot = i % 9;
       await inTenant((m) => s.booking.book(m, tenantId, { serviceId, resourceId, contactId: otro,
         startsAt: new Date(Date.UTC(2026, 8, day, 14 + slot)), customerName: `C${i}`, now: AHORA }));
     }
-    const jobs = await s.reminders.sweep(new Date('2026-09-15T00:00:00Z')); // todo vencido
-    const delays = jobs.map((j) => j.delay);
-    expect(delays.filter((d) => d === 0)).toHaveLength(10);
-    expect(Math.max(...delays)).toBeGreaterThanOrEqual(4000); // 50 recordatorios → 5 segundos
+    await adminQuery(`DELETE FROM reminders WHERE kind = '2h'`);
+    await adminQuery(`UPDATE reminders SET send_at = '2026-09-09T11:00:00Z'`);
+    const jobs = await s.reminders.sweep(new Date('2026-09-09T12:00:00Z'));
+    const delays = jobs.map((j) => j.delay).sort((a, b) => a - b);
+    expect(delays).toEqual([...Array(10).fill(0), ...Array(10).fill(1000), ...Array(5).fill(2000)]);
+  });
+
+  it('no envía recordatorios de una cita que ya pasó', async () => {
+    // Canal caído, negocio suspendido o worker detenido: al volver, lo vencido
+    // de citas ya pasadas no debe salir.
+    const cita = await agendar();
+    expect(await s.reminders.sweep(new Date('2026-09-10T16:00:00Z'))).toEqual([]);
+    expect((await reminders(cita.id)).map((r: { status: string }) => r.status)).toEqual(['cancelled', 'cancelled']);
+  });
+
+  it('a menos de 2 h de la cita sale solo el de 2 h, no también el de 24 h atrasado', async () => {
+    const cita = await agendar();
+    const jobs = await s.reminders.sweep(new Date('2026-09-10T13:30:00Z'));
+    expect(jobs).toHaveLength(1);
+    const [msg] = await adminQuery(`SELECT payload FROM messages WHERE origin = 'reminder'`);
+    expect(msg.payload.name).toBe('recordatorio_cita_2h');
+    expect((await reminders(cita.id)).map((r: { status: string }) => r.status)).toEqual(['cancelled', 'queued']);
+  });
+
+  it('cancelar después del barrido retira también el recordatorio ya encolado', async () => {
+    const cita = await agendar();
+    await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    await inTenant((m) => s.booking.cancel(m, cita.id, contactId));
+    const [msg] = await adminQuery(`SELECT status FROM messages WHERE origin = 'reminder'`);
+    expect(msg.status).toBe('superseded');
+  });
+
+  it('el envío no saca un recordatorio cuya cita ya no está confirmada', async () => {
+    // Aunque algo cambie la cita sin pasar por cancelFor, el reclamo lo frena.
+    const cita = await agendar();
+    const [{ job }] = await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    await adminQuery(`UPDATE appointments SET status = 'cancelled' WHERE id = $1`, [cita.id]);
+    const enc = new EncryptionService(process.env.DB_ENCRYPTION_KEY!);
+    await enc.ready();
+    const send = vi.fn();
+    await new OutboundProcessor(app, new ChannelResolver(app, enc), { send } as never).process(job);
+    expect(send).not.toHaveBeenCalled();
+    const [msg] = await adminQuery(`SELECT status FROM messages WHERE origin = 'reminder'`);
+    expect(msg.status).toBe('superseded');
   });
 });

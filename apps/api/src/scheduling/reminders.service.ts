@@ -14,6 +14,8 @@ const OFFSETS = [{ kind: '24h', minutes: 24 * 60 }, { kind: '2h', minutes: 2 * 6
 const PER_CHANNEL_PER_SECOND = 10;
 /** Un recordatorio pendiente más viejo que esto se considera huérfano del encolado. */
 const ORPHAN_AFTER = `2 minutes`;
+/** Con la cita a 2 h o menos, el de 24 h sobra: sale el de 2 h. */
+const STALE_24H_WITHIN_MS = 2 * 60 * 60_000;
 
 @Injectable()
 export class RemindersService {
@@ -29,9 +31,26 @@ export class RemindersService {
     }
   }
 
+  /** La cita se canceló: ni lo programado ni lo ya encolado debe salir. */
   async cancelFor(m: EntityManager, appointmentId: string) {
+    await this.retireQueued(m, appointmentId);
     await m.query(
-      `UPDATE reminders SET status = 'cancelled' WHERE appointment_id = $1 AND status = 'pending'`, [appointmentId]);
+      `UPDATE reminders SET status = 'cancelled'
+        WHERE appointment_id = $1 AND status IN ('pending', 'queued')`, [appointmentId]);
+  }
+
+  /**
+   * Un recordatorio ya convertido en mensaje puede estar esperando en la cola
+   * (backoff de Meta, un barrido concurrente): su mensaje `pending` pasa a
+   * `superseded` para que el envío no lo saque con la hora vieja.
+   */
+  private async retireQueued(m: EntityManager, appointmentId: string) {
+    await m.query(
+      `UPDATE messages SET status = 'superseded'
+        WHERE status = 'pending'
+          AND id IN (SELECT message_id FROM reminders
+                      WHERE appointment_id = $1 AND status = 'queued' AND message_id IS NOT NULL)`,
+      [appointmentId]);
   }
 
   /**
@@ -77,7 +96,13 @@ export class RemindersService {
         FOR UPDATE OF r SKIP LOCKED`, [now]);
 
     for (const row of due) {
-      if (row.appointment_status !== 'confirmed') {
+      const startsAt = new Date(row.starts_at).getTime();
+      // No sale: la cita ya no está, ya pasó (canal caído, negocio suspendido,
+      // worker detenido), o es el de 24 h atrasado cuando ya toca el de 2 h.
+      const stale = row.appointment_status !== 'confirmed'
+        || startsAt <= now.getTime()
+        || (row.kind === '24h' && startsAt - now.getTime() <= STALE_24H_WITHIN_MS);
+      if (stale) {
         await m.query(`UPDATE reminders SET status = 'cancelled' WHERE id = $1`, [row.id]);
         continue;
       }

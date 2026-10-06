@@ -119,6 +119,13 @@ export class OutboundProcessor {
           await this.transition(tenantId, row.id, 'pending', 'superseded');
           continue;
         }
+      } else if (row.origin === 'reminder') {
+        // Un recordatorio solo sale si su cita sigue confirmada: pudo
+        // cancelarse o moverse mientras el job esperaba en la cola.
+        if (!(await this.claimReminder(tenantId, row.id))) {
+          await this.transition(tenantId, row.id, 'pending', 'superseded');
+          continue;
+        }
       } else if (!(await this.claim(tenantId, row.id))) {
         continue; // otro intento la ganó
       }
@@ -184,6 +191,16 @@ export class OutboundProcessor {
                  WHERE c.id = messages.conversation_id
                    AND c.control = 'human' AND c.human_until > now()
                    AND c.control_reason IS DISTINCT FROM 'flow_handoff')`,
+      [id]))) as [unknown[], number];
+    return affected > 0;
+  }
+
+  private async claimReminder(tenantId: string, id: string): Promise<boolean> {
+    const [, affected] = (await runInTenant(this.ds, tenantId, (m) => m.query(
+      `UPDATE messages SET status = 'sending', claimed_at = now()
+        WHERE id = $1 AND status = 'pending'
+          AND EXISTS (SELECT 1 FROM reminders r JOIN appointments a ON a.id = r.appointment_id
+                       WHERE r.message_id = messages.id AND a.status = 'confirmed')`,
       [id]))) as [unknown[], number];
     return affected > 0;
   }

@@ -9,7 +9,7 @@ import { EncryptionService } from '../../src/crypto/encryption.service';
 import { OutboundProcessor } from '../../src/queues/outbound.processor';
 import type { OutboundJob } from '../../src/queues/outbound.queue';
 import { MetaSendError } from '../../src/whatsapp/sender';
-import { resetDb, seedChannel, adminQuery } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, adminQuery } from '../helpers';
 
 let app: DataSource;
 let channels: ChannelResolver;
@@ -300,6 +300,16 @@ describe('OutboundProcessor', () => {
     await adminQuery(`UPDATE messages SET origin = 'reminder', type = 'template',
       payload = '{"kind":"template","name":"recordatorio_cita_24h","language":"es","params":[]}' WHERE id = $1`, [row.id]);
     await humanTookOver('phone');
+    // Un recordatorio real tiene su cita confirmada detrás (el reclamo lo exige).
+    const { serviceId, resourceId } = await seedCatalog(tenantId);
+    const [contact] = await adminQuery(`SELECT id FROM contacts`);
+    const [appt] = await adminQuery(
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at)
+       VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 day 30 minutes') RETURNING id`,
+      [tenantId, resourceId, serviceId, contact.id]);
+    await adminQuery(
+      `INSERT INTO reminders (tenant_id, appointment_id, kind, send_at, status, message_id)
+       VALUES ($1, $2, '24h', now(), 'queued', $3)`, [tenantId, appt.id, row.id]);
 
     await processor.process({ tenantId: job.tenantId, channelId: job.channelId,
                               conversationId: job.conversationId, to: job.to, messageId: row.id });
