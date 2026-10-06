@@ -109,7 +109,8 @@ function collectEchoes(out: NormalizedWebhook, value: any, wabaId: string, phone
       wabaId,
       to: waId(m?.to),
       ...parseContent(m),
-      timestamp: toDate(m?.timestamp ?? '0'),
+      // Sin timestamp no es "de 1970": es actividad del dueño que acaba de llegar.
+      timestamp: m?.timestamp ? toDate(m.timestamp) : new Date(),
       raw: m,
     });
   }

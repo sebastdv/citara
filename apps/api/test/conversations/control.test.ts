@@ -121,4 +121,17 @@ describe('regla de control (base de datos)', () => {
     await expect(runInTenant(ds, tenantId, (m) => m.query(`DELETE FROM audit_log`)))
       .rejects.toThrow(/permission denied/);
   });
+
+  it('una intervención cuyo plazo ya venció no toca el control ni la bitácora', async () => {
+    // Un eco reentregado por Meta tras una caída de más de N horas: dejaba
+    // control='human' con un plazo vencido, y el siguiente mensaje del cliente
+    // lo "devolvía" al bot cerrándole la sesión a medias.
+    const viejo = new Date(Date.now() - 13 * 3_600_000);
+    await runInTenant(ds, tenantId, (m) => giveControlToHuman(m, {
+      tenantId, conversationId, from: viejo, reason: 'phone', actor: 'phone' }));
+
+    const c = await control();
+    expect([c.control, c.humanUntil, c.reason]).toEqual(['bot', null, null]);
+    expect(await audit()).toEqual([]);
+  });
 });

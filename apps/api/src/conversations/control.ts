@@ -63,15 +63,21 @@ export async function giveControlToHuman(
 
   // GREATEST ignora NULL: la primera intervención fija el plazo y las
   // siguientes solo lo alargan. Un eco viejo procesado tarde no lo acorta.
-  await m.query(
+  // Y si su plazo YA venció (reentrega tras una caída, cola atrasada) no toca
+  // nada: dejar control='human' vencido haría que el siguiente mensaje del
+  // cliente lo "devolviera" al bot cerrándole la sesión a medias, y la
+  // bitácora registraría un traspaso que nadie hizo. Con UPDATE, TypeORM
+  // devuelve [filas, conteo].
+  const [, affected] = (await m.query(
     `UPDATE conversations
         SET control = 'human',
             human_until = GREATEST(human_until, $2::timestamptz + make_interval(hours => $3::int)),
             control_reason = $4,
             updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1 AND $2::timestamptz + make_interval(hours => $3::int) > now()`,
     [a.conversationId, a.from, tenant.hours, a.reason],
-  );
+  )) as [unknown[], number];
+  if (affected === 0) return;
 
   // Se audita el CAMBIO de quién habla, no cada eco que alarga el plazo.
   if (!humanInControl(before, new Date())) {

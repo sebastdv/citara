@@ -147,6 +147,14 @@ describe('normalizeWebhook — coexistencia', () => {
     expect(n.echoes[0].to).toBe('573001112233');
   });
 
+  it('un eco sin timestamp se toma como recién llegado, no como de 1970', () => {
+    const p = echoPayload({ wamid: 'wamid.ET', to: '573001112233' }) as any;
+    delete p.entry[0].changes[0].value.message_echoes[0].timestamp;
+    const before = Date.now();
+    const at = normalizeWebhook(p).echoes[0].timestamp.getTime();
+    expect(at).toBeGreaterThanOrEqual(before - 1000);
+  });
+
   it('normaliza un chunk de historial con sus hilos y fase', () => {
     const at = new Date('2026-10-05T10:00:00Z');
     const n = normalizeWebhook(historyPayload({
