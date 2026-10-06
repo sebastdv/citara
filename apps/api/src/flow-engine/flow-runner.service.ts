@@ -12,6 +12,7 @@ import type { FlowStep } from '@citara/shared';
 import { advance, interpolate } from './executor';
 import { ToolRegistry } from '../scheduling/tools/registry';
 import { CLOCK, type Clock } from '../clock';
+import { messageTypeOf } from '../conversations/message-type';
 
 const MAX_TOOL_HOPS = 5;
 import { runInTenant } from '../tenancy/tenant-context';
@@ -203,12 +204,12 @@ export class FlowRunner {
       // `type` con el MISMO vocabulario que el entrante (el de Meta): botones
       // y lista son las dos formas de un mensaje interactivo. El `kind` fino
       // viaja en `payload`, que además es lo que el envío manda tal cual.
-      const type = content.kind === 'text' ? 'text' : 'interactive';
+      const type = messageTypeOf(content);
       await m.query(
         `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload,
                                status, reply_to_id, seq)
          VALUES ($1, $2, 'out', 'bot', $3, $4, $5, 'pending', $6, $7)`,
-        [job.tenantId, conversationId, type, content.body, JSON.stringify(content),
+        [job.tenantId, conversationId, type, 'body' in content ? content.body : null, JSON.stringify(content),
          inboundId, seq],
       );
     }

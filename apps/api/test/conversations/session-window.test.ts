@@ -34,4 +34,8 @@ describe('requiresOpenWindow', () => {
     expect(requiresOpenWindow({ kind: 'buttons', body: 'x', buttons: [] })).toBe(true);
     expect(requiresOpenWindow({ kind: 'list', body: 'x', button: 'b', sections: [] })).toBe(true);
   });
+
+  it('una plantilla puede salir fuera de la ventana: para eso existen', () => {
+    expect(requiresOpenWindow({ kind: 'template', name: 'x', language: 'es', params: [] })).toBe(false);
+  });
 });

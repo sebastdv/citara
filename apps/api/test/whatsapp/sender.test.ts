@@ -144,4 +144,17 @@ describe('MetaSender', () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
+
+  it('arma una plantilla con sus parámetros de cuerpo', async () => {
+    await sender.send(channel, '573001112233', {
+      kind: 'template', name: 'recordatorio_cita_24h', language: 'es', params: ['Ana', 'jueves 10:00', 'Corte'] });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: 'whatsapp', recipient_type: 'individual', to: '573001112233',
+      type: 'template',
+      template: { name: 'recordatorio_cita_24h', language: { code: 'es' },
+        components: [{ type: 'body', parameters: [
+          { type: 'text', text: 'Ana' }, { type: 'text', text: 'jueves 10:00' }, { type: 'text', text: 'Corte' }] }] },
+    });
+  });
 });

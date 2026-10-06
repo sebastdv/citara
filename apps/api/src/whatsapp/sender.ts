@@ -114,6 +114,20 @@ export class MetaSender {
       return { ...base, type: 'text', text: { body: content.body, preview_url: false } };
     }
 
+    if (content.kind === 'template') {
+      return {
+        ...base,
+        type: 'template',
+        template: {
+          name: content.name,
+          language: { code: content.language },
+          components: content.params.length
+            ? [{ type: 'body', parameters: content.params.map((text) => ({ type: 'text', text })) }]
+            : [],
+        },
+      };
+    }
+
     if (content.kind === 'buttons') {
       if (content.buttons.length > MAX_BUTTONS) {
         // Degradación: texto numerado. El normalizer del inbound recibirá el
