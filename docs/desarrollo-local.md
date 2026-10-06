@@ -84,6 +84,35 @@ En la app de Meta → WhatsApp → Configuración:
 
 Escribe "Hola" al número de prueba desde tu WhatsApp: debes recibir el saludo y el menú.
 
+## Coexistencia (Fase 1.5)
+
+Con un número conectado en coexistencia (requiere el alta de la Fase 3), en la app de
+Meta → WhatsApp → Configuración, además de `messages` se suscriben estos campos:
+`smb_message_echoes`, `history`, `smb_app_state_sync` y `account_update`.
+
+Qué hace el sistema con cada uno:
+
+| Campo | Efecto |
+|---|---|
+| `smb_message_echoes` | Lo que el dueño escribe desde su celular se guarda (`origin='phone'`) y el bot se calla en esa conversación durante `tenants.human_takeover_hours` (12 por defecto); cada mensaje del dueño alarga el plazo |
+| `history` | Importa hasta 180 días (`origin='history'`); al terminar, las conversaciones donde el dueño escribió dentro del plazo quedan en sus manos |
+| `smb_app_state_sync` | Guarda en `contacts.saved_name` el nombre con que el negocio tiene al cliente |
+| `account_update` | Una desconexión deja el canal en `disconnected`: lo que llegue se guarda, el bot no responde y no se envía nada |
+
+Para ver quién manda en cada conversación y por qué:
+
+```bash
+docker compose exec postgres psql -U postgres -d citara -c "select c.id, c.control, c.human_until, c.control_reason from conversations c"
+```
+
+```bash
+docker compose exec postgres psql -U postgres -d citara -c "select created_at, actor, action, details from audit_log order by created_at desc limit 20"
+```
+
+Al conectar el primer número real, **grabar los payloads de cada campo** y reemplazar los
+ejemplos de `apps/api/test/whatsapp/fixtures/coexistence.ts`; revisar las constantes
+marcadas `VERIFICAR` (fases del historial, rechazo a compartir, eventos de desconexión).
+
 ## Qué verificar (criterios de salida de la Fase 1)
 
 | Criterio | Cómo comprobarlo |
@@ -132,8 +161,6 @@ otras con `TEST_DATABASE_URL`, `TEST_DATABASE_ADMIN_URL` y `TEST_REDIS_URL`.
 
 Anotadas en la revisión de cierre; ninguna impide la prueba con un número real.
 
-- Los avisos de estado de Meta (`statuses`: entregado, leído, fallido) se aceptan y se
-  descartan; `messages.status` no pasa de `sent`.
 - El orden entre **turnos** distintos no está garantizado (dentro de un turno, sí).
 - Las sesiones no caducan: quien vuelve días después sigue en el paso donde quedó, y un
   botón viejo pulsado durante una captura de texto se acepta como dato.
@@ -142,5 +169,3 @@ Anotadas en la revisión de cierre; ninguna impide la prueba con un número real
 - Las listas no recortan títulos de fila a 24 caracteres ni limitan a 10 filas.
 - Al arrancar no se valida el entorno: sin `META_APP_SECRET` cada webhook da 500.
 - Los jobs fallidos se conservan en Redis sin límite (contienen el teléfono del cliente).
-- No hay coexistencia con la app de WhatsApp Business: si el negocio responde desde el
-  celular, el bot no se entera. Se diseña aparte, antes de la Fase 2.

@@ -11,6 +11,8 @@ import { MetaSender } from '../../src/whatsapp/sender';
 import { startWorkers } from '../../src/queues/workers';
 import { INBOUND_QUEUE } from '../../src/queues/inbound.queue';
 import { OUTBOUND_QUEUE } from '../../src/queues/outbound.queue';
+import { SYNC_QUEUE } from '../../src/queues/sync.queue';
+import { echoPayload, historyPayload } from '../whatsapp/fixtures/coexistence';
 import { DEMO_FLOW } from '../../src/cli/provision';
 import { resetDb, seedChannel, seedFlow, adminQuery, closeHelpers } from '../helpers';
 
@@ -81,7 +83,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication({ rawBody: true });
   await app.init();
-  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE].map(
+  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE].map(
     (name) => new Queue(name, { connection: { url: process.env.REDIS_URL } }));
 });
 
@@ -164,5 +166,44 @@ describe('pipeline real webhook → worker → Meta', () => {
     const [{ turnos }] = await adminQuery(
       `SELECT count(DISTINCT reply_to_id)::int AS turnos FROM messages WHERE direction = 'out'`);
     expect(turnos).toBe(2);
+  });
+});
+
+describe('pipeline real con coexistencia', () => {
+  it('después de que el dueño contesta desde el celular, el bot no le habla encima', async () => {
+    // Un minuto antes: Meta trae segundos, y empatar con el mensaje del cliente
+    // dejaría el orden por occurred_at al azar.
+    await post(echoPayload({ wamid: 'wamid.PE1', to: '573001112233', text: 'Hola Ana, ya te atiendo',
+                             at: new Date(Date.now() - 60_000) }));
+    await quiesce();
+    await post(webhook('wamid.PE2', '¿A qué hora puedo ir?'));
+    await quiesce();
+
+    expect(sent).toEqual([]);
+    const rows = await adminQuery(`SELECT origin FROM messages ORDER BY occurred_at`);
+    expect(rows.map((r: { origin: string }) => r.origin)).toEqual(['phone', 'customer']);
+  });
+
+  it('cuando vence el plazo del dueño, el bot vuelve a atender', async () => {
+    await post(echoPayload({ wamid: 'wamid.PV1', to: '573001112233' }));
+    await quiesce();
+    await adminQuery(`UPDATE conversations SET human_until = now() - interval '1 minute'`);
+    await post(webhook('wamid.PV2', 'Hola'));
+    await quiesce();
+
+    expect(sent.map((s) => s.body)).toEqual([SALUDO, MENU]);
+  });
+
+  it('al conectar, una conversación donde el dueño estuvo activo queda en sus manos', async () => {
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000);
+    await post(historyPayload({ customer: '573001112233', lines: [
+      { wamid: 'wamid.PH1', fromCustomer: true, text: '¿Me guardas el jueves?', at: ago(2) },
+      { wamid: 'wamid.PH2', fromCustomer: false, text: 'Claro, a las 4', at: ago(1) },
+    ] }));
+    await quiesce();
+    await post(webhook('wamid.PH3', 'Perfecto, gracias'));
+    await quiesce();
+
+    expect(sent).toEqual([]);
   });
 });
