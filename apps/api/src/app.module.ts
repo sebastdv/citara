@@ -12,6 +12,7 @@ import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
 import { EchoProcessor } from './coexistence/echo.processor';
+import { StatusProcessor } from './queues/status.processor';
 
 @Module({
   controllers: [WhatsappController],
@@ -86,6 +87,8 @@ import { EchoProcessor } from './coexistence/echo.processor';
     // Sin esta entrada el worker arranca y revienta después con
     // UnknownElementException, invisible para los tests que lo construyen a mano.
     EchoProcessor,
+    // Mismo motivo que EchoProcessor: el worker lo resuelve con ctx.get(...).
+    StatusProcessor,
   ],
 })
 export class AppModule {}
