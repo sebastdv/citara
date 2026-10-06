@@ -52,10 +52,14 @@ export class IngestService {
         [msg.wamid, channel.tenantId, JSON.stringify(msg.raw)],
       );
 
-      if (inserted.length === 0) { duplicates++; continue; }
-
+      // También ante duplicado se encola: si la vez anterior falló Redis justo
+      // después de este INSERT, la reentrega de Meta es la única oportunidad
+      // de que el mensaje se procese. Es seguro: el jobId es el wamid (BullMQ
+      // no encola dos veces el mismo id) y, si el job ya se completó, el
+      // worker ve el entrante como ya procesado y no rehace el turno.
       await this.queue.add({ tenantId: channel.tenantId, channelId: channel.channelId, message: msg });
-      enqueued++;
+      if (inserted.length === 0) duplicates++;
+      else enqueued++;
     }
 
     return { enqueued, duplicates };
