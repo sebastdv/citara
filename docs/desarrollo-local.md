@@ -55,6 +55,27 @@ pnpm dev:provision
 a mover a otro negocio un `phone_number_id` que ya tiene dueño. El flujo que deja activo
 es el de demostración (`apps/api/src/cli/provision.ts`).
 
+### Cargar la agenda del negocio
+
+Servicios, recursos, horarios, ausencias, reglas de reserva y flujo viven en un archivo YAML
+por negocio (ver `docs/ejemplos/negocio.yaml`). Es declarativo e idempotente: se aplica las
+veces que haga falta, y lo que se quita del archivo se desactiva o se reemplaza.
+
+```bash
+pnpm tenant:apply docs/ejemplos/negocio.yaml
+```
+
+Con `flow: agenda` el negocio queda con el flujo de menús: agendar, ver mis citas y hablar
+con alguien.
+
+### Recordatorios
+
+El worker barre cada minuto los recordatorios vencidos (24 h y 2 h antes de cada cita) y los
+envía como plantilla. Antes de operar hay que **enviar a aprobación de Meta** las plantillas
+`recordatorio_cita_24h` y `recordatorio_cita_2h` (categoría UTILITY, idioma `es`), con tres
+parámetros de cuerpo en este orden: nombre del cliente, fecha y hora, servicio. Sin plantilla
+aprobada, Meta rechaza el envío y el mensaje queda `failed`.
+
 ## 3. Arrancar los dos procesos
 
 En dos terminales distintas: son procesos separados a propósito, y el worker puede
@@ -142,6 +163,9 @@ aceptó y devolvió `wamid`). Salidas laterales:
 - `unconfirmed`: pudo llegar o no — un timeout, una conexión cortada después de enviar,
   un 200 sin `wamid`, o un intento que reclamó la fila y murió. No se reenvía a ciegas
   para no duplicarle el mensaje al usuario.
+
+Los recordatorios (`origin='reminder'`) salen aunque el dueño esté atendiendo: no quedan
+`superseded`.
 
 Los límites de tasa de Meta (que llegan con HTTP 400) y los 5xx se reintentan; la lista
 de códigos reintentables está en `apps/api/src/whatsapp/sender.ts` y conviene
