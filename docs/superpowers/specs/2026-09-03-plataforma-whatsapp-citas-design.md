@@ -337,9 +337,11 @@ atiende a todos desde el principio.
 ### 6.3 Al enviar
 
 `OutboundProcessor` revisa el **control efectivo justo antes de enviar**. Si ahora manda
-el humano, los salientes `origin='bot'` pendientes pasan a `superseded` y no salen. Esto
-cubre la carrera en que el dueño contesta desde el celular en el mismo segundo en que el
-bot produjo su respuesta. Los mensajes `origin='operator'` sí salen.
+un humano que **intervino** (`control_reason` distinto de `flow_handoff`), los salientes
+`origin='bot'` pendientes pasan a `superseded` y no salen. Esto cubre la carrera en que el
+dueño contesta desde el celular en el mismo segundo en que el bot produjo su respuesta.
+Cuando el control lo dio el propio flujo, su mensaje de traspaso sí sale: se produjo en
+el mismo turno que pidió el traspaso. Los mensajes `origin='operator'` siempre salen.
 
 ### 6.4 Diferencia entre modalidades
 
