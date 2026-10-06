@@ -86,24 +86,57 @@ describe('MetaSender', () => {
     expect((err as Error).message).not.toContain('TOKEN');
   });
 
-  it('marca un 4xx como permanente: reintentarlo solo repite el rechazo', async () => {
-    fetchMock.mockResolvedValue({ ok: false, status: 400,
-      json: async () => ({ error: { message: 'Re-engagement message', code: 131047 } }) });
+  // Cuatro desenlaces de un rechazo, porque cada uno pide algo distinto:
+  // permanent (no reintentar), retry (reintentar, Meta NO lo aceptó), window
+  // (fuera de las 24 h) y ambiguous (pudo haber salido: no reenviar a ciegas).
+  const rejectWith = (status: number, code?: number) =>
+    fetchMock.mockResolvedValue({ ok: false, status,
+      json: async () => (code ? { error: { message: 'x', code } } : {}) });
+  const kindOf = async () =>
+    (await sender.send(channel, '573001112233', { kind: 'text', body: 'Hola' })
+      .catch((e) => e)) as MetaSendError;
 
-    const err = await sender.send(channel, '573001112233', { kind: 'text', body: 'Hola' })
-      .catch((e) => e);
+  it('marca un 4xx como permanente: reintentarlo solo repite el rechazo', async () => {
+    rejectWith(400, 100);
+    const err = await kindOf();
     expect(err).toBeInstanceOf(MetaSendError);
-    expect(err.permanent).toBe(true);
+    expect(err.kind).toBe('permanent');
     expect(err.status).toBe(400);
   });
 
-  it('marca 429 y 5xx como transitorios', async () => {
+  it('marca 429 y 5xx como reintentables', async () => {
     for (const status of [429, 500, 503]) {
-      fetchMock.mockResolvedValue({ ok: false, status, json: async () => ({}) });
-      const err = await sender.send(channel, '573001112233', { kind: 'text', body: 'Hola' })
-        .catch((e) => e);
-      expect(err.permanent).toBe(false);
+      rejectWith(status);
+      expect((await kindOf()).kind).toBe('retry');
     }
+  });
+
+  it('clasifica por código de Meta: los límites de tasa llegan con 400 y son reintentables', async () => {
+    for (const code of [4, 80007, 130429, 131056]) {
+      rejectWith(400, code);
+      expect((await kindOf()).kind).toBe('retry');
+    }
+  });
+
+  it('reconoce el rechazo por ventana de 24 h cerrada', async () => {
+    rejectWith(400, 131047);
+    expect((await kindOf()).kind).toBe('window');
+  });
+
+  it('un timeout es ambiguo: Meta pudo haberlo aceptado', async () => {
+    fetchMock.mockRejectedValue(new DOMException('timeout', 'TimeoutError'));
+    expect((await kindOf()).kind).toBe('ambiguous');
+  });
+
+  it('una conexión que ni se abrió es reintentable: seguro que no salió', async () => {
+    fetchMock.mockRejectedValue(
+      new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } }));
+    expect((await kindOf()).kind).toBe('retry');
+  });
+
+  it('un 200 sin wamid es ambiguo, no un éxito ni un rechazo', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    expect((await kindOf()).kind).toBe('ambiguous');
   });
 
   it('acota la espera: un Graph colgado no retiene el slot del worker', async () => {

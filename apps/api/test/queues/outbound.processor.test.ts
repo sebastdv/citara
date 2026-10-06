@@ -97,12 +97,13 @@ describe('OutboundProcessor', () => {
     expect(sender.send).toHaveBeenCalledTimes(2);
   });
 
-  it('no reenvía a ciegas una fila que un intento anterior dejó reclamada', async () => {
+  it('no reenvía a ciegas una fila que un intento muerto dejó reclamada', async () => {
     // Un intento previo marcó la fila como `sending` y murió: pudo haber
     // llegado a Meta o no. Reenviarla arriesga un duplicado; se marca para
     // revisión y el turno sigue con lo demás.
     const job = await seedTurn([HOLA, MENU]);
-    await adminQuery(`UPDATE messages SET status = 'sending' WHERE body = 'Hola'`);
+    await adminQuery(`UPDATE messages SET status = 'sending',
+                        claimed_at = now() - interval '10 minutes' WHERE body = 'Hola'`);
 
     await processor.process(job);
 
@@ -127,7 +128,7 @@ describe('OutboundProcessor', () => {
 
   it('un fallo transitorio devuelve la fila a pending y corta el turno para preservar el orden', async () => {
     const job = await seedTurn([HOLA, MENU]);
-    sender.send.mockRejectedValueOnce(new MetaSendError('Graph 503', 503, false));
+    sender.send.mockRejectedValueOnce(new MetaSendError('Graph 503', 'retry', 503));
 
     await expect(processor.process(job)).rejects.toThrow('Graph 503');
 
@@ -142,7 +143,7 @@ describe('OutboundProcessor', () => {
 
   it('un rechazo permanente marca el turno como fallido y no gasta reintentos', async () => {
     const job = await seedTurn([HOLA, MENU]);
-    sender.send.mockRejectedValueOnce(new MetaSendError('token inválido', 401, true));
+    sender.send.mockRejectedValueOnce(new MetaSendError('token inválido', 'permanent', 401));
 
     await expect(processor.process(job)).rejects.toBeInstanceOf(UnrecoverableError);
 
@@ -161,12 +162,87 @@ describe('OutboundProcessor', () => {
     expect(await outRows()).toEqual([{ status: 'window_closed', wamid: null, body: 'Hola' }]);
   });
 
+  it('una fila reclamada hace poco es de un envío en curso: no se toca ni se adelanta', async () => {
+    // Un job "atascado" que BullMQ re-ejecuta mientras el original sigue en el
+    // fetch: si este intento la marcara `unconfirmed` y siguiera, enviaría el
+    // menú antes que el saludo y pisaría el `sent` que el original va a poner.
+    const job = await seedTurn([HOLA, MENU]);
+    await adminQuery(`UPDATE messages SET status = 'sending', claimed_at = now() WHERE body = 'Hola'`);
+
+    await expect(processor.process(job)).rejects.toThrow(/en curso/);
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect((await outRows()).map((r) => r.status)).toEqual(['sending', 'pending']);
+  });
+
+  it('una respuesta ambigua de Meta no se reenvía: queda unconfirmed y el turno sigue', async () => {
+    const job = await seedTurn([HOLA, MENU]);
+    sender.send.mockRejectedValueOnce(new MetaSendError('timeout', 'ambiguous'));
+
+    await processor.process(job);
+
+    expect(sender.send).toHaveBeenCalledTimes(2);
+    expect((await outRows()).map((r) => r.status)).toEqual(['unconfirmed', 'sent']);
+  });
+
+  it('marcar unconfirmed no pisa el sent que otro intento ya confirmó', async () => {
+    // Mientras este intento espera una respuesta que termina ambigua, el
+    // original (re-ejecutado por BullMQ) confirma la misma fila. La transición
+    // tiene que perder: el mensaje SÍ salió.
+    const job = await seedTurn([HOLA]);
+    sender.send.mockImplementationOnce(async () => {
+      await adminQuery(`UPDATE messages SET status = 'sent', wamid = 'wamid.ORIG'
+                         WHERE direction = 'out' AND body = 'Hola'`);
+      throw new MetaSendError('timeout', 'ambiguous');
+    });
+
+    await processor.process(job);
+
+    expect(await outRows()).toEqual([{ status: 'sent', wamid: 'wamid.ORIG', body: 'Hola' }]);
+  });
+
+  it('si Meta dice que la ventana cerró, el turno queda window_closed sin reintentos', async () => {
+    // Nuestro reloj y el de Meta pueden diferir: manda el veredicto de Meta.
+    const job = await seedTurn([HOLA, MENU]);
+    sender.send.mockRejectedValueOnce(new MetaSendError('131047', 'window', 400, 131047));
+
+    await processor.process(job);
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    expect((await outRows()).map((r) => r.status)).toEqual(['window_closed', 'window_closed']);
+  });
+
+  it('un rechazo permanente no pisa una fila que otro intento ya envió', async () => {
+    const job = await seedTurn([HOLA, MENU]);
+    sender.send.mockImplementationOnce(async () => {
+      await adminQuery(`UPDATE messages SET status = 'sent' WHERE body = '¿En qué te ayudo?'`);
+      throw new MetaSendError('token inválido', 'permanent', 401);
+    });
+
+    await expect(processor.process(job)).rejects.toBeInstanceOf(UnrecoverableError);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['failed', 'sent']);
+  });
+
+  it('agotar los reintentos deja lo pendiente del turno como failed', async () => {
+    // Sin esto, un Graph caído más que el backoff deja el turno en `pending`
+    // para siempre: ni se envía ni el panel sabe que falló.
+    const job = await seedTurn([HOLA, MENU]);
+    await adminQuery(`UPDATE messages SET status = 'sent' WHERE body = 'Hola'`);
+
+    await processor.failTurn(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent', 'failed']);
+  });
+
   it('un canal inexistente o inactivo es un error permanente, sin llamar a Meta', async () => {
     const job = await seedTurn([HOLA]);
 
     await expect(processor.process({ ...job, channelId: '00000000-0000-0000-0000-000000000000' }))
       .rejects.toBeInstanceOf(UnrecoverableError);
     expect(sender.send).not.toHaveBeenCalled();
+    // Estado final visible: no se queda en `pending` para siempre.
+    expect((await outRows()).map((r) => r.status)).toEqual(['failed']);
   });
 
   it('se niega a enviar si el canal pertenece a otro tenant', async () => {

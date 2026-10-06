@@ -45,6 +45,12 @@ export function startWorkers(
   );
   outbound.on('failed', (job, err) => {
     console.error(`[outbound] job ${job?.id} falló: ${err.message}`);
+    // Último intento gastado: lo que no salió queda `failed` en vez de
+    // `pending` para siempre. Un UnrecoverableError ya cerró sus filas.
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      outboundProcessor.failTurn(job.data).catch((e: Error) =>
+        console.error(`[outbound] no se pudo cerrar el turno ${job.id}: ${e.message}`));
+    }
   });
   outbound.on('error', (err) => console.error(`[outbound] error del worker: ${err.message}`));
 

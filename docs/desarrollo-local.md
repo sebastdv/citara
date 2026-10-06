@@ -107,9 +107,16 @@ aceptó y devolvió `wamid`). Salidas laterales:
 
 - `window_closed`: pasaron 24 h desde el último mensaje del cliente; solo se puede
   escribir con plantilla.
-- `failed`: Meta lo rechazó de forma permanente (4xx: token inválido, payload mal armado).
-- `unconfirmed`: un intento lo reclamó y murió sin confirmar. Pudo llegar o no; no se
-  reenvía a ciegas para no duplicarle el mensaje al usuario.
+  También cuando Meta responde 131047, aunque nuestro reloj diga otra cosa.
+- `failed`: Meta lo rechazó de forma permanente (token inválido, payload mal armado), el
+  canal es inválido, o se agotaron los reintentos (~8,5 min de backoff).
+- `unconfirmed`: pudo llegar o no — un timeout, una conexión cortada después de enviar,
+  un 200 sin `wamid`, o un intento que reclamó la fila y murió. No se reenvía a ciegas
+  para no duplicarle el mensaje al usuario.
+
+Los límites de tasa de Meta (que llegan con HTTP 400) y los 5xx se reintentan; la lista
+de códigos reintentables está en `apps/api/src/whatsapp/sender.ts` y conviene
+contrastarla con la tabla oficial al grabar el primer rechazo real.
 
 ## Tests
 

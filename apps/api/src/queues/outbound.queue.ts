@@ -24,8 +24,10 @@ export class OutboundQueue implements OnModuleDestroy {
   private readonly queue = new Queue<OutboundJob>(OUTBOUND_QUEUE, {
     connection: { url: process.env.REDIS_URL },
     defaultJobOptions: {
-      attempts: 5,
-      backoff: { type: 'exponential', delay: 1000 },
+      // ~8,5 min en total (2 s, 4 s, ... 256 s): una caída de Graph o un
+      // límite de tasa sostenido duran más que los ~15 s de antes.
+      attempts: 9,
+      backoff: { type: 'exponential', delay: 2000 },
       removeOnComplete: 1000,
       removeOnFail: false, // los fallidos quedan para inspección
     },

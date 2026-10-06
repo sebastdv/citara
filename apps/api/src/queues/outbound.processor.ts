@@ -13,11 +13,18 @@ import { runInTenant } from '../tenancy/tenant-context';
 import { canSendFreeform, requiresOpenWindow } from '../conversations/session-window';
 import type { OutboundJob } from './outbound.queue';
 
+/** Más que el timeout del envío (15 s) con margen: pasado esto, el intento murió. */
+const CLAIM_STALE_SECONDS = 60;
+
 /**
  * Estados de un saliente: `pending` (lo produjo el flujo) → `sending`
- * (reclamado por un envío) → `sent`. Salidas laterales: `window_closed`,
- * `failed` (Meta lo rechazó de forma permanente) y `unconfirmed` (un intento
- * lo reclamó y murió sin confirmar: pudo o no llegar a Meta).
+ * (reclamado por un envío, con `claimed_at`) → `sent`. Salidas laterales:
+ * `window_closed`, `failed` (rechazo permanente, canal inválido o reintentos
+ * agotados) y `unconfirmed` (pudo o no llegar a Meta; no se reenvía a ciegas).
+ *
+ * TODA transición es compare-and-set sobre el estado previo: dos ejecuciones
+ * del mismo turno (un job atascado que BullMQ re-ejecuta mientras el original
+ * sigue vivo) nunca se pisan el resultado.
  */
 @Injectable()
 export class OutboundProcessor {
@@ -30,84 +37,133 @@ export class OutboundProcessor {
   async process(job: OutboundJob): Promise<{ sent: number }> {
     const { tenantId, channelId, turnId, to } = job;
 
-    // Sin default ni reintentos: un canal que no existe o quedó inactivo no
-    // va a aparecer en el siguiente intento.
+    // Sin default ni reintentos: un canal que no existe, quedó inactivo o es
+    // de otro negocio no se arregla en el siguiente intento.
     const channel = await this.channels.resolveById(channelId);
-    if (!channel) {
-      throw new UnrecoverableError(`No se pudo resolver el canal ${channelId} para el envío saliente`);
-    }
-    if (channel.tenantId !== tenantId) {
-      throw new UnrecoverableError(`El canal ${channelId} no pertenece al tenant ${tenantId}`);
+    const invalid = !channel
+      ? `No se pudo resolver el canal ${channelId} para el envío saliente`
+      : channel.tenantId !== tenantId
+        ? `El canal ${channelId} no pertenece al tenant ${tenantId}`
+        : null;
+    if (invalid || !channel) {
+      await this.failPending(tenantId, turnId);
+      throw new UnrecoverableError(invalid ?? 'canal inválido');
     }
 
     const { rows, lastInboundAt } = await runInTenant(this.ds, tenantId, async (m) => {
-      const rows: { id: string; status: string; payload: OutboundContent }[] = await m.query(
-        `SELECT id, status, payload FROM messages
-          WHERE reply_to_id = $1 AND direction = 'out' AND status IN ('pending', 'sending')
-          ORDER BY seq`,
-        [turnId],
-      );
+      const rows: { id: string; status: string; in_flight: boolean; payload: OutboundContent }[] =
+        await m.query(
+          `SELECT id, status, payload,
+                  coalesce(claimed_at > now() - make_interval(secs => $2), false) AS in_flight
+             FROM messages
+            WHERE reply_to_id = $1 AND direction = 'out' AND status IN ('pending', 'sending')
+            ORDER BY seq`,
+          [turnId, CLAIM_STALE_SECONDS],
+        );
       const [conv] = await m.query(
         `SELECT last_inbound_at FROM conversations WHERE id = $1`, [job.conversationId]);
       return { rows, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null };
     });
 
     let sent = 0;
-    for (const [i, row] of rows.entries()) {
+    for (const row of rows) {
       if (row.status === 'sending') {
-        // At-most-once: un intento anterior la reclamó y murió. Reenviar a
-        // ciegas puede duplicarle el mensaje al usuario.
-        await this.setStatus(tenantId, row.id, 'unconfirmed');
+        // Otro intento la tiene entre manos: ni se toca ni se adelanta el
+        // resto del turno (rompería el orden). BullMQ reintenta más tarde.
+        if (row.in_flight) throw new Error(`Envío en curso por otro intento (fila ${row.id})`);
+        // Un intento la reclamó y murió: pudo haber llegado a Meta.
+        await this.transition(tenantId, row.id, 'sending', 'unconfirmed');
         continue;
       }
 
-      // La ventana se mide AHORA, al enviar, no cuando el flujo produjo el
-      // mensaje: un job puede esperar en la cola y cruzar el límite. No se
-      // lanza: reintentar no reabre la ventana.
-      if (requiresOpenWindow(row.payload) && !canSendFreeform(lastInboundAt, new Date())) {
-        await this.setStatus(tenantId, row.id, 'window_closed');
+      let needsWindow: boolean;
+      try {
+        needsWindow = requiresOpenWindow(row.payload);
+      } catch {
+        // Un `kind` que este código no conoce no va a conocerlo en 5 intentos.
+        await this.transition(tenantId, row.id, 'pending', 'failed');
+        continue;
+      }
+      // La ventana se mide AHORA, al enviar: un job puede esperar en la cola y
+      // cruzar el límite. No se lanza: reintentar no reabre la ventana.
+      if (needsWindow && !canSendFreeform(lastInboundAt, new Date())) {
+        await this.transition(tenantId, row.id, 'pending', 'window_closed');
         continue;
       }
 
-      if (!(await this.claim(tenantId, row.id))) continue; // otro intento la tomó
+      if (!(await this.claim(tenantId, row.id))) continue; // otro intento la ganó
 
       let wamid: string;
       try {
         ({ wamid } = await this.sender.send(channel, to, row.payload));
       } catch (err) {
-        if (err instanceof MetaSendError && err.permanent) {
-          // Lo que queda del turno correría la misma suerte (mismo token,
-          // misma ventana): se cierra entero y BullMQ no gasta intentos.
-          for (const r of rows.slice(i)) await this.setStatus(tenantId, r.id, 'failed');
-          throw new UnrecoverableError(err.message);
+        const kind = err instanceof MetaSendError ? err.kind : 'retry';
+        if (kind === 'ambiguous') {
+          await this.transition(tenantId, row.id, 'sending', 'unconfirmed');
+          continue;
         }
-        // Transitorio: Meta no lo aceptó, se libera para el reintento. Se
-        // corta aquí para que el resto del turno no adelante a este mensaje.
-        await this.setStatus(tenantId, row.id, 'pending');
+        if (kind === 'window') {
+          // Manda el veredicto de Meta, no nuestro reloj; aplica al turno entero.
+          await this.transition(tenantId, row.id, 'sending', 'window_closed');
+          await this.closePending(tenantId, turnId, 'window_closed');
+          return { sent };
+        }
+        if (kind === 'permanent') {
+          // Lo que queda del turno correría la misma suerte (mismo token,
+          // misma conversación): se cierra y BullMQ no gasta intentos.
+          await this.transition(tenantId, row.id, 'sending', 'failed');
+          await this.failPending(tenantId, turnId);
+          throw new UnrecoverableError((err as Error).message);
+        }
+        // Reintentable: Meta NO lo aceptó, se libera para el siguiente
+        // intento. Se corta aquí para que el resto no adelante a este mensaje.
+        await this.transition(tenantId, row.id, 'sending', 'pending');
         throw err;
       }
 
-      // Si este UPDATE falla, la fila queda en `sending` y el reintento la
-      // marca `unconfirmed` en vez de volver a enviarla.
-      await runInTenant(this.ds, tenantId, (m) => m.query(
-        `UPDATE messages SET wamid = $1, status = 'sent' WHERE id = $2`, [wamid, row.id]));
+      // Si este UPDATE falla, la fila queda en `sending` y, pasado el umbral,
+      // un reintento la marca `unconfirmed` en vez de volver a enviarla.
+      await this.transition(tenantId, row.id, 'sending', 'sent', wamid);
       sent++;
     }
     return { sent };
   }
 
+  /** Al agotar los reintentos: lo que no salió queda como fallido, visible. */
+  failTurn(job: OutboundJob) {
+    return this.failPending(job.tenantId, job.turnId);
+  }
+
   /** `pending` → `sending` de forma atómica. Solo un intento gana la fila. */
   private async claim(tenantId: string, id: string): Promise<boolean> {
-    // Con UPDATE, TypeORM devuelve `[filas, conteo]`, no las filas: leer
-    // `.length` del resultado da siempre 2 y el reclamo "ganaría" siempre.
+    return this.transition(tenantId, id, 'pending', 'sending');
+  }
+
+  /**
+   * Compare-and-set: solo cambia la fila si sigue en `from`. Devuelve si ganó.
+   * Con UPDATE, TypeORM devuelve `[filas, conteo]`, no las filas: leer
+   * `.length` del resultado da siempre 2 y la transición "ganaría" siempre.
+   */
+  private async transition(
+    tenantId: string, id: string, from: string, to: string, wamid?: string,
+  ): Promise<boolean> {
     const [, affected] = await runInTenant(this.ds, tenantId, (m) => m.query(
-      `UPDATE messages SET status = 'sending' WHERE id = $1 AND status = 'pending'`,
-      [id])) as [unknown[], number];
+      `UPDATE messages
+          SET status = $3::varchar,
+              wamid = coalesce($4::varchar, wamid),
+              claimed_at = CASE WHEN $3::varchar = 'sending' THEN now() ELSE claimed_at END
+        WHERE id = $1 AND status = $2`,
+      [id, from, to, wamid ?? null])) as [unknown[], number];
     return affected > 0;
   }
 
-  private setStatus(tenantId: string, id: string, status: string) {
+  private failPending(tenantId: string, turnId: string) {
+    return this.closePending(tenantId, turnId, 'failed');
+  }
+
+  private closePending(tenantId: string, turnId: string, to: 'failed' | 'window_closed') {
     return runInTenant(this.ds, tenantId, (m) => m.query(
-      `UPDATE messages SET status = $1 WHERE id = $2`, [status, id]));
+      `UPDATE messages SET status = $2 WHERE reply_to_id = $1 AND status = 'pending'`,
+      [turnId, to]));
   }
 }

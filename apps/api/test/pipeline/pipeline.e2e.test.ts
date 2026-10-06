@@ -118,6 +118,9 @@ describe('pipeline real webhook → worker → Meta', () => {
   });
 
   it('la reentrega del mismo webhook no produce una segunda respuesta', async () => {
+    // Aquí la reentrega la frena BullMQ (mismo jobId = wamid del job ya
+    // completado). El camino en que el job SÍ se re-ejecuta y FlowRunner ve el
+    // entrante como duplicado lo cubre flow-runner.test.ts.
     await post(webhook('wamid.E2E2', 'Hola'));
     await quiesce();
     await post(webhook('wamid.E2E2', 'Hola'));
