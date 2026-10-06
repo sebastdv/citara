@@ -117,13 +117,25 @@ describe('BookingService.cancel y reschedule', () => {
     await expect(inTenant((m) => s.booking.cancel(m, cita.id, otro))).rejects.toBeInstanceOf(NotFoundError);
   });
 
-  it('reprogramar mueve la cita y conserva el nombre', async () => {
+  it('reprogramar mueve la MISMA cita: conserva id y nombre', async () => {
+    // El id es la identidad de la cita (y el del evento de Google en la Fase 4):
+    // moverla no es cancelar una y crear otra.
     const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
     const nueva = await inTenant((m) => s.booking.reschedule(
       m, tenantId, cita.id, contactId, new Date('2026-09-10T16:00:00Z'), AHORA));
-    expect(nueva.customerName).toBe('Ana');
-    const rows = await adminQuery(`SELECT status, starts_at FROM appointments ORDER BY created_at`);
-    expect(rows.map((r: { status: string }) => r.status)).toEqual(['cancelled', 'confirmed']);
+    expect([nueva.id, nueva.customerName]).toEqual([cita.id, 'Ana']);
+    const rows = await adminQuery(`SELECT status, starts_at FROM appointments`);
+    expect(rows).toHaveLength(1);
+    expect(new Date(rows[0].starts_at).toISOString()).toBe('2026-09-10T16:00:00.000Z');
+  });
+
+  it('reprogramar puede mover la cita sobre su propio horario', async () => {
+    await adminQuery(`UPDATE services SET buffer_min = 10`);
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
+    for (const at of ['2026-09-10T15:15:00Z', '2026-09-10T15:45:00Z']) { // se solapa / queda pegada
+      const movida = await inTenant((m) => s.booking.reschedule(m, tenantId, cita.id, contactId, new Date(at), AHORA));
+      expect(movida.startsAt.toISOString()).toBe(new Date(at).toISOString());
+    }
   });
 
   it('si el horario nuevo está ocupado, la cita original sigue en pie', async () => {

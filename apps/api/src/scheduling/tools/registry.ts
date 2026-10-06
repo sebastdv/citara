@@ -200,9 +200,9 @@ export class ToolRegistry {
           if (a.confirmation_token === undefined) {
             // Se verifica ANTES de pedir confirmación: confirmar un horario que no
             // sirve haría que el usuario diga "sí" para recibir un error.
-            const verdict = nuevo.getTime() === cita.startsAt.getTime() ? 'ok'
-              : await availability.check(ctx.m, ctx.tenantId,
-                  { serviceId: cita.serviceId, resourceId: cita.resourceId, start: nuevo, now: ctx.now });
+            const verdict = await availability.check(ctx.m, ctx.tenantId, {
+              serviceId: cita.serviceId, resourceId: cita.resourceId, start: nuevo, now: ctx.now,
+              excludeAppointmentId: cita.id });
             if (verdict !== 'ok' && verdict !== 'taken') return { ok: false, error: 'Ese horario no está disponible' };
             if (verdict === 'taken') return { ok: false, error: 'Esa franja ya está ocupada. Ofrece otro horario.' };
             return { ok: true, confirmationToken: expected,

@@ -36,7 +36,8 @@ export class AvailabilityService {
   /** Franjas libres por recurso. Con `resourceId` NULL, de todos los que prestan el servicio. */
   async slotsFor(
     m: EntityManager, tenantId: string,
-    q: { serviceId: string; resourceId: string | null; from: Date; to: Date; now: Date; ignoreBusy?: boolean },
+    q: { serviceId: string; resourceId: string | null; from: Date; to: Date; now: Date;
+         ignoreBusy?: boolean; excludeAppointmentId?: string },
   ): Promise<ResourceSlot[]> {
     const settings = await this.settings(m, tenantId);
     const [service] = await m.query(
@@ -62,10 +63,12 @@ export class AvailabilityService {
       const busy: BusyInterval[] = q.ignoreBusy ? [] : await m.query(
         `SELECT starts_at AS start, ends_at AS "end" FROM appointments
           WHERE resource_id = $1 AND status = 'confirmed' AND starts_at < $3 AND ends_at > $2
+            AND ($4::uuid IS NULL OR id <> $4)
          UNION ALL
          SELECT starts_at, ends_at FROM time_off
           WHERE (resource_id = $1 OR resource_id IS NULL) AND starts_at < $3 AND ends_at > $2`,
-        [r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin)]);
+        [r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin),
+         q.excludeAppointmentId ?? null]);
 
       for (const slot of computeSlots({
         from: q.from, to: q.to, now: q.now, timezone: settings.timezone,
@@ -85,7 +88,9 @@ export class AvailabilityService {
    */
   async check(
     m: EntityManager, tenantId: string,
-    q: { serviceId: string; resourceId: string; start: Date; now: Date },
+    q: { serviceId: string; resourceId: string; start: Date; now: Date;
+         /** Al mover una cita, ella misma no cuenta como ocupado. */
+         excludeAppointmentId?: string },
   ): Promise<Bookability> {
     const settings = await this.settings(m, tenantId);
     if (q.start.getTime() < q.now.getTime() + settings.minLeadMin * 60_000) return 'too_soon';

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 // Import de VALOR: BookingService es @Injectable() y Nest resuelve
 // AvailabilityService por el design:paramtype que emite el decorador.
-import { AvailabilityService } from './availability.service';
+import { AvailabilityService, type Bookability } from './availability.service';
 import { RemindersService } from './reminders.service';
 import {
   NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError,
@@ -37,13 +37,7 @@ export class BookingService {
   async book(m: EntityManager, tenantId: string, input: BookInput): Promise<Appointment> {
     const verdict = await this.availability.check(m, tenantId, {
       serviceId: input.serviceId, resourceId: input.resourceId, start: input.startsAt, now: input.now });
-    if (verdict !== 'ok') {
-      const settings = await this.availability.settings(m, tenantId);
-      if (verdict === 'too_soon') throw new TooSoonError(settings.minLeadMin);
-      if (verdict === 'too_far') throw new TooFarError(settings.horizonDays);
-      if (verdict === 'taken') throw new SlotTakenError();
-      throw new OutsideHoursError();
-    }
+    await this.throwUnlessOk(m, tenantId, verdict);
 
     const [service] = await m.query(`SELECT duration_min FROM services WHERE id = $1`, [input.serviceId]);
     const endsAt = new Date(input.startsAt.getTime() + service.duration_min * 60_000);
@@ -83,28 +77,52 @@ export class BookingService {
     return toAppointment(rows[0]);
   }
 
-  /** Atómico: si el horario nuevo falla, la cita original queda como estaba. */
+  /**
+   * Mueve la MISMA cita (conserva su id: es su identidad, y la del evento de
+   * Google en la Fase 4). La propia cita no cuenta como ocupado, así que puede
+   * moverse 15 minutos aunque se solape consigo misma. Atómico: si algo falla,
+   * la cita queda como estaba.
+   */
   async reschedule(
     m: EntityManager, tenantId: string, appointmentId: string, contactId: string, newStart: Date, now: Date,
   ): Promise<Appointment> {
     const existing = await this.findForContact(m, appointmentId, contactId);
     if (!existing) throw new NotFoundError('esa cita');
+    const verdict = await this.availability.check(m, tenantId, {
+      serviceId: existing.serviceId, resourceId: existing.resourceId, start: newStart, now,
+      excludeAppointmentId: appointmentId });
+    await this.throwUnlessOk(m, tenantId, verdict);
+
+    const [service] = await m.query(`SELECT duration_min FROM services WHERE id = $1`, [existing.serviceId]);
+    const endsAt = new Date(newStart.getTime() + service.duration_min * 60_000);
 
     await m.query(`SAVEPOINT reprogramar_cita`);
     try {
-      // Cancelar primero libera la franja vieja: mover la cita 15 minutos debe poder.
-      await this.cancel(m, appointmentId, contactId);
-      const nueva = await this.book(m, tenantId, {
-        serviceId: existing.serviceId, resourceId: existing.resourceId, contactId,
-        startsAt: newStart, customerName: existing.customerName ?? '',
-        conversationId: existing.conversationId, notes: existing.notes, now,
-      });
+      // Con UPDATE, TypeORM devuelve [filas, conteo]. La exclusión compara
+      // contra las OTRAS filas, así que actualizar en sitio no choca consigo.
+      const [rows] = (await m.query(
+        `UPDATE appointments SET starts_at = $3, ends_at = $4, updated_at = now()
+          WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
+          RETURNING ${COLUMNS}`, [appointmentId, contactId, newStart, endsAt])) as [Row[], number];
+      if (!rows[0]) throw new NotFoundError('esa cita');
+      const cita = toAppointment(rows[0]);
+      await this.reminders.rescheduleFor(m, tenantId, cita.id, cita.startsAt, now);
       await m.query(`RELEASE SAVEPOINT reprogramar_cita`);
-      return nueva;
+      return cita;
     } catch (err) {
       await m.query(`ROLLBACK TO SAVEPOINT reprogramar_cita`);
+      if ((err as { code?: string }).code === PG_EXCLUSION_VIOLATION) throw new SlotTakenError();
       throw err;
     }
+  }
+
+  private async throwUnlessOk(m: EntityManager, tenantId: string, verdict: Bookability): Promise<void> {
+    if (verdict === 'ok') return;
+    const settings = await this.availability.settings(m, tenantId);
+    if (verdict === 'too_soon') throw new TooSoonError(settings.minLeadMin);
+    if (verdict === 'too_far') throw new TooFarError(settings.horizonDays);
+    if (verdict === 'taken') throw new SlotTakenError();
+    throw new OutsideHoursError();
   }
 
   async listForContact(m: EntityManager, contactId: string, now: Date): Promise<AppointmentView[]> {

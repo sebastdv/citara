@@ -53,12 +53,21 @@ describe('programación', () => {
     expect((await reminders(cita.id)).every((r: { status: string }) => r.status === 'cancelled')).toBe(true);
   });
 
-  it('reprogramar cancela los de la hora vieja y programa los de la nueva', async () => {
+  it('reprogramar reemplaza los recordatorios por los de la hora nueva', async () => {
     const cita = await agendar();
-    const nueva = await inTenant((m) => s.booking.reschedule(
-      m, tenantId, cita.id, contactId, new Date('2026-09-11T15:00:00Z'), AHORA));
-    expect((await reminders(cita.id)).map((r: { status: string }) => r.status)).toEqual(['cancelled', 'cancelled']);
-    expect((await reminders(nueva.id)).map((r: { status: string }) => r.status)).toEqual(['pending', 'pending']);
+    await inTenant((m) => s.booking.reschedule(m, tenantId, cita.id, contactId, new Date('2026-09-11T15:00:00Z'), AHORA));
+    const rows = await reminders(cita.id);
+    expect(rows.map((r: { status: string }) => r.status)).toEqual(['pending', 'pending']);
+    expect(rows.map((r: { send_at: Date }) => new Date(r.send_at).toISOString()))
+      .toEqual(['2026-09-10T15:00:00.000Z', '2026-09-11T13:00:00.000Z']);
+  });
+
+  it('mover la cita después del barrido retira el recordatorio ya encolado con la hora vieja', async () => {
+    const cita = await agendar();
+    await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    await inTenant((m) => s.booking.reschedule(m, tenantId, cita.id, contactId, new Date('2026-09-11T15:00:00Z'), AHORA));
+    const [msg] = await adminQuery(`SELECT status FROM messages WHERE origin = 'reminder'`);
+    expect(msg.status).toBe('superseded');
   });
 });
 

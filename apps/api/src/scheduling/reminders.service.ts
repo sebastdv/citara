@@ -31,6 +31,13 @@ export class RemindersService {
     }
   }
 
+  /** La cita se movió: lo de la hora vieja se retira y se programa lo de la nueva. */
+  async rescheduleFor(m: EntityManager, tenantId: string, appointmentId: string, startsAt: Date, now: Date) {
+    await this.retireQueued(m, appointmentId);
+    await m.query(`DELETE FROM reminders WHERE appointment_id = $1`, [appointmentId]);
+    await this.scheduleFor(m, tenantId, appointmentId, startsAt, now);
+  }
+
   /** La cita se canceló: ni lo programado ni lo ya encolado debe salir. */
   async cancelFor(m: EntityManager, appointmentId: string) {
     await this.retireQueued(m, appointmentId);

@@ -148,6 +148,12 @@ describe('confirmación en dos tiempos (R4)', () => {
     expect(res.confirmationToken).toBeUndefined();
   });
 
+  it('reprogramar acepta un horario que se solapa con la propia cita', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const res = await run('reprogramar_cita', { cita_id: id, nuevo_inicio: '2026-09-10T10:15:00-05:00' });
+    expect(res.confirmationToken).toBeTruthy();
+  });
+
   it('reprogramar con el token mueve la cita', async () => {
     const id = ((await agendar()).data as { id: string }).id;
     const args = { cita_id: id, nuevo_inicio: '2026-09-10T11:00:00-05:00' };
