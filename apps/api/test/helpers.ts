@@ -7,6 +7,8 @@ import type { INestApplication } from '@nestjs/common';
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../src/crypto/encryption.service';
 import { AppModule } from '../src/app.module';
+import { AvailabilityService } from '../src/scheduling/availability.service';
+import { BookingService } from '../src/scheduling/booking.service';
 
 let admin: DataSource | null = null;
 
@@ -123,4 +125,11 @@ export async function seedContact(tenantId: string, waId = '573001112233'): Prom
   const [c] = await ds.query(
     `INSERT INTO contacts (tenant_id, wa_id, name) VALUES ($1, $2, 'Ana') RETURNING id`, [tenantId, waId]);
   return c.id;
+}
+
+/** Los servicios de agenda, cableados como en AppModule. Sin estado ni conexiones. */
+export function buildScheduling() {
+  const availability = new AvailabilityService();
+  const booking = new BookingService(availability);
+  return { availability, booking };
 }
