@@ -9,6 +9,7 @@ import { EncryptionService } from '../src/crypto/encryption.service';
 import { AppModule } from '../src/app.module';
 import { AvailabilityService } from '../src/scheduling/availability.service';
 import { BookingService } from '../src/scheduling/booking.service';
+import { ToolRegistry } from '../src/scheduling/tools/registry';
 
 let admin: DataSource | null = null;
 
@@ -131,5 +132,6 @@ export async function seedContact(tenantId: string, waId = '573001112233'): Prom
 export function buildScheduling() {
   const availability = new AvailabilityService();
   const booking = new BookingService(availability);
-  return { availability, booking };
+  const tools = new ToolRegistry(availability, booking);
+  return { availability, booking, tools };
 }

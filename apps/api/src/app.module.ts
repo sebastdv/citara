@@ -14,6 +14,7 @@ import { FlowRunner } from './flow-engine/flow-runner.service';
 import { SyncQueue } from './queues/sync.queue';
 import { AvailabilityService } from './scheduling/availability.service';
 import { BookingService } from './scheduling/booking.service';
+import { ToolRegistry } from './scheduling/tools/registry';
 import { EchoProcessor } from './coexistence/echo.processor';
 import { StatusProcessor } from './queues/status.processor';
 import { HistoryProcessor } from './coexistence/history.processor';
@@ -104,6 +105,7 @@ import { AccountUpdateProcessor } from './coexistence/account-update.processor';
     // Agenda (Fase 2). Sin estado: reciben el EntityManager de quien llama.
     AvailabilityService,
     BookingService,
+    ToolRegistry,
   ],
 })
 export class AppModule {}
