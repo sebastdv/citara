@@ -10,6 +10,9 @@ import type { EntityManager } from 'typeorm';
 import type { OutboundContent, FlowDefinition, SessionState } from '@citara/shared';
 import { advance } from './executor';
 import { runInTenant } from '../tenancy/tenant-context';
+import {
+  giveControlToHuman, humanControlExpired, humanInControl, readControl, returnControlToBot,
+} from '../conversations/control';
 import { InboundProcessor } from '../queues/inbound.processor';
 import type { InboundJob } from '../queues/inbound.queue';
 import { OutboundQueue } from '../queues/outbound.queue';
@@ -63,7 +66,29 @@ export class FlowRunner {
         return { ...inbound, outbound: [] as OutboundContent[], pending: n > 0 };
       }
 
-      const outbound = await this.advanceFlow(m, job, inbound.conversationId, inbound.messageId);
+      // Regla de control (spec §6.2), ya con la conversación bloqueada por el
+      // upsert de `persist`: antes de avanzar, ¿quién habla?
+      const control = await readControl(m, inbound.conversationId);
+      const now = new Date();
+      if (control.channelStatus === 'disconnected' || humanInControl(control, now)) {
+        // El entrante ya quedó guardado; el bot no responde.
+        return { ...inbound, outbound: [] as OutboundContent[], pending: false };
+      }
+      if (humanControlExpired(control, now)) {
+        await returnControlToBot(m, {
+          tenantId: job.tenantId, conversationId: inbound.conversationId,
+          cause: 'expired', actor: 'system',
+        });
+      }
+
+      const { outbound, enteredHandoff } =
+        await this.advanceFlow(m, job, inbound.conversationId, inbound.messageId);
+      if (enteredHandoff) {
+        await giveControlToHuman(m, {
+          tenantId: job.tenantId, conversationId: inbound.conversationId,
+          from: now, reason: 'flow_handoff', actor: 'flow',
+        });
+      }
       return { ...inbound, outbound, pending: outbound.length > 0 };
     });
 
@@ -85,12 +110,12 @@ export class FlowRunner {
 
   private async advanceFlow(
     m: EntityManager, job: InboundJob, conversationId: string, inboundId: string,
-  ): Promise<OutboundContent[]> {
+  ): Promise<{ outbound: OutboundContent[]; enteredHandoff: boolean }> {
     const [flowRow] = await m.query(
       `SELECT id, definition FROM flows
         WHERE is_active AND is_default LIMIT 1`,
     );
-    if (!flowRow) return [];
+    if (!flowRow) return { outbound: [], enteredHandoff: false };
     const flow = flowRow.definition as FlowDefinition;
 
     // `status <> 'ended'`, no `status = 'active'`: una sesión en traspaso a
@@ -100,12 +125,21 @@ export class FlowRunner {
     // saludo. Solo 'ended' significa "esta conversación ya cerró".
     //
     // ORDER BY updated_at (no `id`, que es un UUID sin orden temporal).
-    const [sessionRow] = await m.query(
+    let [sessionRow] = await m.query(
       `SELECT id, step_key, vars, status FROM conversation_sessions
         WHERE conversation_id = $1 AND status <> 'ended'
         ORDER BY updated_at DESC LIMIT 1`,
       [conversationId],
     );
+
+    // Aquí ya se sabe que manda el bot. Una sesión que quedó en 'handoff' es un
+    // residuo (el control ya volvió): se cierra para no silenciar al bot.
+    if (sessionRow?.status === 'handoff') {
+      await m.query(
+        `UPDATE conversation_sessions SET status = 'ended', updated_at = now() WHERE id = $1`,
+        [sessionRow.id]);
+      sessionRow = undefined;
+    }
 
     const state: SessionState | null = sessionRow
       ? { stepKey: sessionRow.step_key, vars: sessionRow.vars, status: sessionRow.status }
@@ -146,6 +180,9 @@ export class FlowRunner {
       );
     }
 
-    return result.outbound;
+    return {
+      outbound: result.outbound,
+      enteredHandoff: result.state.status === 'handoff' && state?.status !== 'handoff',
+    };
   }
 }

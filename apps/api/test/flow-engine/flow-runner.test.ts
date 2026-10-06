@@ -110,4 +110,75 @@ describe('FlowRunner', () => {
 
     expect(jobs).toHaveLength(1);
   });
+
+  const conversation = async () => (await adminQuery(
+    `SELECT id, control, human_until, control_reason FROM conversations`))[0];
+  const say = (wamid: string, text: string) =>
+    runner.handle({ tenantId, channelId, message: message({ wamid, text }) });
+
+  it('mientras manda el humano, guarda el entrante y el bot no responde', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.C1', 'Hola');
+    await adminQuery(`UPDATE conversations SET control = 'human',
+      human_until = now() + interval '1 hour', control_reason = 'phone'`);
+
+    const out = await say('wamid.C2', '¿Siguen abiertos?');
+
+    expect(out).toEqual([]);
+    expect(jobs).toHaveLength(1);              // solo el del primer turno
+    const [m] = await adminQuery(`SELECT origin FROM messages WHERE wamid = 'wamid.C2'`);
+    expect(m.origin).toBe('customer');
+  });
+
+  it('al vencer el control humano, el bot retoma desde el inicio y no desde la captura', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.V1', 'Hola');
+    await say('wamid.V2', 'agendar');          // la sesión queda en pide_nombre
+    await adminQuery(`UPDATE conversations SET control = 'human',
+      human_until = now() - interval '1 minute', control_reason = 'phone'`);
+
+    const out = await say('wamid.V3', 'Hola');
+
+    // Sin cerrar la sesión vieja respondería "Perfecto, Hola".
+    expect(out.map((o) => o.kind)).toEqual(['text', 'buttons']);
+    expect((await conversation()).control).toBe('bot');
+    const [a] = await adminQuery(`SELECT action, details FROM audit_log`);
+    expect(a).toEqual({ action: 'control.to_bot', details: { cause: 'expired' } });
+  });
+
+  it('el paso handoff del flujo dice su mensaje y le da el control al humano', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.H1', 'Hola');
+
+    const out = await say('wamid.H2', 'asesor');
+
+    expect(out).toEqual([{ kind: 'text', body: 'Te comunico con alguien del equipo.' }]);
+    const c = await conversation();
+    expect(c.control).toBe('human');
+    expect(c.control_reason).toBe('flow_handoff');
+    const hours = (new Date(c.human_until).getTime() - Date.now()) / 3_600_000;
+    expect(hours).toBeGreaterThan(11.9);
+    expect(await say('wamid.H3', '¿Hola?')).toEqual([]);
+  });
+
+  it('un canal desconectado guarda lo que llega pero no responde', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    await adminQuery(`UPDATE whatsapp_channels SET status = 'disconnected'`);
+
+    expect(await say('wamid.D1', 'Hola')).toEqual([]);
+    expect(jobs).toEqual([]);
+    const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM messages`);
+    expect(n).toBe(1);
+  });
+
+  it('si manda el bot, una sesión que quedó en traspaso es un residuo y no lo silencia', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.R1', 'Hola');
+    const c = await conversation();
+    await adminQuery(`UPDATE conversation_sessions SET status = 'handoff' WHERE conversation_id = $1`, [c.id]);
+
+    const out = await say('wamid.R2', 'Hola');
+
+    expect(out.map((o) => o.kind)).toEqual(['text', 'buttons']);
+  });
 });
