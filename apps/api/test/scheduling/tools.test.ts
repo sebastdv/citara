@@ -73,6 +73,22 @@ describe('consultas', () => {
     expect(franjas[0].inicio).toBe('2026-09-08T09:00:00-05:00'); // martes 07:00 local + 60 min de anticipación
   });
 
+  it('una fecha imposible es un error legible, no un fallo del turno', async () => {
+    const res = await run('consultar_disponibilidad', { servicio_id: serviceId, desde: '2026-02-30' });
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/fecha/i);
+  });
+
+  it('un rango enorme se acota al horizonte del negocio', async () => {
+    // Sin tope, recorrer hasta el 2200 tenía la transacción del turno abierta un minuto.
+    const started = Date.now();
+    const res = await run('consultar_disponibilidad', { servicio_id: serviceId, hasta: '2200-12-31', limite: '50' });
+    expect(Date.now() - started).toBeLessThan(5000);
+    const franjas = res.data as { inicio: string }[];
+    const ultimo = new Date(franjas.at(-1)!.inicio).getTime();
+    expect(ultimo).toBeLessThanOrEqual(AHORA.getTime() + 61 * 86_400_000);
+  });
+
   it('rechaza un rango invertido con un error legible', async () => {
     const res = await run('consultar_disponibilidad', { servicio_id: serviceId, desde: '2026-09-11', hasta: '2026-09-10' });
     expect(res.error).toMatch(/rango/i);

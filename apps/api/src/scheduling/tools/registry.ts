@@ -33,7 +33,11 @@ export interface ToolDefinition {
 const isoWithOffset = z.string().refine(
   (v) => /([+-]\d{2}:\d{2}|Z)$/.test(v) && DateTime.fromISO(v, { setZone: true }).isValid,
   'La fecha debe incluir offset de zona, p. ej. 2026-09-10T10:00:00-05:00');
-const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha AAAA-MM-DD');
+const day = z.string().refine((v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && DateTime.fromISO(v).isValid,
+  'Fecha inválida: se espera AAAA-MM-DD');
+/** Un rango de consulta nunca pasa de esto: la transacción del turno está abierta mientras se calcula. */
+const MAX_RANGE_DAYS = 31;
+const instant = (iso: string) => DateTime.fromISO(iso, { setZone: true }).toJSDate();
 
 /**
  * Token de confirmación (R4) ligado a la herramienta, la cita, quien pregunta
@@ -105,11 +109,16 @@ export class ToolRegistry {
         }),
         destructive: false,
         async run(a, ctx) {
-          const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          const { timezone, horizonDays } = await availability.settings(ctx.m, ctx.tenantId);
           const desde = a.desde ? DateTime.fromISO(a.desde, { zone: timezone })
                                 : DateTime.fromJSDate(ctx.now).setZone(timezone);
-          const hasta = a.hasta ? DateTime.fromISO(a.hasta, { zone: timezone }) : desde.plus({ days: 6 });
-          if (hasta < desde.startOf('day')) return { ok: false, error: 'El rango de fechas está invertido' };
+          const pedido = a.hasta ? DateTime.fromISO(a.hasta, { zone: timezone }) : desde.plus({ days: 6 });
+          if (pedido < desde.startOf('day')) return { ok: false, error: 'El rango de fechas está invertido' };
+          // R1: el rango se acota al horizonte del negocio y a un máximo fijo.
+          const tope = DateTime.min(
+            desde.plus({ days: MAX_RANGE_DAYS }),
+            DateTime.fromJSDate(ctx.now).setZone(timezone).plus({ days: horizonDays }));
+          const hasta = DateTime.min(pedido, tope);
 
           const slots = await availability.slotsFor(ctx.m, ctx.tenantId, {
             serviceId: a.servicio_id, resourceId: a.recurso_id ?? null,
@@ -153,7 +162,7 @@ export class ToolRegistry {
           const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
           const cita = await booking.book(ctx.m, ctx.tenantId, {
             serviceId: a.servicio_id, resourceId: a.recurso_id, contactId: ctx.contactId,
-            conversationId: ctx.conversationId, startsAt: new Date(a.inicio),
+            conversationId: ctx.conversationId, startsAt: instant(a.inicio),
             customerName: a.nombre, notes: a.notas ?? null, now: ctx.now });
           return { ok: true, data: { id: cita.id, inicio: isoIn(cita.startsAt, timezone), estado: cita.status,
                                      etiqueta: labelFor(cita.startsAt, timezone) } };
@@ -192,7 +201,7 @@ export class ToolRegistry {
         }),
         destructive: true,
         async run(a, ctx) {
-          const nuevo = new Date(a.nuevo_inicio);
+          const nuevo = instant(a.nuevo_inicio);
           const expected = tokenFor(['reprogramar_cita', a.cita_id, ctx.contactId, nuevo.toISOString()]);
           const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
           if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
