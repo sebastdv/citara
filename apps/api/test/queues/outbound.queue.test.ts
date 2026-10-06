@@ -11,8 +11,7 @@ let probe: Queue;
 
 const job = (over: Partial<OutboundJob> = {}): OutboundJob => ({
   tenantId: 't', channelId: 'c', conversationId: 'conv',
-  to: '573001112233', idempotencyKey: 'idem-1',
-  content: { kind: 'text', body: 'Hola' }, ...over,
+  turnId: '8d0e2c1a-1111-2222-3333-444455556666', to: '573001112233', ...over,
 });
 
 beforeAll(async () => {
@@ -28,18 +27,22 @@ afterAll(async () => {
 });
 
 describe('OutboundQueue', () => {
-  it('usa idempotencyKey como jobId: la segunda barrera contra el doble envío', async () => {
-    const added = await queue.add(job({ idempotencyKey: 'idem-unico-1' }));
-    expect(added.id).toBe('idem-unico-1');
+  it('usa el id del turno como jobId, y BullMQ lo acepta', async () => {
+    // Un uuid real, no un id inventado: el jobId anterior llevaba `:` y BullMQ
+    // lo rechazaba, cosa que un id de juguete sin `:` jamás habría delatado.
+    const turnId = '1f2e3d4c-aaaa-bbbb-cccc-000011112222';
+    const added = await queue.add(job({ turnId }));
+    expect(added.id).toBe(turnId);
   });
 
-  it('no reemplaza el job si se reintenta con la misma idempotencyKey', async () => {
-    await queue.add(job({ idempotencyKey: 'idem-repetido', to: '111' }));
-    await queue.add(job({ idempotencyKey: 'idem-repetido', to: '222' }));
+  it('no encola dos veces el mismo turno', async () => {
+    const turnId = '1f2e3d4c-aaaa-bbbb-cccc-333344445555';
+    await queue.add(job({ turnId, to: '111' }));
+    await queue.add(job({ turnId, to: '222' }));
 
-    // BullMQ no sobrescribe un jobId ya existente: el dato persistido sigue
-    // siendo el del primer add(). Esa es la barrera contra el doble envío.
-    const found = await probe.getJob('idem-repetido');
+    // BullMQ no sobrescribe un jobId ya existente. Esto evita ENCOLAR dos
+    // veces; no evita re-ejecutar el job (eso lo cubre el reclamo de filas).
+    const found = await probe.getJob(turnId);
     expect(found?.data.to).toBe('111');
   });
 });

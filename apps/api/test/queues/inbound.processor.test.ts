@@ -64,4 +64,17 @@ describe('InboundProcessor', () => {
       m.query(`SELECT last_inbound_at FROM conversations`));
     expect(new Date(conv.last_inbound_at).toISOString()).toBe(at.toISOString());
   });
+
+  it('no hace retroceder last_inbound_at si un mensaje viejo llega tarde', async () => {
+    // Meta no garantiza orden de entrega y el worker procesa en paralelo. Si
+    // el más viejo se procesa último, la ventana de 24 h no puede encogerse.
+    const nuevo = new Date('2026-09-03T15:00:00Z');
+    const viejo = new Date('2026-09-03T14:00:00Z');
+    await processor.process({ tenantId, channelId, message: msg({ wamid: 'wamid.N', timestamp: nuevo }) });
+    await processor.process({ tenantId, channelId, message: msg({ wamid: 'wamid.V', timestamp: viejo }) });
+
+    const [conv] = await runInTenant(app, tenantId, (m) =>
+      m.query(`SELECT last_inbound_at FROM conversations`));
+    expect(new Date(conv.last_inbound_at).toISOString()).toBe(nuevo.toISOString());
+  });
 });

@@ -18,3 +18,6 @@ export type { OutboundJob } from './queues/outbound.queue';
 // para procesar INBOUND_QUEUE en vez de llamar a InboundProcessor a secas
 // (que solo persiste, sin ejecutar el motor de flujos).
 export { FlowRunner } from './flow-engine/flow-runner.service';
+// Cableado de los consumidores de cola: lo usan apps/worker y los tests de
+// punta a punta, para que ambos ejerciten exactamente el mismo código.
+export { startWorkers } from './queues/workers';

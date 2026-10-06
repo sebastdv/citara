@@ -1,3 +1,5 @@
+import type { OutboundContent } from '@citara/shared';
+
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -8,4 +10,22 @@ const WINDOW_MS = 24 * 60 * 60 * 1000;
 export function canSendFreeform(lastInboundAt: Date | null, now: Date): boolean {
   if (!lastInboundAt) return false;
   return now.getTime() - lastInboundAt.getTime() < WINDOW_MS;
+}
+
+/**
+ * ¿Este contenido solo puede salir con la ventana abierta? Switch exhaustivo a
+ * propósito: el día que el contrato gane un `kind` de plantilla, esto deja de
+ * compilar hasta que alguien decida su caso, en vez de bloquearlo en silencio.
+ */
+export function requiresOpenWindow(content: OutboundContent): boolean {
+  switch (content.kind) {
+    case 'text':
+    case 'buttons':
+    case 'list':
+      return true;
+    default: {
+      const unhandled: never = content;
+      throw new Error(`kind de salida sin regla de ventana: ${JSON.stringify(unhandled)}`);
+    }
+  }
 }

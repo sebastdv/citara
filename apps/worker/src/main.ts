@@ -11,16 +11,7 @@ import { config } from 'dotenv';
 config();
 
 import { NestFactory } from '@nestjs/core';
-import { Worker } from 'bullmq';
-// Import profundo ('@citara/api/src/app.module') no resolvía: apps/api no
-// declaraba `main`/`types` y el import iba sin extensión. La convención de
-// este repo (packages/db, packages/shared) es un único punto de entrada en
-// `src/index.ts`; apps/api ya lo tiene (ver apps/api/src/index.ts) y expone
-// justo lo que este worker necesita.
-import {
-  AppModule, FlowRunner, INBOUND_QUEUE, type InboundJob,
-  OutboundProcessor, OUTBOUND_QUEUE, type OutboundJob,
-} from '@citara/api';
+import { AppModule, startWorkers } from '@citara/api';
 
 async function bootstrap() {
   // createApplicationContext: sin servidor HTTP. Este proceso SOLO procesa
@@ -28,44 +19,10 @@ async function bootstrap() {
   // compita por el event loop y sature el pool de conexiones mientras la
   // base de datos queda ociosa.
   const ctx = await NestFactory.createApplicationContext(AppModule);
-  // FlowRunner, no InboundProcessor a secas: InboundProcessor solo persiste
-  // el mensaje entrante. FlowRunner lo envuelve, avanza el flujo con
-  // `advance()` y encola la salida — es el que cierra el circuito completo
-  // de la Task 15 (Task 9 solo cableó la persistencia).
-  const flowRunner = ctx.get(FlowRunner);
-  const outboundProcessor = ctx.get(OutboundProcessor);
-
-  const inboundWorker = new Worker<InboundJob>(
-    INBOUND_QUEUE,
-    (job) => flowRunner.handle(job.data),
-    {
-      connection: { url: process.env.REDIS_URL },
-      concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10),
-    },
-  );
-  inboundWorker.on('failed', (job, err) => {
-    console.error(`[inbound] job ${job?.id} falló: ${err.message}`);
-  });
-
-  // Mismo proceso, otro Worker: ambas colas comparten Redis y el mismo
-  // application context de Nest, pero BullMQ procesa cada nombre de cola de
-  // forma independiente — no hay razón para separarlas en procesos aparte
-  // mientras ninguna sature al worker.
-  const outboundWorker = new Worker<OutboundJob>(
-    OUTBOUND_QUEUE,
-    (job) => outboundProcessor.process(job.data),
-    {
-      connection: { url: process.env.REDIS_URL },
-      concurrency: Number(process.env.WORKER_CONCURRENCY ?? 10),
-    },
-  );
-  outboundWorker.on('failed', (job, err) => {
-    console.error(`[outbound] job ${job?.id} falló: ${err.message}`);
-  });
+  const workers = startWorkers(ctx);
 
   const shutdown = async () => {
-    await inboundWorker.close();
-    await outboundWorker.close();
+    await workers.close();
     await ctx.close();
     process.exit(0);
   };

@@ -4,19 +4,19 @@ import type { OutboundContent } from '@citara/shared';
 
 export const OUTBOUND_QUEUE = 'outbound';
 
+/**
+ * Un job por TURNO, no por mensaje: el procesador envía en orden los salientes
+ * que el turno dejó en `messages` (`reply_to_id = turnId`, ordenados por
+ * `seq`). El contenido no viaja en Redis: las filas son la fuente de verdad, y
+ * así un job jamás apunta a contenido distinto del que quedó persistido.
+ */
 export interface OutboundJob {
   tenantId: string;
   channelId: string;
   conversationId: string;
-  /**
-   * Fila de `messages` que el flujo ya creó para este saliente. El envío la
-   * COMPLETA con el wamid; no crea otra. Así el mensaje existe en la
-   * conversación desde que el bot lo produce, aunque el envío tarde o falle.
-   */
-  messageId: string;
+  /** id del mensaje ENTRANTE que produjo este turno. */
+  turnId: string;
   to: string;
-  idempotencyKey: string;
-  content: OutboundContent;
 }
 
 @Injectable()
@@ -32,10 +32,16 @@ export class OutboundQueue implements OnModuleDestroy {
   });
 
   add(job: OutboundJob) {
-    // idempotencyKey como jobId: barrera que impide enviar dos veces el
-    // mismo mensaje si el job de salida se reintenta (BullMQ no reemplaza
-    // los datos de un jobId ya existente).
-    return this.queue.add('send', job, { jobId: job.idempotencyKey });
+    // jobId = turnId (un uuid: BullMQ rechaza ids con `:`). Evita encolar dos
+    // veces el mismo turno; NO evita re-ejecutarlo. Eso lo garantiza el
+    // procesador reclamando cada fila antes de enviarla.
+    return this.queue.add('send-turn', job, { jobId: job.turnId });
+  }
+
+  constructor() {
+    // Sin listener, un corte de Redis es un 'error' sin manejar que tumba el
+    // proceso de la API entera, no solo el encolado.
+    this.queue.on('error', (err) => console.error(`[outbound] error de la cola: ${err.message}`));
   }
 
   async onModuleDestroy() { await this.queue.close(); }
