@@ -51,6 +51,10 @@ const PRESUPUESTO: Record<string, string[]> = {
   conversation_sessions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   // Bitácora: la aplicación agrega, nunca corrige ni borra lo que pasó.
   audit_log: ['SELECT', 'INSERT'],
+  // Agenda: tenant-scoped con RLS.
+  services: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  resources: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  resource_services: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   // Exentas de RLS, y por eso lo más de solo-lectura posible.
   whatsapp_channels: ['SELECT'],
   webhook_events: ['SELECT', 'INSERT'],

@@ -29,7 +29,7 @@ export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
     TRUNCATE webhook_events, audit_log, messages, conversation_sessions, conversations,
-             flows, contacts, whatsapp_channels, tenants
+             flows, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
 }
@@ -78,4 +78,32 @@ export async function createTestApp(): Promise<INestApplication> {
 export async function closeHelpers(): Promise<void> {
   await admin?.destroy();
   admin = null;
+}
+
+/** Un servicio de 30 min ("corte") que presta un recurso ("maria"). */
+export async function seedCatalog(
+  tenantId: string,
+  over: { durationMin?: number; bufferMin?: number } = {},
+): Promise<{ serviceId: string; resourceId: string }> {
+  const ds = await adminDs();
+  const [s] = await ds.query(
+    `INSERT INTO services (tenant_id, key, name, duration_min, buffer_min)
+     VALUES ($1, 'corte', 'Corte de cabello', $2, $3) RETURNING id`,
+    [tenantId, over.durationMin ?? 30, over.bufferMin ?? 0]);
+  const resourceId = await addResource(tenantId, 'maria', 'María', s.id);
+  return { serviceId: s.id, resourceId };
+}
+
+/** Otro recurso que presta el servicio dado. */
+export async function addResource(
+  tenantId: string, key: string, name: string, serviceId: string,
+): Promise<string> {
+  const ds = await adminDs();
+  const [r] = await ds.query(
+    `INSERT INTO resources (tenant_id, key, name) VALUES ($1, $2, $3) RETURNING id`,
+    [tenantId, key, name]);
+  await ds.query(
+    `INSERT INTO resource_services (tenant_id, resource_id, service_id) VALUES ($1, $2, $3)`,
+    [tenantId, r.id, serviceId]);
+  return r.id;
 }
