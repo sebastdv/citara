@@ -11,6 +11,7 @@ import { DataSource } from 'typeorm';
 import { ChannelResolver } from '../tenancy/channel-resolver.service';
 import { MetaSender } from '../whatsapp/sender';
 import { runInTenant } from '../tenancy/tenant-context';
+import { canSendFreeform } from '../conversations/session-window';
 import type { OutboundJob } from './outbound.queue';
 
 @Injectable()
@@ -21,7 +22,7 @@ export class OutboundProcessor {
     private readonly sender: MetaSender,
   ) {}
 
-  async process(job: OutboundJob): Promise<{ messageId: string; wamid: string }> {
+  async process(job: OutboundJob): Promise<{ messageId: string; wamid: string | null }> {
     const { tenantId, channelId, messageId, to, content } = job;
 
     // Se resuelve el canal por su id, no por phone_number_id: quien encoló
@@ -32,6 +33,23 @@ export class OutboundProcessor {
     const channel = await this.channels.resolveById(channelId);
     if (!channel) {
       throw new Error(`No se pudo resolver el canal ${channelId} para el envío saliente`);
+    }
+
+    // La ventana se mide AHORA, al enviar, no cuando el flujo produjo el
+    // mensaje: un job puede esperar en la cola y cruzar el límite. Todo
+    // `OutboundContent` es texto libre (aún no hay plantillas), así que fuera
+    // de la ventana no se envía nada. No se lanza: reintentar no reabre la
+    // ventana; la fila queda marcada para que el panel lo muestre.
+    const [conversation] = await runInTenant(this.ds, tenantId, (m) => m.query(
+      `SELECT last_inbound_at FROM conversations WHERE id = $1`,
+      [job.conversationId],
+    ));
+    if (!canSendFreeform(conversation?.last_inbound_at ?? null, new Date())) {
+      await runInTenant(this.ds, tenantId, (m) => m.query(
+        `UPDATE messages SET status = 'window_closed' WHERE id = $1`,
+        [messageId],
+      ));
+      return { messageId, wamid: null };
     }
 
     const { wamid } = await this.sender.send(channel, to, content);

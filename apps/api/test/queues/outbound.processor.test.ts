@@ -47,8 +47,8 @@ describe('OutboundProcessor', () => {
       [tenantId, '573001112233'],
     ));
     const [conversation] = await runInTenant(app, tenantId, (m) => m.query(
-      `INSERT INTO conversations (tenant_id, contact_id, channel_id)
-       VALUES ($1, $2, $3) RETURNING id`,
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
+       VALUES ($1, $2, $3, now()) RETURNING id`,
       [tenantId, contact.id, channelId],
     ));
 
@@ -93,8 +93,8 @@ describe('OutboundProcessor', () => {
       [tenantId, '573001112233'],
     ));
     const [conversation] = await runInTenant(app, tenantId, (m) => m.query(
-      `INSERT INTO conversations (tenant_id, contact_id, channel_id)
-       VALUES ($1, $2, $3) RETURNING id`,
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
+       VALUES ($1, $2, $3, now()) RETURNING id`,
       [tenantId, contact.id, channelId],
     ));
 
@@ -131,8 +131,8 @@ describe('OutboundProcessor', () => {
       [tenantId, '573001112233'],
     ));
     const [conversation] = await runInTenant(app, tenantId, (m) => m.query(
-      `INSERT INTO conversations (tenant_id, contact_id, channel_id)
-       VALUES ($1, $2, $3) RETURNING id`,
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
+       VALUES ($1, $2, $3, now()) RETURNING id`,
       [tenantId, contact.id, channelId],
     ));
     // La fila tal como la deja el flujo: sin wamid, porque aún no se ha enviado.
@@ -154,6 +154,41 @@ describe('OutboundProcessor', () => {
     expect(filas).toHaveLength(1);
     expect(filas[0].id).toBe(pendiente.id);
     expect(filas[0].wamid).toBe('wamid.OUT1');
+  });
+
+  it('no envía texto libre fuera de la ventana de 24 h y deja la fila marcada', async () => {
+    // Meta rechaza el texto libre pasadas 24 h del último ENTRANTE; fuera de la
+    // ventana solo vale una plantilla aprobada. La guarda va en el envío, no en
+    // quien encola, porque un job puede esperar en la cola (reintentos, worker
+    // caído) y cruzar el límite entre que se produce y que se envía.
+    const [contact] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO contacts (tenant_id, wa_id) VALUES ($1, $2) RETURNING id`,
+      [tenantId, '573001112233'],
+    ));
+    const [conversation] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
+       VALUES ($1, $2, $3, now() - interval '25 hours') RETURNING id`,
+      [tenantId, contact.id, channelId],
+    ));
+    const [pendiente] = await runInTenant(app, tenantId, (m) => m.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, status)
+       VALUES ($1, $2, 'out', 'text', 'Hola', 'pending') RETURNING id`,
+      [tenantId, conversation.id],
+    ));
+
+    // No lanza: reintentar no reabre la ventana, así que quemar los cinco
+    // intentos de BullMQ solo retrasaría el mismo desenlace.
+    const result = await processor.process(job({
+      conversationId: conversation.id, messageId: pendiente.id,
+      idempotencyKey: 'idem-out-ventana',
+    }));
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(result.wamid).toBeNull();
+    const [row] = await runInTenant(app, tenantId, (m) =>
+      m.query(`SELECT status, wamid FROM messages WHERE id = $1`, [pendiente.id]));
+    expect(row.status).toBe('window_closed');
+    expect(row.wamid).toBeNull();
   });
 
   it('lanza si el canal no existe o está inactivo, sin llamar a MetaSender', async () => {
