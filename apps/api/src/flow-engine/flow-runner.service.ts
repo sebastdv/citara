@@ -138,9 +138,9 @@ export class FlowRunner {
       // viaja en `payload`, que además es lo que el envío manda tal cual.
       const type = content.kind === 'text' ? 'text' : 'interactive';
       await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, payload,
+        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload,
                                status, reply_to_id, seq)
-         VALUES ($1, $2, 'out', $3, $4, $5, 'pending', $6, $7)`,
+         VALUES ($1, $2, 'out', 'bot', $3, $4, $5, 'pending', $6, $7)`,
         [job.tenantId, conversationId, type, content.body, JSON.stringify(content),
          inboundId, seq],
       );

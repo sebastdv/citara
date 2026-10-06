@@ -69,12 +69,13 @@ export class InboundProcessor {
       // El índice de `wamid` es PARCIAL (`WHERE wamid IS NOT NULL`, ver la
       // migración de Task 7): Postgres no infiere un índice parcial sin que
       // el ON CONFLICT repita su predicado.
-      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, type, body, payload)
-       VALUES ($1, $2, $3, 'in', $4, $5, $6)
+      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type, body,
+                             payload, occurred_at)
+       VALUES ($1, $2, $3, 'in', 'customer', $4, $5, $6, $7)
        ON CONFLICT (wamid) WHERE wamid IS NOT NULL DO NOTHING
        RETURNING id`,
       [tenantId, conversation.id, message.wamid, message.type,
-       message.text, JSON.stringify(message.raw)],
+       message.text, JSON.stringify(message.raw), message.timestamp],
     );
     if (saved) return { conversationId: conversation.id, messageId: saved.id, duplicate: false };
 

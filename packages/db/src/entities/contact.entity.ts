@@ -16,6 +16,9 @@ export class Contact {
   @Column({ type: 'varchar', nullable: true })
   name!: string | null;
 
+  @Column({ name: 'saved_name', type: 'varchar', nullable: true })
+  savedName!: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

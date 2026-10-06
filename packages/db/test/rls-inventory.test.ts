@@ -49,6 +49,8 @@ const PRESUPUESTO: Record<string, string[]> = {
   messages: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   flows: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   conversation_sessions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  // Bitácora: la aplicación agrega, nunca corrige ni borra lo que pasó.
+  audit_log: ['SELECT', 'INSERT'],
   // Exentas de RLS, y por eso lo más de solo-lectura posible.
   whatsapp_channels: ['SELECT'],
   webhook_events: ['SELECT', 'INSERT'],
@@ -127,5 +129,17 @@ describe('invariante: toda tabla con tenant_id lleva RLS', () => {
     );
     expect(row.relrowsecurity).toBe(false);
     expect(row.relforcerowsecurity).toBe(false);
+  });
+
+  it('sobre whatsapp_channels la app solo puede actualizar status e history_sync', async () => {
+    // Los ecos de desconexión y el historial cambian el estado del canal desde
+    // la aplicación. El GRANT es por columna: el token cifrado, el
+    // phone_number_id y la WABA siguen siendo intocables para la app.
+    const cols: { column_name: string }[] = await ds.query(`
+      SELECT column_name FROM information_schema.column_privileges
+       WHERE table_schema = 'public' AND table_name = 'whatsapp_channels'
+         AND grantee = 'citara_app' AND privilege_type = 'UPDATE'
+       ORDER BY column_name`);
+    expect(cols.map((c) => c.column_name)).toEqual(['history_sync', 'status']);
   });
 });

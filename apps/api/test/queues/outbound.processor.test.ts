@@ -36,14 +36,14 @@ async function seedTurn(contents: OutboundContent[], lastInbound = `now()`) {
        VALUES ($1, $2, $3, ${lastInbound}) RETURNING id`,
       [tenantId, contact.id, channelId]);
     const [inbound] = await m.query(
-      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, type, body)
-       VALUES ($1, $2, 'wamid.IN1', 'in', 'text', 'Hola') RETURNING id`,
+      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type, body)
+       VALUES ($1, $2, 'wamid.IN1', 'in', 'customer', 'text', 'Hola') RETURNING id`,
       [tenantId, conv.id]);
     for (const [seq, c] of contents.entries()) {
       await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, payload,
+        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload,
                                status, reply_to_id, seq)
-         VALUES ($1, $2, 'out', 'text', $3, $4, 'pending', $5, $6)`,
+         VALUES ($1, $2, 'out', 'bot', 'text', $3, $4, 'pending', $5, $6)`,
         [tenantId, conv.id, c.body, JSON.stringify(c), inbound.id, seq]);
     }
     const job: OutboundJob = { tenantId, channelId, conversationId: conv.id,
