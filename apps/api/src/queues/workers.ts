@@ -1,7 +1,16 @@
 import type { INestApplicationContext } from '@nestjs/common';
-import { Worker } from 'bullmq';
+import { UnrecoverableError, Worker } from 'bullmq';
 import { FlowRunner } from '../flow-engine/flow-runner.service';
-import { INBOUND_QUEUE, rehydrateInboundJob, type InboundJob } from './inbound.queue';
+import {
+  INBOUND_QUEUE, rehydrateEchoJob, rehydrateInboundJob, rehydrateStatusJob,
+  type AccountUpdateJob, type EchoJob, type InboundJob, type StatusJob,
+} from './inbound.queue';
+import { SYNC_QUEUE, rehydrateHistoryJob, type ContactsSyncJob, type HistoryJob } from './sync.queue';
+import { StatusProcessor } from './status.processor';
+import { EchoProcessor } from '../coexistence/echo.processor';
+import { HistoryProcessor } from '../coexistence/history.processor';
+import { ContactsSyncProcessor } from '../coexistence/contacts-sync.processor';
+import { AccountUpdateProcessor } from '../coexistence/account-update.processor';
 import { OutboundProcessor } from './outbound.processor';
 import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
 
@@ -23,9 +32,23 @@ export function startWorkers(
   const flowRunner = ctx.get(FlowRunner);
   const outboundProcessor = ctx.get(OutboundProcessor);
 
-  const inbound = new Worker<InboundJob>(
+  const echoes = ctx.get(EchoProcessor);
+  const statuses = ctx.get(StatusProcessor);
+  const accounts = ctx.get(AccountUpdateProcessor);
+  const history = ctx.get(HistoryProcessor);
+  const contacts = ctx.get(ContactsSyncProcessor);
+
+  const inbound = new Worker<InboundJob | EchoJob | StatusJob | AccountUpdateJob>(
     INBOUND_QUEUE,
-    (job) => flowRunner.handle(rehydrateInboundJob(job.data)),
+    (job) => {
+      switch (job.name) {
+        case 'process': return flowRunner.handle(rehydrateInboundJob(job.data as InboundJob));
+        case 'phone_echo': return echoes.process(rehydrateEchoJob(job.data as EchoJob));
+        case 'status': return statuses.process(rehydrateStatusJob(job.data as StatusJob));
+        case 'account_update': return accounts.process(job.data as AccountUpdateJob);
+        default: throw new UnrecoverableError(`job de entrada desconocido: ${job.name}`);
+      }
+    },
     { connection, concurrency },
   );
   inbound.on('failed', (job, err) => {
@@ -54,7 +77,24 @@ export function startWorkers(
   });
   outbound.on('error', (err) => console.error(`[outbound] error del worker: ${err.message}`));
 
+  // Concurrencia 1: el historial llega en tandas y la regla del dueño activo
+  // se aplica al terminar; procesar chunks en paralelo la correría con datos
+  // a medias. Nada aquí es urgente.
+  const sync = new Worker<HistoryJob | ContactsSyncJob>(
+    SYNC_QUEUE,
+    (job) => {
+      switch (job.name) {
+        case 'history_chunk': return history.process(rehydrateHistoryJob(job.data as HistoryJob));
+        case 'contacts_sync': return contacts.process(job.data as ContactsSyncJob);
+        default: throw new UnrecoverableError(`job de sync desconocido: ${job.name}`);
+      }
+    },
+    { connection, concurrency: 1 },
+  );
+  sync.on('failed', (job, err) => console.error(`[sync] job ${job?.id} falló: ${err.message}`));
+  sync.on('error', (err) => console.error(`[sync] error del worker: ${err.message}`));
+
   return {
-    close: async () => { await inbound.close(); await outbound.close(); },
+    close: async () => { await inbound.close(); await outbound.close(); await sync.close(); },
   };
 }

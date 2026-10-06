@@ -1,3 +1,5 @@
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Queue } from 'bullmq';
 import type { ContactSync, HistoryChunk } from '@citara/shared';
 
 export const SYNC_QUEUE = 'sync';
@@ -25,4 +27,27 @@ export function rehydrateHistoryJob(d: HistoryJob): HistoryJob {
       })),
     },
   };
+}
+
+@Injectable()
+export class SyncQueue implements OnModuleDestroy {
+  private readonly queue = new Queue<HistoryJob | ContactsSyncJob>(SYNC_QUEUE, {
+    connection: { url: process.env.REDIS_URL },
+    defaultJobOptions: {
+      attempts: 5,
+      backoff: { type: 'exponential', delay: 2000 },
+      removeOnComplete: 1000,
+      removeOnFail: false,
+    },
+  });
+
+  constructor() {
+    this.queue.on('error', (err) => console.error(`[sync] error de la cola: ${err.message}`));
+  }
+
+  addHistory(job: HistoryJob) { return this.queue.add('history_chunk', job); }
+
+  addContacts(job: ContactsSyncJob) { return this.queue.add('contacts_sync', job); }
+
+  async onModuleDestroy() { await this.queue.close(); }
 }

@@ -11,6 +11,7 @@ import { IngestService } from './whatsapp/ingest.service';
 import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
+import { SyncQueue } from './queues/sync.queue';
 import { EchoProcessor } from './coexistence/echo.processor';
 import { StatusProcessor } from './queues/status.processor';
 import { HistoryProcessor } from './coexistence/history.processor';
@@ -72,6 +73,7 @@ import { AccountUpdateProcessor } from './coexistence/account-update.processor';
       useFactory: () => new MetaSender(process.env.META_GRAPH_VERSION!),
     },
     OutboundQueue,
+    SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
     // ctx.get(OutboundProcessor) para consumir la cola de salida. Sin esta
     // entrada el worker arranca "bien" y revienta después con
