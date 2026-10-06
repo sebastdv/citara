@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MetaSender } from '../../src/whatsapp/sender';
+import { MetaSender, MetaSendError } from '../../src/whatsapp/sender';
 
 const channel = { tenantId: 't', channelId: 'c', wabaId: 'w',
                   phoneNumberId: '106540', accessToken: 'TOKEN' };
@@ -84,5 +84,31 @@ describe('MetaSender', () => {
       .catch((e: Error) => e);
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).not.toContain('TOKEN');
+  });
+
+  it('marca un 4xx como permanente: reintentarlo solo repite el rechazo', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 400,
+      json: async () => ({ error: { message: 'Re-engagement message', code: 131047 } }) });
+
+    const err = await sender.send(channel, '573001112233', { kind: 'text', body: 'Hola' })
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(MetaSendError);
+    expect(err.permanent).toBe(true);
+    expect(err.status).toBe(400);
+  });
+
+  it('marca 429 y 5xx como transitorios', async () => {
+    for (const status of [429, 500, 503]) {
+      fetchMock.mockResolvedValue({ ok: false, status, json: async () => ({}) });
+      const err = await sender.send(channel, '573001112233', { kind: 'text', body: 'Hola' })
+        .catch((e) => e);
+      expect(err.permanent).toBe(false);
+    }
+  });
+
+  it('acota la espera: un Graph colgado no retiene el slot del worker', async () => {
+    await sender.send(channel, '573001112233', { kind: 'text', body: 'Hola' });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 });

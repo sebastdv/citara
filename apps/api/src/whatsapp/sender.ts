@@ -3,6 +3,19 @@ import type { ResolvedChannel } from '../tenancy/channel-resolver.service';
 
 const BUTTON_TITLE_MAX = 20;  // límite duro de Meta
 const MAX_BUTTONS = 3;        // más de 3 no caben en un interactive de tipo button
+const SEND_TIMEOUT_MS = 15_000;
+
+/**
+ * Rechazo de Meta. `permanent` decide si vale la pena reintentar: un 4xx
+ * (token inválido, fuera de ventana, payload mal armado) se repetiría igual
+ * en cada intento; un 429 o un 5xx puede salir bien en el siguiente.
+ */
+export class MetaSendError extends Error {
+  constructor(message: string, readonly status: number, readonly permanent: boolean) {
+    super(message);
+    this.name = 'MetaSendError';
+  }
+}
 
 /**
  * Traduce nuestro contrato de salida al formato de Meta y lo envía.
@@ -29,14 +42,21 @@ export class MetaSender {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(body),
+        // Sin tope, un Graph colgado retiene el slot del worker para siempre
+        // y bloquea su cierre limpio en SIGTERM.
+        signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
       },
     );
 
-    const json = await res.json();
+    // Un 502 del balanceador de Meta llega en HTML: no debe convertirse en un
+    // SyntaxError que esconda el status real.
+    const json = await res.json().catch(() => null);
     if (!res.ok) {
       // El token jamás entra al mensaje de error: estos textos van a logs.
-      throw new Error(
+      throw new MetaSendError(
         `Meta rechazó el envío (${res.status}): ${json?.error?.message ?? 'sin detalle'}`,
+        res.status,
+        res.status >= 400 && res.status < 500 && res.status !== 429,
       );
     }
     // Meta puede responder 200 sin `messages` (p.ej. cambios de forma del
