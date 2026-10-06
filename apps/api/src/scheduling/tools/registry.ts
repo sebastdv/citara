@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { AvailabilityService } from '../availability.service';
 import { BookingService } from '../booking.service';
 import { SchedulingError, SlotTakenError } from '../scheduling.errors';
-import { isoIn, labelFor } from '../format';
+import { dayLabelFor, hourFor, isoIn, labelFor } from '../format';
 
 export interface ToolContext {
   /** La transacción del turno: RLS fijado y la conversación bloqueada. */
@@ -79,7 +79,7 @@ export class ToolRegistry {
     try {
       return await tool.run(parsed.data, ctx);
     } catch (err) {
-      if (err instanceof SlotTakenError) return { ok: false, error: 'Esa franja ya está ocupada. Ofrece otro horario.' };
+      if (err instanceof SlotTakenError) return { ok: false, error: 'Esa franja ya está ocupada' };
       if (err instanceof SchedulingError) return { ok: false, error: err.message };
       throw err;
     }
@@ -106,6 +106,8 @@ export class ToolRegistry {
           desde: day.optional(),
           hasta: day.optional(),
           limite: z.coerce.number().int().min(1).max(50).default(20),
+          /** Minutos mínimos entre dos horas ofrecidas: reparte la lista por todo el día. */
+          espaciado_min: z.coerce.number().int().min(0).max(240).default(0),
         }),
         destructive: false,
         async run(a, ctx) {
@@ -123,13 +125,45 @@ export class ToolRegistry {
           const slots = await availability.slotsFor(ctx.m, ctx.tenantId, {
             serviceId: a.servicio_id, resourceId: a.recurso_id ?? null,
             from: desde.startOf('day').toJSDate(), to: hasta.endOf('day').toJSDate(), now: ctx.now });
+          const spaced: typeof slots = [];
+          for (const x of slots) {
+            const last = spaced.at(-1);
+            if (!last || x.start.getTime() >= last.start.getTime() + a.espaciado_min * 60_000) spaced.push(x);
+          }
           return {
             ok: true,
-            data: slots.slice(0, a.limite).map((x) => ({
-              inicio: isoIn(x.start, timezone), fin: isoIn(x.end, timezone),
+            data: spaced.slice(0, a.limite).map((x) => ({
+              inicio: isoIn(x.start, timezone), fin: isoIn(x.end, timezone), hora: hourFor(x.start, timezone),
               recurso_id: x.resourceId, recurso: x.resourceName, etiqueta: labelFor(x.start, timezone),
             })),
           };
+        },
+      },
+      {
+        name: 'consultar_dias',
+        description: 'Próximos días con horarios libres para un servicio.',
+        schema: z.object({
+          servicio_id: z.string().uuid(),
+          recurso_id: z.string().uuid().optional(),
+          dias: z.coerce.number().int().min(1).max(14).default(7),
+        }),
+        destructive: false,
+        async run(a, ctx) {
+          const { timezone, horizonDays } = await availability.settings(ctx.m, ctx.tenantId);
+          const hoy = DateTime.fromJSDate(ctx.now).setZone(timezone).startOf('day');
+          const hasta = DateTime.min(hoy.plus({ days: MAX_RANGE_DAYS }),
+                                     DateTime.fromJSDate(ctx.now).setZone(timezone).plus({ days: horizonDays }));
+          const slots = await availability.slotsFor(ctx.m, ctx.tenantId, {
+            serviceId: a.servicio_id, resourceId: a.recurso_id ?? null,
+            from: hoy.toJSDate(), to: hasta.endOf('day').toJSDate(), now: ctx.now });
+          const porDia = new Map<string, { fecha: string; etiqueta: string; franjas: number }>();
+          for (const x of slots) {
+            const fecha = DateTime.fromJSDate(x.start).setZone(timezone).toISODate()!;
+            const d = porDia.get(fecha) ?? { fecha, etiqueta: dayLabelFor(x.start, timezone), franjas: 0 };
+            d.franjas++;
+            porDia.set(fecha, d);
+          }
+          return { ok: true, data: [...porDia.values()].slice(0, a.dias) };
         },
       },
       {
@@ -213,7 +247,7 @@ export class ToolRegistry {
               serviceId: cita.serviceId, resourceId: cita.resourceId, start: nuevo, now: ctx.now,
               excludeAppointmentId: cita.id });
             if (verdict !== 'ok' && verdict !== 'taken') return { ok: false, error: 'Ese horario no está disponible' };
-            if (verdict === 'taken') return { ok: false, error: 'Esa franja ya está ocupada. Ofrece otro horario.' };
+            if (verdict === 'taken') return { ok: false, error: 'Esa franja ya está ocupada' };
             return { ok: true, confirmationToken: expected,
                      data: { requiere_confirmacion: true, etiqueta: labelFor(nuevo, timezone) } };
           }

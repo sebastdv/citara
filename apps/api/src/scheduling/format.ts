@@ -9,3 +9,13 @@ export function labelFor(date: Date, timezone: string): string {
 export function isoIn(date: Date, timezone: string): string {
   return DateTime.fromJSDate(date).setZone(timezone).toISO({ suppressMilliseconds: true })!;
 }
+
+/** "martes 8 de septiembre": para elegir el día. */
+export function dayLabelFor(date: Date, timezone: string): string {
+  return DateTime.fromJSDate(date).setZone(timezone).setLocale('es').toFormat("cccc d 'de' LLLL");
+}
+
+/** "09:00": la hora local, para listas de un mismo día. */
+export function hourFor(date: Date, timezone: string): string {
+  return DateTime.fromJSDate(date).setZone(timezone).toFormat('HH:mm');
+}

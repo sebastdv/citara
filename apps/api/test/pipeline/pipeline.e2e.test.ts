@@ -225,7 +225,7 @@ describe('pipeline real de agenda', () => {
     await seedFlow(t.id, AGENDA_FLOW);
 
     let n = 0;
-    for (const text of ['Hola', 'agendar', '1', '1', 'Ana']) {
+    for (const text of ['Hola', 'agendar', '1', '1', '1', 'Ana']) {
       await post(webhook(`wamid.AG${n++}`, text));
       await quiesce();
     }

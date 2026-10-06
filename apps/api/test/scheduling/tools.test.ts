@@ -89,6 +89,23 @@ describe('consultas', () => {
     expect(ultimo).toBeLessThanOrEqual(AHORA.getTime() + 61 * 86_400_000);
   });
 
+  it('consultar_dias devuelve los próximos días con cupo', async () => {
+    const res = await run('consultar_dias', { servicio_id: serviceId });
+    const dias = res.data as { fecha: string; etiqueta: string; franjas: number }[];
+    expect(dias.map((d) => d.fecha)).toEqual(
+      ['2026-09-08', '2026-09-09', '2026-09-10', '2026-09-11', '2026-09-14', '2026-09-15', '2026-09-16']);
+    expect(dias[0].etiqueta).toMatch(/^martes 8 de septiembre/);
+    expect(dias[0].franjas).toBeGreaterThan(0);
+  });
+
+  it('con espaciado, ofrece horas repartidas por todo el día', async () => {
+    // Las 9 primeras franjas cada 15 min cubrían solo la mañana.
+    const res = await run('consultar_disponibilidad',
+      { servicio_id: serviceId, desde: '2026-09-10', hasta: '2026-09-10', espaciado_min: '60' });
+    expect((res.data as { hora: string }[]).map((f) => f.hora))
+      .toEqual(['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00']);
+  });
+
   it('rechaza un rango invertido con un error legible', async () => {
     const res = await run('consultar_disponibilidad', { servicio_id: serviceId, desde: '2026-09-11', hasta: '2026-09-10' });
     expect(res.error).toMatch(/rango/i);

@@ -16,7 +16,8 @@ const hastaElNombre = async () => {
   await h.say('Hola');
   await h.tap('agendar');
   await h.say('1');            // servicio
-  await h.say('1');            // primera franja
+  await h.say('1');            // primer día
+  await h.say('1');            // primera hora
 };
 
 beforeEach(async () => {
@@ -28,13 +29,18 @@ beforeEach(async () => {
 afterAll(async () => { await ConversationHarness.teardown(); await closeHelpers(); });
 
 describe('agendar una cita solo con menús', () => {
-  it('recorre menú → servicio → franja → nombre → cita creada', async () => {
+  it('recorre menú → servicio → día → hora → nombre → cita creada', async () => {
     await start();
-    const servicios = await h.say('Hola').then(() => h.tap('agendar'));
+    await h.say('Hola');
+    const servicios = await h.tap('agendar');
     expect(servicios.at(-1)).toMatchObject({ body: expect.stringContaining('1. Corte de cabello (30 min)') });
 
-    const franjas = await h.say('1');
-    expect(franjas[0]).toMatchObject({ body: expect.stringContaining('09:00 con María') });
+    const dias = await h.say('1');
+    expect(dias[0]).toMatchObject({ body: expect.stringContaining('1. martes 8 de septiembre') });
+
+    const horas = await h.say('1');
+    expect(horas[0]).toMatchObject({ body: expect.stringContaining('1. 09:00 con María') });
+    expect(horas[0]).toMatchObject({ body: expect.stringContaining('17:00 con María') }); // todo el día
 
     await h.say('1');
     const fin = await h.say('Ana');
@@ -47,7 +53,7 @@ describe('agendar una cita solo con menús', () => {
     expect(citas[0].conversation_id).toBeTruthy();
   });
 
-  it('si la franja se ocupa entre la elección y la reserva, lo dice sin romper el turno', async () => {
+  it('si la hora se ocupa antes de reservar, explica el motivo y vuelve a mostrar las horas', async () => {
     await start();
     await hastaElNombre();
     const otro = await seedContact(tenantId, '573000000000');
@@ -57,7 +63,9 @@ describe('agendar una cita solo con menús', () => {
       [tenantId, resourceId, serviceId, otro]);
 
     const fin = await h.say('Ana');
-    expect(fin[0]).toMatchObject({ body: expect.stringContaining('se acaba de ocupar') });
+    expect(fin[0]).toMatchObject({ body: expect.stringContaining('No pude agendar ese horario: Esa franja ya está ocupada') });
+    expect(fin[1]).toMatchObject({ body: expect.stringContaining('Responde con el número') });
+    expect(fin[1]).not.toMatchObject({ body: expect.stringContaining('1. 09:00 con María') });
   });
 
   it('si el turno falla después de agendar, la cita no queda creada', async () => {
@@ -81,7 +89,7 @@ describe('agendar una cita solo con menús', () => {
     await adminQuery(`DELETE FROM business_hours`);
     await start();
     await h.say('Hola'); await h.tap('agendar');
-    const res = await h.say('1');
+    const res = await h.say('1');            // servicio → no hay días con cupo
     expect(res[0]).toMatchObject({ body: expect.stringContaining('No encontré horarios libres') });
   });
 
