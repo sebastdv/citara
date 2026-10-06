@@ -29,7 +29,7 @@ export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
     TRUNCATE webhook_events, audit_log, messages, conversation_sessions, conversations,
-             flows, resource_services, resources, services, contacts, whatsapp_channels, tenants
+             flows, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
 }
@@ -106,4 +106,14 @@ export async function addResource(
     `INSERT INTO resource_services (tenant_id, resource_id, service_id) VALUES ($1, $2, $3)`,
     [tenantId, r.id, serviceId]);
   return r.id;
+}
+
+/** Lunes a viernes, 09:00-18:00 en hora local del negocio. */
+export async function seedHours(tenantId: string, resourceId?: string): Promise<void> {
+  const ds = await adminDs();
+  for (const weekday of [1, 2, 3, 4, 5]) {
+    await ds.query(
+      `INSERT INTO business_hours (tenant_id, resource_id, weekday, start_time, end_time)
+       VALUES ($1, $2, $3, '09:00', '18:00')`, [tenantId, resourceId ?? null, weekday]);
+  }
 }
