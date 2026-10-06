@@ -29,7 +29,7 @@ export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
     TRUNCATE webhook_events, audit_log, messages, conversation_sessions, conversations,
-             flows, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
+             flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
 }
@@ -116,4 +116,11 @@ export async function seedHours(tenantId: string, resourceId?: string): Promise<
       `INSERT INTO business_hours (tenant_id, resource_id, weekday, start_time, end_time)
        VALUES ($1, $2, $3, '09:00', '18:00')`, [tenantId, resourceId ?? null, weekday]);
   }
+}
+
+export async function seedContact(tenantId: string, waId = '573001112233'): Promise<string> {
+  const ds = await adminDs();
+  const [c] = await ds.query(
+    `INSERT INTO contacts (tenant_id, wa_id, name) VALUES ($1, $2, 'Ana') RETURNING id`, [tenantId, waId]);
+  return c.id;
 }
