@@ -12,6 +12,8 @@
     "build": "tsc -b",
     "start:api": "node apps/api/dist/src/main.js",
     "start:worker": "node apps/worker/dist/src/main.js",
+    "db:migrate": "node apps/api/dist/src/cli/migrate.js",
+    "dev:provision": "node apps/api/dist/src/cli/seed-dev.js",
     "db:up": "docker compose up -d postgres redis",
     "db:down": "docker compose down"
   },
