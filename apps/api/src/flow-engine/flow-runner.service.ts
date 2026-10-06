@@ -8,7 +8,12 @@ import { Inject, Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import type { EntityManager } from 'typeorm';
 import type { OutboundContent, FlowDefinition, SessionState } from '@citara/shared';
-import { advance } from './executor';
+import type { FlowStep } from '@citara/shared';
+import { advance, interpolate } from './executor';
+import { ToolRegistry } from '../scheduling/tools/registry';
+import { CLOCK, type Clock } from '../clock';
+
+const MAX_TOOL_HOPS = 5;
 import { runInTenant } from '../tenancy/tenant-context';
 import {
   giveControlToHuman, humanControlExpired, humanInControl, readControl, returnControlToBot,
@@ -38,6 +43,8 @@ export class FlowRunner {
     // Nest no puede resolver la dependencia por tipo inferido — hay que
     // darle el token (la clase concreta registrada en AppModule).
     @Inject(OutboundQueue) private readonly outboundQueue: OutboundEnqueuer,
+    private readonly tools: ToolRegistry,
+    @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
   async handle(job: InboundJob): Promise<OutboundContent[]> {
@@ -82,7 +89,7 @@ export class FlowRunner {
       }
 
       const { outbound, enteredHandoff } =
-        await this.advanceFlow(m, job, inbound.conversationId, inbound.messageId);
+        await this.advanceFlow(m, job, inbound);
       if (enteredHandoff) {
         await giveControlToHuman(m, {
           tenantId: job.tenantId, conversationId: inbound.conversationId,
@@ -109,8 +116,10 @@ export class FlowRunner {
   }
 
   private async advanceFlow(
-    m: EntityManager, job: InboundJob, conversationId: string, inboundId: string,
+    m: EntityManager, job: InboundJob,
+    inbound: { conversationId: string; messageId: string; contactId: string },
   ): Promise<{ outbound: OutboundContent[]; enteredHandoff: boolean }> {
+    const { conversationId, messageId: inboundId } = inbound;
     const [flowRow] = await m.query(
       `SELECT id, definition FROM flows
         WHERE is_active AND is_default LIMIT 1`,
@@ -147,7 +156,31 @@ export class FlowRunner {
 
     // Sesión nueva → sin input, para que el flujo emita su paso de entrada.
     const input = state ? job.message.text : null;
-    const result = advance(flow, state, input);
+    let result = advance(flow, state, input);
+    // Las herramientas corren aquí, en la transacción del turno: si algo falla
+    // después de agendar, el rollback se lleva también la cita.
+    for (let hop = 0; result.pending; hop++) {
+      if (hop >= MAX_TOOL_HOPS) throw new Error(`Cadena de herramientas demasiado larga en el flujo '${flow.key}'`);
+      const { tool, args, stepKey } = result.pending;
+      const step = flow.steps[stepKey] as Extract<FlowStep, { type: 'tool' }>;
+      const out = await this.tools.run(tool, args, {
+        m, tenantId: job.tenantId, contactId: inbound.contactId, conversationId, now: this.clock.now() });
+
+      const vars = { ...result.state.vars };
+      let next = out.ok ? step.on_success : step.on_error;
+      if (!out.ok) vars.__tool_error = out.error ?? '';
+      if (out.ok && step.save_list && Array.isArray(out.data)) {
+        const items = out.data as Record<string, unknown>[];
+        vars[`__${step.save_list}`] = JSON.stringify(items);
+        vars[step.save_list] = items
+          .map((it, i) => `${i + 1}. ${interpolate(step.render ?? '{{id}}',
+            Object.fromEntries(Object.entries(it).map(([k, v]) => [k, String(v)])))}`)
+          .join('\n');
+        if (items.length === 0) next = step.on_empty ?? step.on_success;
+      }
+      const after = advance(flow, { ...result.state, vars, stepKey: next }, null);
+      result = { ...after, outbound: [...result.outbound, ...after.outbound] };
+    }
 
     if (sessionRow) {
       await m.query(

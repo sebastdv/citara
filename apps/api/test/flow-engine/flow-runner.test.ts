@@ -6,7 +6,8 @@ import { FlowRunner, type OutboundEnqueuer } from '../../src/flow-engine/flow-ru
 import { InboundProcessor } from '../../src/queues/inbound.processor';
 import type { OutboundJob } from '../../src/queues/outbound.queue';
 import { DEMO_FLOW } from '../../src/cli/provision';
-import { resetDb, seedChannel, seedFlow, adminQuery, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedFlow, adminQuery, closeHelpers, buildScheduling } from '../helpers';
+import { systemClock } from '../../src/clock';
 
 let ds: DataSource;
 let tenantId: string, channelId: string;
@@ -30,7 +31,7 @@ const message = (over: Partial<InboundMessage> = {}): InboundMessage => ({
 beforeAll(async () => {
   ds = createDataSource(process.env.DATABASE_URL!);
   await ds.initialize();
-  runner = new FlowRunner(ds, new InboundProcessor(ds), queue);
+  runner = new FlowRunner(ds, new InboundProcessor(ds), queue, buildScheduling().tools, systemClock);
 });
 afterAll(async () => { await ds.destroy(); await closeHelpers(); });
 beforeEach(async () => {

@@ -7,6 +7,8 @@ import { InboundProcessor } from '../../src/queues/inbound.processor';
 import { runInTenant } from '../../src/tenancy/tenant-context';
 import type { InboundMessage, OutboundContent } from '@citara/shared';
 import type { OutboundJob } from '../../src/queues/outbound.queue';
+import { buildScheduling } from '../helpers';
+import { systemClock, type Clock } from '../../src/clock';
 
 let ds: DataSource | null = null;
 
@@ -37,9 +39,11 @@ export class ConversationHarness {
     private readonly ctx: { tenantId: string; channelId: string; from: string },
   ) {}
 
-  static async create(ctx: { tenantId: string; channelId: string; from: string }) {
+  static async create(ctx: { tenantId: string; channelId: string; from: string; now?: Date }) {
     if (!ds) { ds = createDataSource(process.env.DATABASE_URL!); await ds.initialize(); }
-    const runner = new FlowRunner(ds, new InboundProcessor(ds), new FakeOutboundQueue());
+    const clock: Clock = ctx.now ? { now: () => ctx.now! } : systemClock;
+    const runner = new FlowRunner(ds, new InboundProcessor(ds), new FakeOutboundQueue(),
+                                  buildScheduling().tools, clock);
     return new ConversationHarness(runner, ctx);
   }
 

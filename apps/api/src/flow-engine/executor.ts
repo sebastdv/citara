@@ -8,6 +8,8 @@ const MAX_CHAIN = 20; // pasos encadenados sin input antes de declarar ciclo
 export interface ExecResult {
   state: SessionState;
   outbound: OutboundContent[];
+  /** Intención de invocar una herramienta. El ejecutor sigue siendo PURO: no la ejecuta. */
+  pending?: { tool: string; args: Record<string, string>; stepKey: string };
 }
 
 /** Interpola {{var}} con las variables de sesión; deja intacto lo no resuelto. */
@@ -140,6 +142,32 @@ export function advance(
         stepKey: step.next,
       };
       input = null; // el input ya se consumió; los siguientes pasos encadenan
+      continue;
+    }
+
+    if (step.type === 'tool') {
+      const args = Object.fromEntries(
+        Object.entries(step.args).map(([k, v]) => [k, interpolate(v, current.vars)]));
+      return { state: current, outbound, pending: { tool: step.tool, args, stepKey: current.stepKey } };
+    }
+
+    if (step.type === 'pick') {
+      const options: Record<string, unknown>[] = JSON.parse(current.vars[`__${step.from}`] ?? '[]');
+      const index = input !== null && /^\d+$/.test(input.trim()) ? Number(input.trim()) - 1 : -1;
+      if (index < 0 || index >= options.length) {
+        // Sin input (primera vez) o fuera de la lista: mostrar o repetir la pregunta.
+        outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
+        return { state: current, outbound };
+      }
+      const chosen = options[index];
+      const fields = Object.fromEntries(
+        Object.entries(chosen).map(([k, v]) => [`${step.var}_${k}`, String(v)]));
+      current = {
+        ...current,
+        vars: { ...current.vars, ...fields, [step.var]: String(chosen.id ?? chosen.inicio ?? '') },
+        stepKey: step.next,
+      };
+      input = null;
       continue;
     }
 

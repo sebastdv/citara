@@ -33,15 +33,17 @@ export class InboundProcessor {
    */
   async persist(
     m: EntityManager, job: InboundJob,
-  ): Promise<{ conversationId: string; messageId: string; duplicate: boolean }> {
+  ): Promise<{ conversationId: string; messageId: string; contactId: string; duplicate: boolean }> {
     const { tenantId, channelId, message } = job;
 
     // El duplicado se reconoce ANTES de tocar contactos y conversaciones: si
     // la conversación original se cerró entre tanto, el upsert de abajo
     // abriría una nueva y vacía para un mensaje que no le pertenece.
     const [seen] = await m.query(
-      `SELECT id, conversation_id FROM messages WHERE wamid = $1`, [message.wamid]);
-    if (seen) return { conversationId: seen.conversation_id, messageId: seen.id, duplicate: true };
+      `SELECT msg.id, msg.conversation_id, c.contact_id
+         FROM messages msg JOIN conversations c ON c.id = msg.conversation_id
+        WHERE msg.wamid = $1`, [message.wamid]);
+    if (seen) return { conversationId: seen.conversation_id, messageId: seen.id, contactId: seen.contact_id, duplicate: true };
 
     const [contact] = await m.query(
       `INSERT INTO contacts (tenant_id, wa_id, name)
@@ -77,13 +79,13 @@ export class InboundProcessor {
       [tenantId, conversation.id, message.wamid, message.type,
        message.text, JSON.stringify(message.raw), message.timestamp],
     );
-    if (saved) return { conversationId: conversation.id, messageId: saved.id, duplicate: false };
+    if (saved) return { conversationId: conversation.id, messageId: saved.id, contactId: contact.id, duplicate: false };
 
     const [existing] = await m.query(
       `SELECT id FROM messages WHERE wamid = $1`, [message.wamid]);
     // El wamid es global de Meta; si choca y RLS no deja verlo, es de OTRO
     // tenant. No debería pasar nunca, pero no se finge que es nuestro.
     if (!existing) throw new Error(`wamid ${message.wamid} ya existe fuera de este tenant`);
-    return { conversationId: conversation.id, messageId: existing.id, duplicate: true };
+    return { conversationId: conversation.id, messageId: existing.id, contactId: contact.id, duplicate: true };
   }
 }

@@ -15,6 +15,7 @@ import { SyncQueue } from './queues/sync.queue';
 import { AvailabilityService } from './scheduling/availability.service';
 import { BookingService } from './scheduling/booking.service';
 import { ToolRegistry } from './scheduling/tools/registry';
+import { CLOCK, systemClock } from './clock';
 import { EchoProcessor } from './coexistence/echo.processor';
 import { StatusProcessor } from './queues/status.processor';
 import { HistoryProcessor } from './coexistence/history.processor';
@@ -106,6 +107,8 @@ import { AccountUpdateProcessor } from './coexistence/account-update.processor';
     AvailabilityService,
     BookingService,
     ToolRegistry,
+    // Hora para las decisiones de agenda; los tests la fijan.
+    { provide: CLOCK, useValue: systemClock },
   ],
 })
 export class AppModule {}
