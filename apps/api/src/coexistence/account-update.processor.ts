@@ -21,14 +21,14 @@ export class AccountUpdateProcessor {
 
     // Sin RLS: whatsapp_channels se resuelve antes de conocer el tenant. La app
     // solo puede tocar `status` e `history_sync` (GRANT por columna). Una
-    // reconexión solo devuelve lo que Meta desconectó, nunca un canal que el
-    // operador dejó inactivo. Con UPDATE, TypeORM devuelve [filas, conteo].
+    // desconexión solo toca canales activos, y una reconexión solo devuelve lo
+    // que Meta desconectó: un canal que el operador dejó inactivo no revive. Con UPDATE, TypeORM devuelve [filas, conteo].
     const [rows] = (await this.ds.query(
       reconnect
         ? `UPDATE whatsapp_channels SET status = 'active'
             WHERE waba_id = $1 AND status = 'disconnected' RETURNING id, tenant_id`
         : `UPDATE whatsapp_channels SET status = 'disconnected'
-            WHERE waba_id = $1 AND status <> 'disconnected' RETURNING id, tenant_id`,
+            WHERE waba_id = $1 AND status = 'active' RETURNING id, tenant_id`,
       [wabaId])) as [{ id: string; tenant_id: string }[], number];
 
     for (const ch of rows) {

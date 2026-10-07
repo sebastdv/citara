@@ -68,4 +68,11 @@ describe('AccountUpdateProcessor', () => {
     expect(await update('ACCOUNT_RECONNECTED')).toMatchObject({ reconnected: 0 });
     expect(await statuses()).toEqual(['inactive']);
   });
+
+  it('desconectar y reconectar tampoco revive un canal que el operador dejó inactivo', async () => {
+    await adminQuery(`UPDATE whatsapp_channels SET status = 'inactive'`);
+    expect(await update('PARTNER_REMOVED')).toMatchObject({ disconnected: 0 });
+    await update('ACCOUNT_RECONNECTED');
+    expect(await statuses()).toEqual(['inactive']);
+  });
 });
