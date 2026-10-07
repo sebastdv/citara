@@ -32,7 +32,7 @@ async function adminDs(): Promise<DataSource> {
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
+    TRUNCATE onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
              flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
