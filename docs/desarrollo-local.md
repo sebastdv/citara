@@ -105,9 +105,52 @@ En la app de Meta → WhatsApp → Configuración:
 
 Escribe "Hola" al número de prueba desde tu WhatsApp: debes recibir el saludo y el menú.
 
+## Alta de un cliente (Fase 3)
+
+### Antes del primer cliente (una sola vez)
+
+1. **Tech Provider aprobado** en Meta, con acceso avanzado a `whatsapp_business_management`
+   y `whatsapp_business_messaging`.
+2. **Configuración de Embedded Signup v4** (Facebook Login for Business → Embedded Signup,
+   producto Cloud API con la opción de coexistencia). La v2 deja de funcionar el 15 de
+   octubre de 2026. Su ID va en `META_ES_CONFIG_ID`; el de la app, en `META_APP_ID`.
+3. En la app de Meta, dominio de `PUBLIC_BASE_URL` permitido para el SDK de JavaScript y
+   webhooks suscritos a `messages`, `smb_message_echoes`, `history`, `smb_app_state_sync`
+   y `account_update`.
+4. `META_GRAPH_VERSION` en la versión vigente (v25.0 al escribir esto; v21.0 sale de soporte).
+
+### Cada cliente
+
+```bash
+pnpm tenant create peluqueria-ana "Peluquería Ana"
+```
+
+Imprime un enlace de un solo uso (vence en 72 h). Se lo mandas al cliente, que lo abre, toca
+"Conectar WhatsApp" y escanea el QR desde su app de WhatsApp Business. Al terminar, el canal
+queda registrado y se piden a Meta el historial y los contactos.
+
+```bash
+pnpm tenant:apply clientes/peluqueria-ana.yaml
+```
+
+Carga su agenda. Si ya tiene canal, el negocio pasa solo a `active` y empieza a responder.
+Hasta entonces guarda todo lo que llega, sin responder.
+
+```bash
+pnpm tenant list
+```
+
+Estado de cada negocio: canal, historial y **último eco** (la última vez que el dueño escribió
+desde su celular). Si el dueño no abre la app en unos 13 días, Meta corta la coexistencia:
+vigila esa columna.
+
+Otros comandos: `pnpm tenant link <slug>` (enlace nuevo si se perdió o venció),
+`pnpm tenant sync <slug>` (reintentar la sincronización, dentro de las 24 h del alta),
+`pnpm tenant suspend <slug>` / `pnpm tenant resume <slug>`.
+
 ## Coexistencia (Fase 1.5)
 
-Con un número conectado en coexistencia (requiere el alta de la Fase 3), en la app de
+Con un número conectado en coexistencia (ver el alta, arriba), en la app de
 Meta → WhatsApp → Configuración, además de `messages` se suscriben estos campos:
 `smb_message_echoes`, `history`, `smb_app_state_sync` y `account_update`.
 
@@ -118,7 +161,7 @@ Qué hace el sistema con cada uno:
 | `smb_message_echoes` | Lo que el dueño escribe desde su celular se guarda (`origin='phone'`) y el bot se calla en esa conversación durante `tenants.human_takeover_hours` (12 por defecto); cada mensaje del dueño alarga el plazo |
 | `history` | Importa hasta 180 días (`origin='history'`); al terminar, las conversaciones donde el dueño escribió dentro del plazo quedan en sus manos |
 | `smb_app_state_sync` | Guarda en `contacts.saved_name` el nombre con que el negocio tiene al cliente |
-| `account_update` | Una desconexión deja el canal en `disconnected`: lo que llegue se guarda, el bot no responde y no se envía nada |
+| `account_update` | Una desconexión deja el canal en `disconnected`: lo que llegue se guarda, el bot no responde y no se envía nada. `ACCOUNT_RECONNECTED` lo devuelve a `active` (nunca reactiva un canal que el operador dejó inactivo) |
 
 Para ver quién manda en cada conversación y por qué:
 
