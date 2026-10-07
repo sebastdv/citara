@@ -3,7 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { EncryptionService } from '../crypto/encryption.service';
 import { MetaOnboardingClient, type SyncType } from './meta-onboarding.client';
-import { consumeLink, peekLink } from './links';
+import { peekLink } from './links';
 import { runInTenant } from '../tenancy/tenant-context';
 import { recordAudit } from '../audit/audit';
 
@@ -16,6 +16,8 @@ export class LinkInvalidError extends Error {
 export class OnboardingInputError extends Error {}
 
 const SYNC_TYPES: SyncType[] = ['smb_app_state_sync', 'history'];
+/** Lo que lanza register_channel cuando el enlace no está vigente. */
+const LINK_INVALID_SQLSTATE = 'CT410';
 
 @Injectable()
 export class OnboardingService {
@@ -44,20 +46,28 @@ export class OnboardingService {
     }
     await this.meta.subscribeApp(input.wabaId, accessToken);
 
-    // Consumir el enlace y registrar el canal van juntos: si dos pestañas
-    // completan a la vez, solo una gana y la otra no deja un canal a medias.
-    const channelId = await runInTenant(this.ds, link.tenantId, async (m) => {
-      if (!(await consumeLink(m, link.linkId))) throw new LinkInvalidError();
-      const [row] = await m.query(
-        `SELECT register_channel($1, $2, $3, $4, $5, 'coexistence') AS id`,
-        [link.tenantId, input.wabaId, phone.id, phone.displayPhoneNumber, this.enc.encrypt(accessToken)]);
-      await recordAudit(m, {
-        tenantId: link.tenantId, actor: 'onboarding', action: 'channel.connected',
-        details: { channelId: row.id, phoneNumberId: phone.id, mode: 'coexistence' },
+    // register_channel consume el enlace y registra el canal en la misma
+    // sentencia: si dos pestañas completan a la vez, solo una gana y la otra
+    // no deja un canal a medias. Sin enlace vigente, la función no registra nada.
+    let channelId: string;
+    try {
+      channelId = await runInTenant(this.ds, link.tenantId, async (m) => {
+        const [row] = await m.query(
+          `SELECT register_channel($1, $2, $3, $4, $5, 'coexistence') AS id`,
+          [link.linkId, input.wabaId, phone.id, phone.displayPhoneNumber, this.enc.encrypt(accessToken)]);
+        await recordAudit(m, {
+          tenantId: link.tenantId, actor: 'onboarding', action: 'channel.connected',
+          details: { channelId: row.id, phoneNumberId: phone.id, mode: 'coexistence' },
+        });
+        await m.query(`SELECT refresh_tenant_status($1)`, [link.tenantId]);
+        return row.id as string;
       });
-      await m.query(`SELECT refresh_tenant_status($1)`, [link.tenantId]);
-      return row.id as string;
-    });
+    } catch (err) {
+      if ((err as { driverError?: { code?: string } }).driverError?.code === LINK_INVALID_SQLSTATE) {
+        throw new LinkInvalidError();
+      }
+      throw err;
+    }
 
     // Fuera de la transacción: son llamadas a Meta. Un fallo no deshace el alta;
     // el operador lo reintenta con `pnpm tenant sync` dentro de las 24 h.

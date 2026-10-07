@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
-import { consumeLink, createLink, hashToken, peekLink } from '../../src/onboarding/links';
+import { createLink, hashToken, peekLink } from '../../src/onboarding/links';
 import { resetDb, seedChannel, adminQuery, closeHelpers } from '../helpers';
 
 let admin: DataSource, app: DataSource;
@@ -28,12 +28,10 @@ describe('enlaces de conexión', () => {
     expect(row.token_hash).not.toContain(token);
   });
 
-  it('se usa una sola vez: de dos usos, solo uno gana', async () => {
-    const token = await createLink(admin, tenantId, 'whatsapp');
-    const link = (await peekLink(app, token, 'whatsapp'))!;
-    const results = await Promise.all([consumeLink(app, link.linkId), consumeLink(app, link.linkId)]);
-    expect(results.sort()).toEqual([false, true]);
-    expect(await peekLink(app, token, 'whatsapp')).toBeNull();
+  it('la aplicación no puede marcar ni revivir enlaces por su cuenta', async () => {
+    // Usarlo es cosa de register_channel, en la misma transacción que el canal.
+    await createLink(admin, tenantId, 'whatsapp');
+    await expect(app.query(`UPDATE onboarding_links SET used_at = NULL`)).rejects.toThrow(/permission denied/);
   });
 
   it('un enlace vencido no sirve', async () => {

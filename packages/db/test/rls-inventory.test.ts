@@ -154,11 +154,13 @@ describe('invariante: toda tabla con tenant_id lleva RLS', () => {
     expect(cols.map((c) => c.column_name)).toEqual(['history_sync', 'status']);
   });
 
-  it('sobre onboarding_links la app solo puede marcar el enlace como usado', async () => {
+  it('sobre onboarding_links la app no puede actualizar nada', async () => {
+    // Los consume register_channel (SECURITY DEFINER): con UPDATE (used_at), la
+    // app podía revivir un enlace usado y reutilizarlo.
     const cols: { column_name: string }[] = await ds.query(`
       SELECT column_name FROM information_schema.column_privileges
        WHERE table_schema = 'public' AND table_name = 'onboarding_links'
          AND grantee = 'citara_app' AND privilege_type = 'UPDATE'`);
-    expect(cols.map((c) => c.column_name)).toEqual(['used_at']);
+    expect(cols.map((c) => c.column_name)).toEqual([]);
   });
 });

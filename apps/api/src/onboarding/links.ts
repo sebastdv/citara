@@ -22,7 +22,10 @@ export async function createLink(
 
 export interface ValidLink { linkId: string; tenantId: string; tenantName: string }
 
-/** Válido: del propósito pedido, sin usar, sin vencer y de un negocio no suspendido. */
+/**
+ * Válido: del propósito pedido, sin usar, sin vencer y de un negocio no suspendido.
+ * Solo consulta: lo consume register_channel, en la misma transacción que el canal.
+ */
 export async function peekLink(db: Db, token: string, purpose: LinkPurpose): Promise<ValidLink | null> {
   const [row] = await db.query(
     `SELECT l.id, l.tenant_id, t.name
@@ -31,13 +34,4 @@ export async function peekLink(db: Db, token: string, purpose: LinkPurpose): Pro
         AND l.expires_at > now() AND t.status <> 'suspended'`,
     [hashToken(token), purpose]);
   return row ? { linkId: row.id, tenantId: row.tenant_id, tenantName: row.name } : null;
-}
-
-/** Lo marca usado de forma atómica: de dos usos simultáneos, solo uno gana. */
-export async function consumeLink(db: Db, linkId: string): Promise<boolean> {
-  // Con UPDATE, TypeORM devuelve [filas, conteo].
-  const [, affected] = (await db.query(
-    `UPDATE onboarding_links SET used_at = now()
-      WHERE id = $1 AND used_at IS NULL AND expires_at > now()`, [linkId])) as [unknown[], number];
-  return affected > 0;
 }
