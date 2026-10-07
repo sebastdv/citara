@@ -58,13 +58,17 @@ describe('CLI del operador', () => {
     expect(await setSuspended(admin, 'nuevo', true)).toBe('suspended');
     expect(await peekLink(app, token, 'whatsapp')).toBeNull();
     expect(await setSuspended(admin, 'nuevo', false)).toBe('active');
+    // Reanudar no revive los enlaces que había antes de suspender.
+    expect(await peekLink(app, token, 'whatsapp')).toBeNull();
     const actions = (await adminQuery(`SELECT action FROM audit_log ORDER BY created_at`)).map((a: { action: string }) => a.action);
     expect(actions).toEqual(['tenant.suspended', 'tenant.resumed']);
   });
 
   it('un enlace nuevo reemplaza al perdido', async () => {
-    const { tenantId } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    const { tenantId, token: perdido } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
     expect(await peekLink(app, await newLink(admin, 'nuevo'), 'whatsapp')).toMatchObject({ tenantId });
+    // El perdido pudo llegarle a otra persona: deja de servir.
+    expect(await peekLink(app, perdido, 'whatsapp')).toBeNull();
     await expect(newLink(admin, 'no-existe')).rejects.toThrow(/no-existe/);
   });
 

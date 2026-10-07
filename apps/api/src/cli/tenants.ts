@@ -1,4 +1,4 @@
-import type { DataSource } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { DateTime } from 'luxon';
 import type { EncryptionService } from '../crypto/encryption.service';
 import type { MetaOnboardingClient, SyncType } from '../onboarding/meta-onboarding.client';
@@ -33,8 +33,18 @@ export async function createTenant(admin: DataSource, input: { slug: string; nam
   });
 }
 
+/** Vence ya los enlaces sin usar del negocio: uno perdido pudo llegarle a otra persona. */
+const revokeLinks = (m: EntityManager, tenantId: string) => m.query(
+  `UPDATE onboarding_links SET expires_at = now()
+    WHERE tenant_id = $1 AND used_at IS NULL AND expires_at > now()`, [tenantId]);
+
+/** Un enlace nuevo reemplaza a los anteriores: solo el último sirve. */
 export async function newLink(admin: DataSource, slug: string): Promise<string> {
-  return createLink(admin, await tenantBySlug(admin, slug), 'whatsapp');
+  const tenantId = await tenantBySlug(admin, slug);
+  return admin.transaction(async (m) => {
+    await revokeLinks(m, tenantId);
+    return createLink(m, tenantId, 'whatsapp');
+  });
 }
 
 /** Suspender saca al negocio de operación al instante; reanudar lo devuelve si está completo. */
@@ -43,6 +53,8 @@ export async function setSuspended(admin: DataSource, slug: string, suspended: b
   return admin.transaction(async (m) => {
     if (suspended) {
       await m.query(`UPDATE tenants SET status = 'suspended' WHERE id = $1`, [tenantId]);
+      // Reanudar no debe revivirlos: si hace falta conectar, se pide uno nuevo.
+      await revokeLinks(m, tenantId);
     } else {
       await m.query(`UPDATE tenants SET status = 'onboarding' WHERE id = $1 AND status = 'suspended'`, [tenantId]);
     }

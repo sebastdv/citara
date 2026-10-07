@@ -144,9 +144,10 @@ Estado de cada negocio: canal, historial y **último eco** (la última vez que e
 desde su celular). Si el dueño no abre la app en unos 13 días, Meta corta la coexistencia:
 vigila esa columna.
 
-Otros comandos: `pnpm tenant link <slug>` (enlace nuevo si se perdió o venció),
+Otros comandos: `pnpm tenant link <slug>` (enlace nuevo si se perdió o venció; anula los anteriores),
 `pnpm tenant sync <slug>` (reintentar la sincronización, dentro de las 24 h del alta),
-`pnpm tenant suspend <slug>` / `pnpm tenant resume <slug>`.
+`pnpm tenant suspend <slug>` / `pnpm tenant resume <slug>` (suspender corta al instante, incluso lo que
+ya estaba en cola, y anula los enlaces sin usar).
 
 ## Coexistencia (Fase 1.5)
 
