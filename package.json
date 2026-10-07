@@ -15,6 +15,7 @@
     "db:migrate": "node apps/api/dist/src/cli/migrate.js",
     "dev:provision": "node apps/api/dist/src/cli/seed-dev.js",
     "tenant:apply": "node apps/api/dist/src/cli/tenant-apply.js",
+    "tenant": "node apps/api/dist/src/cli/tenant-cli.js",
     "db:up": "docker compose up -d postgres redis",
     "db:down": "docker compose down"
   },
