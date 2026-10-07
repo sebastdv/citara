@@ -35,11 +35,12 @@ export function botRepliesSuperseded(s: ControlState, now: Date): boolean {
 
 export async function readControl(
   m: EntityManager, conversationId: string,
-): Promise<ControlState & { channelStatus: string }> {
+): Promise<ControlState & { channelStatus: string; tenantStatus: string }> {
   const [row] = await m.query(
-    `SELECT c.control, c.human_until, c.control_reason, ch.status AS channel_status
+    `SELECT c.control, c.human_until, c.control_reason, ch.status AS channel_status, t.status AS tenant_status
        FROM conversations c
        JOIN whatsapp_channels ch ON ch.id = c.channel_id
+       JOIN tenants t ON t.id = c.tenant_id
       WHERE c.id = $1`,
     [conversationId],
   );
@@ -49,6 +50,7 @@ export async function readControl(
     humanUntil: row.human_until ? new Date(row.human_until) : null,
     reason: row.control_reason,
     channelStatus: row.channel_status,
+    tenantStatus: row.tenant_status,
   };
 }
 

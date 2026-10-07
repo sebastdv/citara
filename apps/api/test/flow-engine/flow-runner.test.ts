@@ -206,4 +206,15 @@ describe('FlowRunner', () => {
 
     expect(out.map((o) => o.kind)).toEqual(['text', 'buttons']);
   });
+
+  it('un negocio en alta o suspendido guarda lo que llega pero no responde', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    for (const [i, status] of ['onboarding', 'suspended'].entries()) {
+      await adminQuery(`UPDATE tenants SET status = $1`, [status]);
+      expect(await say(`wamid.ST${i}`, 'Hola')).toEqual([]);
+    }
+    expect(jobs).toEqual([]);
+    const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM messages`);
+    expect(n).toBe(2);
+  });
 });

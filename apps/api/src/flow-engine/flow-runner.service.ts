@@ -80,7 +80,10 @@ export class FlowRunner {
       // upsert de `persist`: antes de avanzar, ¿quién habla?
       const control = await readControl(m, inbound.conversationId);
       const now = new Date();
-      if (control.channelStatus === 'disconnected' || humanInControl(control, now)) {
+      // En alta (sin agenda completa) o suspendido: se guarda lo que llega y
+      // no se responde. Igual con el canal desconectado o un humano al mando.
+      if (control.tenantStatus !== 'active' || control.channelStatus === 'disconnected'
+          || humanInControl(control, now)) {
         // El entrante ya quedó guardado; el bot no responde.
         return { ...inbound, outbound: [] as OutboundContent[], pending: false };
       }
