@@ -22,7 +22,8 @@ const CLAIM_STALE_SECONDS = 60;
  * (reclamado por un envío, con `claimed_at`) → `sent`. Salidas laterales:
  * `window_closed`, `failed` (rechazo permanente, canal inválido o reintentos
  * agotados), `unconfirmed` (pudo o no llegar a Meta; no se reenvía a ciegas) y
- * `superseded` (un humano tomó la conversación antes de que saliera).
+ * `superseded` (un humano tomó la conversación antes de que saliera, o el
+ * negocio dejó de estar activo).
  *
  * TODA transición es compare-and-set sobre el estado previo: dos ejecuciones
  * del mismo turno (un job atascado que BullMQ re-ejecuta mientras el original
@@ -54,7 +55,7 @@ export class OutboundProcessor {
       throw new UnrecoverableError(invalid ?? 'canal inválido');
     }
 
-    const { rows, control, lastInboundAt } = await runInTenant(this.ds, tenantId, async (m) => {
+    const { rows, control, lastInboundAt, tenantStatus } = await runInTenant(this.ds, tenantId, async (m) => {
       const rows: {
         id: string; status: string; in_flight: boolean; payload: OutboundContent; origin: string;
       }[] =
@@ -74,8 +75,17 @@ export class OutboundProcessor {
         humanUntil: conv?.human_until ? new Date(conv.human_until) : null,
         reason: conv?.control_reason ?? null,
       };
-      return { rows, control, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null };
+      const [tenant] = await m.query(`SELECT status FROM tenants WHERE id = $1`, [tenantId]);
+      return { rows, control, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null,
+               tenantStatus: tenant?.status as string | undefined };
     });
+
+    // Suspender es inmediato (spec §8): lo que esperaba en la cola o en
+    // reintentos ya no sale, sea del bot, un recordatorio o del operador.
+    if (tenantStatus !== 'active') {
+      await this.closePending(job, 'superseded');
+      return { sent: 0 };
+    }
 
     let sent = 0;
     for (const row of rows) {
@@ -227,7 +237,7 @@ export class OutboundProcessor {
     return this.closePending(job, 'failed');
   }
 
-  private closePending(job: OutboundJob, to: 'failed' | 'window_closed') {
+  private closePending(job: OutboundJob, to: 'failed' | 'window_closed' | 'superseded') {
     const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
     return runInTenant(this.ds, job.tenantId, (m) => m.query(
       `UPDATE messages SET status = $2 WHERE ${column} = $1 AND status = 'pending'`, [key, to]));
