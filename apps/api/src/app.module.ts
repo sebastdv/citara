@@ -25,9 +25,10 @@ import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
 import { AccountUpdateProcessor } from './coexistence/account-update.processor';
 import { MetaOnboardingClient } from './onboarding/meta-onboarding.client';
 import { OnboardingService } from './onboarding/onboarding.service';
+import { ConnectController } from './onboarding/connect.controller';
 
 @Module({
-  controllers: [WhatsappController],
+  controllers: [WhatsappController, ConnectController],
   providers: [
     {
       // DataSource de la APLICACIÓN (DATABASE_URL, rol citara_app) — nunca el
