@@ -53,4 +53,26 @@ describe('AccountUpdateProcessor', () => {
     const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM audit_log`);
     expect(n).toBe(1);
   });
+
+  it('una reconexión devuelve a operación el canal desconectado', async () => {
+    await update('PARTNER_REMOVED');
+    const r = await update('ACCOUNT_RECONNECTED');
+    expect(r).toMatchObject({ reconnected: 1 });
+    expect(await statuses()).toEqual(['active']);
+    const actions = (await adminQuery(`SELECT action FROM audit_log ORDER BY created_at`)).map((a: { action: string }) => a.action);
+    expect(actions).toEqual(['channel.disconnected', 'channel.reconnected']);
+  });
+
+  it('una reconexión no reactiva un canal que el operador dejó inactivo', async () => {
+    await adminQuery(`UPDATE whatsapp_channels SET status = 'inactive'`);
+    expect(await update('ACCOUNT_RECONNECTED')).toMatchObject({ reconnected: 0 });
+    expect(await statuses()).toEqual(['inactive']);
+  });
+
+  it('desconectar y reconectar tampoco revive un canal que el operador dejó inactivo', async () => {
+    await adminQuery(`UPDATE whatsapp_channels SET status = 'inactive'`);
+    expect(await update('PARTNER_REMOVED')).toMatchObject({ disconnected: 0 });
+    await update('ACCOUNT_RECONNECTED');
+    expect(await statuses()).toEqual(['inactive']);
+  });
 });

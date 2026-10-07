@@ -318,6 +318,18 @@ describe('OutboundProcessor', () => {
     expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
   });
 
+  it('con el negocio suspendido no sale nada de lo que ya estaba en cola', async () => {
+    // Suspender es inmediato (spec §8): un turno o un recordatorio que esperaba
+    // en la cola, o en reintentos, no sale después.
+    const job = await seedTurn([HOLA, MENU]);
+    await adminQuery(`UPDATE tenants SET status = 'suspended'`);
+
+    expect(await processor.process(job)).toEqual({ sent: 0 });
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect((await outRows()).map((r) => r.status)).toEqual(['superseded', 'superseded']);
+  });
+
   it('un canal inexistente o inactivo es un error permanente, sin llamar a Meta', async () => {
     const job = await seedTurn([HOLA]);
 

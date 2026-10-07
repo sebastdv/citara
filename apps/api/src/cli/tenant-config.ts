@@ -142,7 +142,10 @@ export async function applyTenantConfig(admin: DataSource, raw: unknown) {
       flow = definition.key;
     }
 
+    // Si al negocio en alta solo le faltaba la agenda, aquí queda activo.
+    const [{ status }] = await m.query(`SELECT refresh_tenant_status($1) AS status`, [tenantId]);
+
     return { tenantId, services: c.services.length, resources: c.resources.length,
-             hours, timeOff: c.time_off.length, flow };
+             hours, timeOff: c.time_off.length, flow, status: status as string };
   });
 }

@@ -111,8 +111,13 @@ describe('regla de control (base de datos)', () => {
       { actor: 'system', action: 'control.to_bot', details: { cause: 'expired' } });
   });
 
-  it('lee el estado del canal junto con el control', async () => {
-    expect((await control()).channelStatus).toBe('active');
+  it('lee el estado del canal y del negocio junto con el control', async () => {
+    const c = await control();
+    expect([c.channelStatus, c.tenantStatus]).toEqual(['active', 'active']);
+  });
+
+  it('el estado de un negocio solo puede ser onboarding, active o suspended', async () => {
+    await expect(adminQuery(`UPDATE tenants SET status = 'borrado'`)).rejects.toThrow(/check/i);
   });
 
   it('la aplicación no puede corregir ni borrar la bitácora', async () => {

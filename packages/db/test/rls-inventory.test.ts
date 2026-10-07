@@ -25,6 +25,8 @@ const EXENTAS_DE_RLS = new Set([
   'whatsapp_channels',
   // Puerta de idempotencia: se inserta antes de resolver el tenant.
   'webhook_events',
+  // Enlaces de conexión: se resuelven por el token antes de conocer el negocio.
+  'onboarding_links',
 ]);
 
 /**
@@ -62,6 +64,7 @@ const PRESUPUESTO: Record<string, string[]> = {
   // Exentas de RLS, y por eso lo más de solo-lectura posible.
   whatsapp_channels: ['SELECT'],
   webhook_events: ['SELECT', 'INSERT'],
+  onboarding_links: ['SELECT'],
   // Las migraciones las corre el administrador, nunca la aplicación.
   migrations: [],
 };
@@ -149,5 +152,15 @@ describe('invariante: toda tabla con tenant_id lleva RLS', () => {
          AND grantee = 'citara_app' AND privilege_type = 'UPDATE'
        ORDER BY column_name`);
     expect(cols.map((c) => c.column_name)).toEqual(['history_sync', 'status']);
+  });
+
+  it('sobre onboarding_links la app no puede actualizar nada', async () => {
+    // Los consume register_channel (SECURITY DEFINER): con UPDATE (used_at), la
+    // app podía revivir un enlace usado y reutilizarlo.
+    const cols: { column_name: string }[] = await ds.query(`
+      SELECT column_name FROM information_schema.column_privileges
+       WHERE table_schema = 'public' AND table_name = 'onboarding_links'
+         AND grantee = 'citara_app' AND privilege_type = 'UPDATE'`);
+    expect(cols.map((c) => c.column_name)).toEqual([]);
   });
 });
