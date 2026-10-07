@@ -11,6 +11,18 @@ import { IngestService } from './whatsapp/ingest.service';
 import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
+import { SyncQueue } from './queues/sync.queue';
+import { AvailabilityService } from './scheduling/availability.service';
+import { BookingService } from './scheduling/booking.service';
+import { ToolRegistry } from './scheduling/tools/registry';
+import { CLOCK, systemClock } from './clock';
+import { RemindersService } from './scheduling/reminders.service';
+import { RemindersQueue } from './queues/reminders.queue';
+import { EchoProcessor } from './coexistence/echo.processor';
+import { StatusProcessor } from './queues/status.processor';
+import { HistoryProcessor } from './coexistence/history.processor';
+import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
+import { AccountUpdateProcessor } from './coexistence/account-update.processor';
 
 @Module({
   controllers: [WhatsappController],
@@ -67,6 +79,7 @@ import { FlowRunner } from './flow-engine/flow-runner.service';
       useFactory: () => new MetaSender(process.env.META_GRAPH_VERSION!),
     },
     OutboundQueue,
+    SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
     // ctx.get(OutboundProcessor) para consumir la cola de salida. Sin esta
     // entrada el worker arranca "bien" y revienta después con
@@ -81,6 +94,25 @@ import { FlowRunner } from './flow-engine/flow-runner.service';
     // UnknownElementException, invisible para los tests de este archivo
     // porque construyen FlowRunner a mano.
     FlowRunner,
+    // Lo resuelve apps/worker con ctx.get(...) al despachar la cola inbound.
+    // Sin esta entrada el worker arranca y revienta después con
+    // UnknownElementException, invisible para los tests que lo construyen a mano.
+    EchoProcessor,
+    // Mismo motivo que EchoProcessor: el worker lo resuelve con ctx.get(...).
+    StatusProcessor,
+    // Consumidores de la cola `sync`; mismo motivo que EchoProcessor.
+    HistoryProcessor,
+    ContactsSyncProcessor,
+    // Mismo motivo que EchoProcessor: el worker lo resuelve con ctx.get(...).
+    AccountUpdateProcessor,
+    // Agenda (Fase 2). Sin estado: reciben el EntityManager de quien llama.
+    AvailabilityService,
+    RemindersService,
+    BookingService,
+    RemindersQueue,
+    ToolRegistry,
+    // Hora para las decisiones de agenda; los tests la fijan.
+    { provide: CLOCK, useValue: systemClock },
   ],
 })
 export class AppModule {}

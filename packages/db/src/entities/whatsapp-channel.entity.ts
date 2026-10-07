@@ -29,6 +29,12 @@ export class WhatsappChannel {
   @Column({ default: 'active' })
   status!: string;
 
+  @Column({ type: 'varchar', default: 'cloud_api' })
+  mode!: 'cloud_api' | 'coexistence';
+
+  @Column({ name: 'history_sync', type: 'varchar', default: 'not_applicable' })
+  historySync!: 'not_applicable' | 'pending' | 'done' | 'declined';
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

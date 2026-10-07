@@ -90,4 +90,13 @@ describe('InboundProcessor', () => {
     const convs = await runInTenant(app, tenantId, (m) => m.query(`SELECT status FROM conversations`));
     expect(convs).toEqual([{ status: 'closed' }]);
   });
+  it('guarda el entrante como escrito por el cliente, a la hora que dice Meta', async () => {
+    const at = new Date('2026-09-03T15:00:00Z');
+    await processor.process({ tenantId, channelId, message: msg({ wamid: 'wamid.ORIG1', timestamp: at }) });
+
+    const [row] = await runInTenant(app, tenantId, (m) =>
+      m.query(`SELECT origin, occurred_at FROM messages WHERE wamid = 'wamid.ORIG1'`));
+    expect(row.origin).toBe('customer');
+    expect(new Date(row.occurred_at).toISOString()).toBe(at.toISOString());
+  });
 });

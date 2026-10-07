@@ -9,7 +9,7 @@ import { EncryptionService } from '../../src/crypto/encryption.service';
 import { OutboundProcessor } from '../../src/queues/outbound.processor';
 import type { OutboundJob } from '../../src/queues/outbound.queue';
 import { MetaSendError } from '../../src/whatsapp/sender';
-import { resetDb, seedChannel, adminQuery } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, adminQuery } from '../helpers';
 
 let app: DataSource;
 let channels: ChannelResolver;
@@ -36,14 +36,14 @@ async function seedTurn(contents: OutboundContent[], lastInbound = `now()`) {
        VALUES ($1, $2, $3, ${lastInbound}) RETURNING id`,
       [tenantId, contact.id, channelId]);
     const [inbound] = await m.query(
-      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, type, body)
-       VALUES ($1, $2, 'wamid.IN1', 'in', 'text', 'Hola') RETURNING id`,
+      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type, body)
+       VALUES ($1, $2, 'wamid.IN1', 'in', 'customer', 'text', 'Hola') RETURNING id`,
       [tenantId, conv.id]);
     for (const [seq, c] of contents.entries()) {
       await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, payload,
+        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload,
                                status, reply_to_id, seq)
-         VALUES ($1, $2, 'out', 'text', $3, $4, 'pending', $5, $6)`,
+         VALUES ($1, $2, 'out', 'bot', 'text', $3, $4, 'pending', $5, $6)`,
         [tenantId, conv.id, c.body, JSON.stringify(c), inbound.id, seq]);
     }
     const job: OutboundJob = { tenantId, channelId, conversationId: conv.id,
@@ -233,6 +233,89 @@ describe('OutboundProcessor', () => {
     await processor.failTurn(job);
 
     expect((await outRows()).map((r) => r.status)).toEqual(['sent', 'failed']);
+  });
+
+  const humanTookOver = (reason: string, until = `now() + interval '1 hour'`) =>
+    adminQuery(`UPDATE conversations SET control = 'human', human_until = ${until},
+                control_reason = '${reason}'`);
+
+  it('si el dueño contestó desde el celular antes del envío, lo del bot no sale', async () => {
+    // El bot produjo el saludo y, en el mismo segundo, llegó el eco del dueño.
+    const job = await seedTurn([HOLA, MENU]);
+    await humanTookOver('phone');
+
+    await processor.process(job);
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect((await outRows()).map((r) => r.status)).toEqual(['superseded', 'superseded']);
+  });
+
+  it('si el dueño contesta mientras sale el primer mensaje, lo que sigue del bot no sale', async () => {
+    // El control se mide por fila, en el reclamo: cada envío puede tardar
+    // hasta 15 s, y leerlo una sola vez al inicio del job dejaba salir el resto.
+    const job = await seedTurn([HOLA, MENU]);
+    sender.send.mockImplementationOnce(async () => {
+      await humanTookOver('phone');
+      return { wamid: 'wamid.MID' };
+    });
+
+    await processor.process(job);
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent', 'superseded']);
+  });
+
+  it('el mensaje de traspaso del propio flujo sí sale', async () => {
+    const job = await seedTurn([HOLA]);
+    await humanTookOver('flow_handoff');
+
+    await processor.process(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
+  it('lo que escribe el operador sale aunque mande un humano', async () => {
+    const job = await seedTurn([HOLA]);
+    await adminQuery(`UPDATE messages SET origin = 'operator' WHERE direction = 'out'`);
+    await humanTookOver('operator');
+
+    await processor.process(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
+  it('un control humano ya vencido no reemplaza nada', async () => {
+    const job = await seedTurn([HOLA]);
+    await humanTookOver('phone', `now() - interval '1 minute'`);
+
+    await processor.process(job);
+
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
+
+
+  it('un recordatorio sale fuera de la ventana y aunque el dueño esté atendiendo', async () => {
+    const job = await seedTurn([HOLA], `now() - interval '3 days'`);
+    const [row] = await adminQuery(`SELECT id FROM messages WHERE direction = 'out'`);
+    await adminQuery(`UPDATE messages SET origin = 'reminder', type = 'template',
+      payload = '{"kind":"template","name":"recordatorio_cita_24h","language":"es","params":[]}' WHERE id = $1`, [row.id]);
+    await humanTookOver('phone');
+    // Un recordatorio real tiene su cita confirmada detrás (el reclamo lo exige).
+    const { serviceId, resourceId } = await seedCatalog(tenantId);
+    const [contact] = await adminQuery(`SELECT id FROM contacts`);
+    const [appt] = await adminQuery(
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at)
+       VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 day 30 minutes') RETURNING id`,
+      [tenantId, resourceId, serviceId, contact.id]);
+    await adminQuery(
+      `INSERT INTO reminders (tenant_id, appointment_id, kind, send_at, status, message_id)
+       VALUES ($1, $2, '24h', now(), 'queued', $3)`, [tenantId, appt.id, row.id]);
+
+    await processor.process({ tenantId: job.tenantId, channelId: job.channelId,
+                              conversationId: job.conversationId, to: job.to, messageId: row.id });
+
+    expect(sender.send.mock.calls[0][2]).toMatchObject({ kind: 'template' });
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
   });
 
   it('un canal inexistente o inactivo es un error permanente, sin llamar a Meta', async () => {

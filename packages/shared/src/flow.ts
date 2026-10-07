@@ -5,7 +5,10 @@ export type FlowStep =
   | { type: 'capture'; text: string; var: string; validate?: 'text' | 'number' | 'email';
       next: string; on_invalid?: string }
   | { type: 'handoff'; text: string }
-  | { type: 'end'; text?: string };
+  | { type: 'end'; text?: string }
+  | { type: 'tool'; tool: string; args: Record<string, string>; save_list?: string; render?: string;
+      on_success: string; on_empty?: string; on_error: string }
+  | { type: 'pick'; text: string; from: string; var: string; next: string };
 
 export interface FlowDefinition {
   key: string;

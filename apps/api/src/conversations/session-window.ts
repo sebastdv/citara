@@ -23,6 +23,9 @@ export function requiresOpenWindow(content: OutboundContent): boolean {
     case 'buttons':
     case 'list':
       return true;
+    case 'template':
+      // Las plantillas aprobadas por Meta son justo lo que puede salir fuera de las 24 h.
+      return false;
     default: {
       const unhandled: never = content;
       throw new Error(`kind de salida sin regla de ventana: ${JSON.stringify(unhandled)}`);

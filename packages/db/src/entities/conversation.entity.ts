@@ -14,11 +14,17 @@ export class Conversation {
   @Column({ name: 'channel_id', type: 'uuid' })
   channelId!: string;
 
-  @Column({ default: 'bot' })
-  status!: string;
+  @Column({ default: 'open' })
+  status!: 'open' | 'closed';
 
-  @Column({ name: 'assigned_to', type: 'uuid', nullable: true })
-  assignedTo!: string | null;
+  @Column({ type: 'varchar', default: 'bot' })
+  control!: 'bot' | 'human';
+
+  @Column({ name: 'human_until', type: 'timestamptz', nullable: true })
+  humanUntil!: Date | null;
+
+  @Column({ name: 'control_reason', type: 'varchar', nullable: true })
+  controlReason!: 'phone' | 'flow_handoff' | 'operator' | 'history' | null;
 
   @Column({ name: 'last_inbound_at', type: 'timestamptz', nullable: true })
   lastInboundAt!: Date | null;

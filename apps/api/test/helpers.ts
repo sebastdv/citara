@@ -7,6 +7,10 @@ import type { INestApplication } from '@nestjs/common';
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../src/crypto/encryption.service';
 import { AppModule } from '../src/app.module';
+import { AvailabilityService } from '../src/scheduling/availability.service';
+import { BookingService } from '../src/scheduling/booking.service';
+import { ToolRegistry } from '../src/scheduling/tools/registry';
+import { RemindersService } from '../src/scheduling/reminders.service';
 
 let admin: DataSource | null = null;
 
@@ -28,8 +32,8 @@ async function adminDs(): Promise<DataSource> {
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE webhook_events, messages, conversation_sessions, conversations,
-             flows, contacts, whatsapp_channels, tenants
+    TRUNCATE reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
+             flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
 }
@@ -78,4 +82,59 @@ export async function createTestApp(): Promise<INestApplication> {
 export async function closeHelpers(): Promise<void> {
   await admin?.destroy();
   admin = null;
+}
+
+/** Un servicio de 30 min ("corte") que presta un recurso ("maria"). */
+export async function seedCatalog(
+  tenantId: string,
+  over: { durationMin?: number; bufferMin?: number } = {},
+): Promise<{ serviceId: string; resourceId: string }> {
+  const ds = await adminDs();
+  const [s] = await ds.query(
+    `INSERT INTO services (tenant_id, key, name, duration_min, buffer_min)
+     VALUES ($1, 'corte', 'Corte de cabello', $2, $3) RETURNING id`,
+    [tenantId, over.durationMin ?? 30, over.bufferMin ?? 0]);
+  const resourceId = await addResource(tenantId, 'maria', 'María', s.id);
+  return { serviceId: s.id, resourceId };
+}
+
+/** Otro recurso que presta el servicio dado. */
+export async function addResource(
+  tenantId: string, key: string, name: string, serviceId: string,
+): Promise<string> {
+  const ds = await adminDs();
+  const [r] = await ds.query(
+    `INSERT INTO resources (tenant_id, key, name) VALUES ($1, $2, $3) RETURNING id`,
+    [tenantId, key, name]);
+  await ds.query(
+    `INSERT INTO resource_services (tenant_id, resource_id, service_id) VALUES ($1, $2, $3)`,
+    [tenantId, r.id, serviceId]);
+  return r.id;
+}
+
+/** Lunes a viernes, 09:00-18:00 en hora local del negocio. */
+export async function seedHours(tenantId: string, resourceId?: string): Promise<void> {
+  const ds = await adminDs();
+  for (const weekday of [1, 2, 3, 4, 5]) {
+    await ds.query(
+      `INSERT INTO business_hours (tenant_id, resource_id, weekday, start_time, end_time)
+       VALUES ($1, $2, $3, '09:00', '18:00')`, [tenantId, resourceId ?? null, weekday]);
+  }
+}
+
+export async function seedContact(tenantId: string, waId = '573001112233'): Promise<string> {
+  const ds = await adminDs();
+  const [c] = await ds.query(
+    `INSERT INTO contacts (tenant_id, wa_id, name) VALUES ($1, $2, 'Ana') RETURNING id`, [tenantId, waId]);
+  return c.id;
+}
+
+/** Los servicios de agenda, cableados como en AppModule. Sin estado ni conexiones. */
+export function buildScheduling(ds?: DataSource) {
+  const availability = new AvailabilityService();
+  // El barrido necesita la DataSource; programar y cancelar usan el EntityManager del llamador.
+  const reminders = new RemindersService(ds as DataSource);
+  const booking = new BookingService(availability, reminders);
+  const tools = new ToolRegistry(availability, booking);
+  return { availability, reminders, booking, tools };
 }

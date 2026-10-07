@@ -10,9 +10,18 @@ import { AppModule } from '../../src/app.module';
 import { MetaSender } from '../../src/whatsapp/sender';
 import { startWorkers } from '../../src/queues/workers';
 import { INBOUND_QUEUE } from '../../src/queues/inbound.queue';
-import { OUTBOUND_QUEUE } from '../../src/queues/outbound.queue';
+import { OUTBOUND_QUEUE, OutboundQueue } from '../../src/queues/outbound.queue';
+import { CLOCK } from '../../src/clock';
+import { AGENDA_FLOW } from '../../src/flow-engine/flows/agenda';
+import { RemindersService } from '../../src/scheduling/reminders.service';
+import { SYNC_QUEUE } from '../../src/queues/sync.queue';
+import { REMINDERS_QUEUE } from '../../src/queues/reminders.queue';
+import { echoPayload, historyPayload } from '../whatsapp/fixtures/coexistence';
 import { DEMO_FLOW } from '../../src/cli/provision';
-import { resetDb, seedChannel, seedFlow, adminQuery, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedFlow, seedCatalog, seedHours, adminQuery, closeHelpers } from '../helpers';
+
+/** Lunes 7 de septiembre, 22:00 en Bogotá: la primera franja libre es el martes 09:00. */
+const AGENDA_NOW = new Date('2026-09-08T03:00:00Z');
 
 /**
  * Punta a punta con TODO real menos Meta: webhook firmado → Redis → worker de
@@ -38,7 +47,7 @@ const fakeSender = {
   async send(_channel: unknown, to: string, content: OutboundContent) {
     const err = failNext?.() ?? null;
     if (err) throw err;
-    sent.push({ to, body: content.body });
+    sent.push({ to, body: 'body' in content ? content.body : `[plantilla ${content.name}]` });
     return { wamid: `wamid.out.${sent.length}.${Date.now()}` };
   },
 };
@@ -78,10 +87,11 @@ async function quiesce(timeoutMs = 15000) {
 beforeAll(async () => {
   const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
     .overrideProvider(MetaSender).useValue(fakeSender)
+    .overrideProvider(CLOCK).useValue({ now: () => AGENDA_NOW })
     .compile();
   app = moduleRef.createNestApplication({ rawBody: true });
   await app.init();
-  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE].map(
+  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE, REMINDERS_QUEUE].map(
     (name) => new Queue(name, { connection: { url: process.env.REDIS_URL } }));
 });
 
@@ -95,7 +105,7 @@ beforeEach(async () => {
   await seedFlow(tenantId, DEMO_FLOW);
   sent = [];
   failNext = null;
-  workers = startWorkers(app, { concurrency: 10 });
+  workers = startWorkers(app, { concurrency: 10, scheduleReminders: false });
 });
 
 afterAll(async () => {
@@ -164,5 +174,71 @@ describe('pipeline real webhook → worker → Meta', () => {
     const [{ turnos }] = await adminQuery(
       `SELECT count(DISTINCT reply_to_id)::int AS turnos FROM messages WHERE direction = 'out'`);
     expect(turnos).toBe(2);
+  });
+});
+
+describe('pipeline real con coexistencia', () => {
+  it('después de que el dueño contesta desde el celular, el bot no le habla encima', async () => {
+    // Un minuto antes: Meta trae segundos, y empatar con el mensaje del cliente
+    // dejaría el orden por occurred_at al azar.
+    await post(echoPayload({ wamid: 'wamid.PE1', to: '573001112233', text: 'Hola Ana, ya te atiendo',
+                             at: new Date(Date.now() - 60_000) }));
+    await quiesce();
+    await post(webhook('wamid.PE2', '¿A qué hora puedo ir?'));
+    await quiesce();
+
+    expect(sent).toEqual([]);
+    const rows = await adminQuery(`SELECT origin FROM messages ORDER BY occurred_at`);
+    expect(rows.map((r: { origin: string }) => r.origin)).toEqual(['phone', 'customer']);
+  });
+
+  it('cuando vence el plazo del dueño, el bot vuelve a atender', async () => {
+    await post(echoPayload({ wamid: 'wamid.PV1', to: '573001112233' }));
+    await quiesce();
+    await adminQuery(`UPDATE conversations SET human_until = now() - interval '1 minute'`);
+    await post(webhook('wamid.PV2', 'Hola'));
+    await quiesce();
+
+    expect(sent.map((s) => s.body)).toEqual([SALUDO, MENU]);
+  });
+
+  it('al conectar, una conversación donde el dueño estuvo activo queda en sus manos', async () => {
+    const ago = (h: number) => new Date(Date.now() - h * 3_600_000);
+    await post(historyPayload({ customer: '573001112233', lines: [
+      { wamid: 'wamid.PH1', fromCustomer: true, text: '¿Me guardas el jueves?', at: ago(2) },
+      { wamid: 'wamid.PH2', fromCustomer: false, text: 'Claro, a las 4', at: ago(1) },
+    ] }));
+    await quiesce();
+    await post(webhook('wamid.PH3', 'Perfecto, gracias'));
+    await quiesce();
+
+    expect(sent).toEqual([]);
+  });
+});
+
+describe('pipeline real de agenda', () => {
+  it('un cliente agenda por WhatsApp y recibe el recordatorio por plantilla', async () => {
+    const [t] = await adminQuery(`SELECT id FROM tenants`);
+    await seedCatalog(t.id);
+    await seedHours(t.id);
+    await adminQuery(`UPDATE flows SET is_default = false`);
+    await seedFlow(t.id, AGENDA_FLOW);
+
+    let n = 0;
+    for (const text of ['Hola', 'agendar', '1', '1', '1', 'Ana']) {
+      await post(webhook(`wamid.AG${n++}`, text));
+      await quiesce();
+    }
+    expect(sent.at(-1)!.body).toMatch(/^¡Listo, Ana! Tu cita quedó para el martes/);
+    const [cita] = await adminQuery(`SELECT starts_at FROM appointments`);
+    expect(new Date(cita.starts_at).toISOString()).toBe('2026-09-08T14:00:00.000Z');
+
+    // El recordatorio de 2 h (12:00Z). El de 24 h ya había pasado al agendar.
+    const queue = app.get(OutboundQueue);
+    for (const { job, delay } of await app.get(RemindersService).sweep(new Date('2026-09-08T12:01:00Z'))) {
+      await queue.add(job, { delay });
+    }
+    await quiesce();
+    expect(sent.at(-1)!.body).toBe('[plantilla recordatorio_cita_2h]');
   });
 });

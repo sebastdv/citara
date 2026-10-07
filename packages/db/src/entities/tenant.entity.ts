@@ -18,6 +18,9 @@ export class Tenant {
   @Column({ default: 'active' })
   status!: 'active' | 'suspended';
 
+  @Column({ name: 'human_takeover_hours', type: 'smallint', default: 12 })
+  humanTakeoverHours!: number;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

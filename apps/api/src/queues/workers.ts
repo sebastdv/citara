@@ -1,7 +1,19 @@
 import type { INestApplicationContext } from '@nestjs/common';
-import { Worker } from 'bullmq';
+import { UnrecoverableError, Worker } from 'bullmq';
 import { FlowRunner } from '../flow-engine/flow-runner.service';
-import { INBOUND_QUEUE, rehydrateInboundJob, type InboundJob } from './inbound.queue';
+import {
+  INBOUND_QUEUE, rehydrateEchoJob, rehydrateInboundJob, rehydrateStatusJob,
+  type AccountUpdateJob, type EchoJob, type InboundJob, type StatusJob,
+} from './inbound.queue';
+import { SYNC_QUEUE, rehydrateHistoryJob, type ContactsSyncJob, type HistoryJob } from './sync.queue';
+import { StatusProcessor } from './status.processor';
+import { EchoProcessor } from '../coexistence/echo.processor';
+import { HistoryProcessor } from '../coexistence/history.processor';
+import { ContactsSyncProcessor } from '../coexistence/contacts-sync.processor';
+import { AccountUpdateProcessor } from '../coexistence/account-update.processor';
+import { RemindersService } from '../scheduling/reminders.service';
+import { RemindersQueue, REMINDERS_QUEUE } from './reminders.queue';
+import { OutboundQueue } from './outbound.queue';
 import { OutboundProcessor } from './outbound.processor';
 import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
 
@@ -13,7 +25,7 @@ import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
  */
 export function startWorkers(
   ctx: INestApplicationContext,
-  opts: { concurrency?: number } = {},
+  opts: { concurrency?: number; scheduleReminders?: boolean } = {},
 ): { close: () => Promise<void> } {
   const connection = { url: process.env.REDIS_URL };
   const concurrency = opts.concurrency ?? Number(process.env.WORKER_CONCURRENCY ?? 10);
@@ -23,9 +35,23 @@ export function startWorkers(
   const flowRunner = ctx.get(FlowRunner);
   const outboundProcessor = ctx.get(OutboundProcessor);
 
-  const inbound = new Worker<InboundJob>(
+  const echoes = ctx.get(EchoProcessor);
+  const statuses = ctx.get(StatusProcessor);
+  const accounts = ctx.get(AccountUpdateProcessor);
+  const history = ctx.get(HistoryProcessor);
+  const contacts = ctx.get(ContactsSyncProcessor);
+
+  const inbound = new Worker<InboundJob | EchoJob | StatusJob | AccountUpdateJob>(
     INBOUND_QUEUE,
-    (job) => flowRunner.handle(rehydrateInboundJob(job.data)),
+    (job) => {
+      switch (job.name) {
+        case 'process': return flowRunner.handle(rehydrateInboundJob(job.data as InboundJob));
+        case 'phone_echo': return echoes.process(rehydrateEchoJob(job.data as EchoJob));
+        case 'status': return statuses.process(rehydrateStatusJob(job.data as StatusJob));
+        case 'account_update': return accounts.process(job.data as AccountUpdateJob);
+        default: throw new UnrecoverableError(`job de entrada desconocido: ${job.name}`);
+      }
+    },
     { connection, concurrency },
   );
   inbound.on('failed', (job, err) => {
@@ -54,7 +80,40 @@ export function startWorkers(
   });
   outbound.on('error', (err) => console.error(`[outbound] error del worker: ${err.message}`));
 
+  // Concurrencia 1: el historial llega en tandas grandes y nada aquí es
+  // urgente; un solo chunk a la vez acota cuántas conversaciones bloquea la
+  // importación al mismo tiempo. (La regla del dueño activo corre en cada
+  // chunk, así que no depende de este orden.)
+  const sync = new Worker<HistoryJob | ContactsSyncJob>(
+    SYNC_QUEUE,
+    (job) => {
+      switch (job.name) {
+        case 'history_chunk': return history.process(rehydrateHistoryJob(job.data as HistoryJob));
+        case 'contacts_sync': return contacts.process(job.data as ContactsSyncJob);
+        default: throw new UnrecoverableError(`job de sync desconocido: ${job.name}`);
+      }
+    },
+    { connection, concurrency: 1 },
+  );
+  sync.on('failed', (job, err) => console.error(`[sync] job ${job?.id} falló: ${err.message}`));
+  sync.on('error', (err) => console.error(`[sync] error del worker: ${err.message}`));
+
+  const reminders = ctx.get(RemindersService);
+  const outboundQueue = ctx.get(OutboundQueue);
+  // Concurrencia 1: un barrido a la vez. Si el encolado falla, el siguiente
+  // barrido re-encola los huérfanos (outbox).
+  const remindersWorker = new Worker(REMINDERS_QUEUE, async () => {
+    for (const { job, delay } of await reminders.sweep(new Date())) await outboundQueue.add(job, { delay });
+  }, { connection, concurrency: 1 });
+  remindersWorker.on('failed', (job, err) => console.error(`[reminders] job ${job?.id} falló: ${err.message}`));
+  remindersWorker.on('error', (err) => console.error(`[reminders] error del worker: ${err.message}`));
+  if (opts.scheduleReminders !== false) {
+    void ctx.get(RemindersQueue).schedule()
+      .catch((err: Error) => console.error(`[reminders] no se pudo programar el barrido: ${err.message}`));
+  }
+
   return {
-    close: async () => { await inbound.close(); await outbound.close(); },
+    close: async () => { await inbound.close(); await outbound.close(); await sync.close();
+      await remindersWorker.close(); },
   };
 }

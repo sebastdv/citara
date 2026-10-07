@@ -2,241 +2,336 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Un negocio puede definir servicios, recursos y horarios, y un cliente puede agendar una cita real desde WhatsApp usando menús deterministas — sin una línea de IA y sin Google Calendar.
+> **Revisión 2026-10-06.** Reescrito sobre el código real de las fases 1 y 1.5 y el spec v2. La
+> versión del 2026-09-03 sigue en el historial de git; no se ejecuta. Qué cambió y por qué:
+> los servicios de agenda trabajan con el `EntityManager` del turno (antes abrían
+> transacciones propias, que con el lock de la conversación colgaban el worker); la reserva
+> va dentro de un `SAVEPOINT`; reprogramar es atómico; "cualquier recurso" calcula por
+> recurso; el cálculo de franjas respeta el rango pedido (la versión anterior rechazaba
+> reservas válidas en Bogotá); hay horizonte máximo; las herramientas son una clase
+> inyectable; los tokens de confirmación van ligados a la herramienta; los recordatorios
+> salen por el outbox con `origin='reminder'`; y `tenant:apply` llega a esta fase.
 
-**Architecture:** `appointments` es la fuente de verdad, protegida por una restricción de exclusión de PostgreSQL que hace imposible la doble reserva a nivel de motor. El cálculo de disponibilidad es una función pura sobre horarios, ausencias y citas existentes, expresado siempre en la zona horaria del negocio. El motor de flujos gana un tipo de paso `tool` que invoca estas operaciones de forma determinista; en la Fase 4 las mismas operaciones se exponen al agente sin cambiar su implementación.
+**Goal:** Un negocio con servicios, recursos y horarios cargados por `tenant:apply` recibe citas reales por WhatsApp usando menús deterministas —sin IA y sin Google Calendar—, nunca con dos citas en la misma franja del mismo recurso, y sus clientes reciben recordatorios por plantilla.
 
-**Tech Stack:** lo de la Fase 1, más Luxon 3 para aritmética de zonas horarias.
+**Architecture:** `appointments` es la fuente de verdad, protegida por una restricción de exclusión de PostgreSQL. El cálculo de franjas es una función pura en la zona horaria del negocio. Los servicios de agenda no tienen estado y reciben el `EntityManager` de quien los llama: dentro de un turno corren en la transacción del turno (con la conversación bloqueada y RLS fijado). El motor gana dos pasos, `tool` (invoca una herramienta del `ToolRegistry`) y `pick` (elige de una lista por número). Los recordatorios los barre un job cada minuto, que los deja como mensajes plantilla `pending` (outbox) y los encola uno por uno.
 
-**Spec:** `docs/superpowers/specs/2026-09-03-plataforma-whatsapp-citas-design.md`
+**Tech Stack:** lo de las fases 1 y 1.5, más Luxon 3 (zonas horarias), Zod 3 (argumentos de herramientas y configuración) y `yaml` (configuración de negocios).
 
-**Depende de:** `docs/superpowers/plans/2026-09-03-fase-1-cimientos.md` completo.
+**Spec:** `docs/superpowers/specs/2026-09-03-plataforma-whatsapp-citas-design.md` (v2) — §4.1-4.2 agenda, §5.4 reglas de herramientas (R1-R4), §6 control, §7.1 outbox, §8.5 `tenant:apply`, §10 roadmap.
+
+**Depende de:** fases 1 y 1.5 en `main`.
 
 ## Global Constraints
 
-Además de las de la Fase 1:
+- Todo lo de las fases 1 y 1.5 sigue vigente: RLS `ENABLE`+`FORCE` en toda tabla con `tenant_id`, `TZ=UTC`, webhook con `200` en menos de 100 ms, regla de control antes de responder, outbox de salida.
+- **Toda aritmética de fechas de calendario usa Luxon en la zona del negocio** (`tenants.timezone`). Se avanzan días de calendario, nunca 24 h en milisegundos. Los instantes se guardan en `timestamptz`.
+- **Las herramientas validan sus propios argumentos** (R1): horario, ausencias, duración real, buffer, anticipación mínima y horizonte máximo. No se asume que el llamador respetó nada.
+- **Fechas de entrada en ISO-8601 con offset** (R2): una fecha sin zona se rechaza.
+- **`tenant_id` y `contact_id` nunca son argumentos de una herramienta** (R3): los inyecta el runtime. La propiedad de una cita se verifica en SQL.
+- **Lo destructivo se confirma en dos tiempos** (R4): cancelar y reprogramar devuelven primero un token; solo la segunda llamada aplica.
+- **Una cita confirmada nunca se solapa con otra del mismo recurso.** Lo garantiza la base de datos. El buffer se garantiza al ofrecer y al validar; bajo una carrera, dos citas pegadas dentro del buffer son posibles (nunca superpuestas).
+- **Servicios de agenda sin estado:** reciben `m: EntityManager`, nunca abren `runInTenant` propio cuando corren dentro de un turno.
+- **Migraciones:** `import type { MigrationInterface, QueryRunner } from 'typeorm'` y `import { tenantRlsSql } from '../rls.ts'`. Una por tabla.
+- **Servicios Nest:** parámetros del constructor importados como valor, nunca `import type`. Todo provider nuevo se registra en `apps/api/src/app.module.ts` en la tarea que lo crea.
+- **Toda tabla nueva se declara en `PRESUPUESTO`** de `packages/db/test/rls-inventory.test.ts`. Jamás se debilita el guardia.
+- **TypeORM con `UPDATE`/`DELETE` devuelve `[filas, conteo]`**, también con `RETURNING`: `const [rows] = (await m.query(...)) as [Row[], number]`.
+- **Tests:** `pnpm test <ruta>` (usa `citara_test` y Redis db 1). Helpers existentes en `apps/api/test/helpers.ts`: `resetDb`, `seedChannel` (tenant `salon`, zona `America/Bogota`, canal `106540`), `seedFlow`, `adminQuery`, `createTestApp`, `closeHelpers`.
+- **Commits:** Conventional Commits en español, un solo `-m`, sin cuerpo ni trailer `Co-Authored-By`. `git add` con rutas explícitas, nunca `-A`.
 
-- **Toda aritmética de fechas usa la zona horaria del tenant** (`tenants.timezone`), nunca la del servidor ni la del contenedor. Los procesos corren con `TZ=UTC` precisamente para que un olvido se note en los tests.
-- **Los instantes se almacenan en `timestamptz`** y se presentan convertidos. Jamás se guarda una hora local sin zona.
-- **Las herramientas de agenda validan sus propios argumentos.** No se asume que el llamador (menú hoy, LLM en la Fase 4) respetó las reglas del negocio.
-- Una cita confirmada **nunca** puede solaparse con otra del mismo recurso. Esto lo garantiza la base de datos, no la aplicación.
+## Review Focus
+
+1. **Una franja que cruza la medianoche UTC** (19:00 en Bogotá = 00:00Z del día siguiente) debe poder reservarse. → Task 5.
+2. **Un negocio con dos recursos:** si María está ocupada a las 10:00, la franja de Pedro a las 10:00 debe ofrecerse. → Task 5.
+3. **Si el turno falla después de agendar** (un paso posterior del flujo lanza), la cita no debe quedar creada. → Task 7.
+4. **Reprogramar una cita** no debe dejar salir el recordatorio de la hora vieja. → Task 9.
+5. **`tenant:apply` que quita un servicio con citas futuras** lo desactiva sin borrar las citas. → Task 10.
 
 ---
 
 ## File Structure
 
 ```
-apps/api/src/scheduling/
-├─ entities/                 (en packages/db) services, resources, business_hours, appointments
-├─ availability.ts           cálculo de franjas — función PURA, sin BD
-├─ availability.service.ts   carga datos y delega en availability.ts
-├─ booking.service.ts        reserva, cancela, reprograma; traduce errores de Postgres
-├─ scheduling.errors.ts      errores de dominio tipados
-└─ tools/                    las operaciones invocables: contrato estable entre fases
-   ├─ index.ts               registro de herramientas
-   ├─ list-services.tool.ts
-   ├─ list-slots.tool.ts
-   ├─ book.tool.ts
-   ├─ list-my-appointments.tool.ts
-   ├─ cancel.tool.ts
-   └─ reschedule.tool.ts
+packages/db/src/migrations/
+├─ 1725400000000-CreateServices.ts
+├─ 1725400100000-CreateResources.ts
+├─ 1725400200000-CreateResourceServices.ts
+├─ 1725400250000-AddBookingSettingsToTenants.ts
+├─ 1725400300000-CreateBusinessHours.ts
+├─ 1725400400000-CreateTimeOff.ts
+├─ 1725400500000-CreateAppointments.ts
+├─ 1725400600000-CreateReminders.ts
+└─ 1725400700000-AddReminderOriginToMessages.ts
+apps/api/src/
+├─ clock.ts                          reloj inyectable (solo para decisiones de agenda)
+├─ scheduling/
+│  ├─ availability.ts                computeSlots — función PURA
+│  ├─ availability.service.ts        carga datos, slotsFor, check (veredicto de reserva)
+│  ├─ booking.service.ts             book / cancel / reschedule / listForContact / findForContact
+│  ├─ reminders.service.ts           scheduleFor / cancelFor / sweep
+│  ├─ scheduling.errors.ts           errores de dominio
+│  ├─ format.ts                      etiquetas legibles de fecha en la zona del negocio
+│  └─ tools/registry.ts              ToolRegistry: las seis herramientas
+├─ flow-engine/flows/agenda.ts       AGENDA_FLOW: el flujo de menús que se entrega
+├─ conversations/message-type.ts     tipo de `messages` a partir del contenido
+├─ queues/reminders.queue.ts         cola `reminders` con su scheduler de un minuto
+└─ cli/{tenant-config,tenant-apply}.ts
+docs/ejemplos/negocio.yaml           ejemplo de configuración
 ```
-
-**Decisión de frontera:** `availability.ts` no toca la base de datos. Recibe horarios,
-ausencias y citas ya cargadas y devuelve franjas. Así el algoritmo más delicado del
-sistema —el que tiene que ser correcto con zonas horarias, buffers y bordes— se prueba
-con tablas de casos, sin infraestructura.
 
 ---
 
 ## Tareas
 
-### Task 1: Servicios y recursos
+### Task 1: Catálogo y reglas de reserva
 
 **Files:**
-- Create: migraciones `1725400000000-CreateServices.ts`, `1725400100000-CreateResources.ts`, `1725400200000-CreateResourceServices.ts`
-- Create: `packages/db/src/entities/service.entity.ts`, `resource.entity.ts`
+- Create: migraciones `1725400000000-CreateServices.ts`, `1725400100000-CreateResources.ts`, `1725400200000-CreateResourceServices.ts`, `1725400250000-AddBookingSettingsToTenants.ts`
+- Modify: `packages/db/test/rls-inventory.test.ts` (`PRESUPUESTO`)
+- Modify: `apps/api/test/helpers.ts` (`resetDb`, `seedCatalog`, `addResource`)
 - Test: `apps/api/test/scheduling/catalog.test.ts`
 
 **Interfaces:**
-- Consumes: `tenantRlsSql`, `runInTenant` (Fase 1).
-- Produces: tablas `services` (`id, tenant_id, name, duration_min, buffer_min, price_cents, active`), `resources` (`id, tenant_id, name, active`), `resource_services` (`resource_id, service_id`). Helper de test `seedCatalog(tenantId)` que devuelve `{ serviceId, resourceId }`.
+- Produces: tablas `services` (`id, tenant_id, key, name, duration_min, buffer_min, price_cents, active`; `UNIQUE (tenant_id, key)`), `resources` (`id, tenant_id, key, name, active`; `UNIQUE (tenant_id, key)`), `resource_services` (`tenant_id, resource_id, service_id`); columnas `tenants.min_lead_minutes` (60), `horizon_days` (60), `slot_granularity_minutes` (15).
+- Produces (helpers): `seedCatalog(tenantId, over?: { durationMin?: number; bufferMin?: number }): Promise<{ serviceId: string; resourceId: string }>` (servicio `corte` "Corte de cabello", recurso `maria` "María"); `addResource(tenantId, key, name, serviceId): Promise<string>`.
 
 - [ ] **Step 1: Escribir el test que falla**
 
 `apps/api/test/scheduling/catalog.test.ts`:
 ```ts
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { runInTenant } from '../../src/tenancy/tenant-context';
-import { resetDb, seedChannel, seedCatalog, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, adminQuery, closeHelpers } from '../helpers';
 
-let app: DataSource, tenantId: string;
+let app: DataSource;
+let tenantId: string;
 
-beforeEach(async () => {
-  await resetDb();
-  ({ tenantId } = await seedChannel());
-  if (!app) { app = createDataSource(process.env.DATABASE_URL!); await app.initialize(); }
-});
+beforeAll(async () => { app = createDataSource(process.env.DATABASE_URL!); await app.initialize(); });
 afterAll(async () => { await app.destroy(); await closeHelpers(); });
+beforeEach(async () => { await resetDb(); ({ tenantId } = await seedChannel()); });
 
 describe('catálogo de agenda', () => {
-  it('crea servicio y recurso enlazados', async () => {
+  it('enlaza un servicio con el recurso que lo presta', async () => {
     const { serviceId, resourceId } = await seedCatalog(tenantId);
 
-    const rows = await runInTenant(app, tenantId, (m) =>
-      m.query(
-        `SELECT s.name AS servicio, s.duration_min, r.name AS recurso
-           FROM resource_services rs
-           JOIN services  s ON s.id = rs.service_id
-           JOIN resources r ON r.id = rs.resource_id
-          WHERE rs.service_id = $1 AND rs.resource_id = $2`,
-        [serviceId, resourceId],
-      ));
+    const rows = await runInTenant(app, tenantId, (m) => m.query(
+      `SELECT s.name AS servicio, s.duration_min, r.name AS recurso
+         FROM resource_services rs
+         JOIN services s ON s.id = rs.service_id
+         JOIN resources r ON r.id = rs.resource_id
+        WHERE rs.service_id = $1 AND rs.resource_id = $2`, [serviceId, resourceId]));
 
-    expect(rows).toHaveLength(1);
-    expect(rows[0].duration_min).toBe(30);
+    expect(rows).toEqual([{ servicio: 'Corte de cabello', duration_min: 30, recurso: 'María' }]);
   });
 
   it('rechaza una duración de cero o negativa', async () => {
-    await expect(
-      runInTenant(app, tenantId, (m) =>
-        m.query(`INSERT INTO services (tenant_id, name, duration_min) VALUES ($1,'X',0)`,
-                [tenantId])),
-    ).rejects.toThrow();
+    await expect(adminQuery(
+      `INSERT INTO services (tenant_id, key, name, duration_min) VALUES ($1, 'x', 'X', 0)`, [tenantId]))
+      .rejects.toThrow(/check/i);
   });
 
-  it('los servicios quedan aislados por tenant', async () => {
+  it('los servicios quedan aislados por negocio', async () => {
     await seedCatalog(tenantId);
-    const [otro] = await (await import('../helpers')).adminQuery(
-      `INSERT INTO tenants (slug, name) VALUES ('otro','Otro') RETURNING id`);
-
+    const [otro] = await adminQuery(`INSERT INTO tenants (slug, name) VALUES ('otro', 'Otro') RETURNING id`);
     const rows = await runInTenant(app, otro.id, (m) => m.query(`SELECT * FROM services`));
-    expect(rows).toHaveLength(0);
+    expect(rows).toEqual([]);
+  });
+
+  it('la clave de un servicio es única dentro del negocio, no entre negocios', async () => {
+    await seedCatalog(tenantId);
+    const [otro] = await adminQuery(`INSERT INTO tenants (slug, name) VALUES ('otro', 'Otro') RETURNING id`);
+    await expect(seedCatalog(otro.id)).resolves.toBeDefined();
+    await expect(adminQuery(
+      `INSERT INTO services (tenant_id, key, name, duration_min) VALUES ($1, 'corte', 'Otro', 20)`,
+      [tenantId])).rejects.toThrow(/duplicate key/);
+  });
+
+  it('un negocio trae reglas de reserva por defecto', async () => {
+    const [t] = await adminQuery(
+      `SELECT min_lead_minutes, horizon_days, slot_granularity_minutes FROM tenants WHERE id = $1`, [tenantId]);
+    expect(t).toEqual({ min_lead_minutes: 60, horizon_days: 60, slot_granularity_minutes: 15 });
   });
 });
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [ ] **Step 2: Correr y verlo fallar**
 
-Run: `pnpm vitest run apps/api/test/scheduling/catalog`
-Expected: FAIL — no existen las tablas ni `seedCatalog`.
+Run: `pnpm test apps/api/test/scheduling/catalog.test.ts`
+Expected: FAIL — `seedCatalog` no existe en los helpers.
 
-- [ ] **Step 3: Implementar**
+- [ ] **Step 3: Escribir las migraciones**
 
 `packages/db/src/migrations/1725400000000-CreateServices.ts`:
 ```ts
-import { MigrationInterface, QueryRunner } from 'typeorm';
-import { tenantRlsSql } from '../rls';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
 
+/** Lo que el negocio ofrece. `key` es la identidad estable que usa `tenant:apply`. */
 export class CreateServices1725400000000 implements MigrationInterface {
   public async up(q: QueryRunner): Promise<void> {
     await q.query(`
       CREATE TABLE services (
         id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id    uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        key          varchar(64) NOT NULL,
         name         varchar(255) NOT NULL,
         duration_min integer NOT NULL CHECK (duration_min > 0),
         buffer_min   integer NOT NULL DEFAULT 0 CHECK (buffer_min >= 0),
-        price_cents  integer,
+        price_cents  integer CHECK (price_cents >= 0),
         active       boolean NOT NULL DEFAULT true,
-        created_at   timestamptz NOT NULL DEFAULT now()
+        created_at   timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (tenant_id, key)
       )
     `);
     for (const sql of tenantRlsSql('services')) await q.query(sql);
   }
-  public async down(q: QueryRunner): Promise<void> { await q.query(`DROP TABLE services`); }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`DROP TABLE services`);
+  }
 }
 ```
 
 `packages/db/src/migrations/1725400100000-CreateResources.ts`:
 ```ts
-import { MigrationInterface, QueryRunner } from 'typeorm';
-import { tenantRlsSql } from '../rls';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
 
+/** Quién atiende: la estilista, el médico, la bahía del taller. */
 export class CreateResources1725400100000 implements MigrationInterface {
   public async up(q: QueryRunner): Promise<void> {
     await q.query(`
       CREATE TABLE resources (
         id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         tenant_id  uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        key        varchar(64) NOT NULL,
         name       varchar(255) NOT NULL,
         active     boolean NOT NULL DEFAULT true,
-        created_at timestamptz NOT NULL DEFAULT now()
+        created_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (tenant_id, key)
       )
     `);
     for (const sql of tenantRlsSql('resources')) await q.query(sql);
   }
-  public async down(q: QueryRunner): Promise<void> { await q.query(`DROP TABLE resources`); }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`DROP TABLE resources`);
+  }
 }
 ```
 
 `packages/db/src/migrations/1725400200000-CreateResourceServices.ts`:
 ```ts
-import { MigrationInterface, QueryRunner } from 'typeorm';
-import { tenantRlsSql } from '../rls';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
 
+/** Qué recurso presta qué servicio. */
 export class CreateResourceServices1725400200000 implements MigrationInterface {
   public async up(q: QueryRunner): Promise<void> {
     await q.query(`
       CREATE TABLE resource_services (
         tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
         resource_id uuid NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
-        service_id  uuid NOT NULL REFERENCES services(id)  ON DELETE CASCADE,
+        service_id  uuid NOT NULL REFERENCES services(id) ON DELETE CASCADE,
         PRIMARY KEY (resource_id, service_id)
       )
     `);
     for (const sql of tenantRlsSql('resource_services')) await q.query(sql);
   }
+
   public async down(q: QueryRunner): Promise<void> {
     await q.query(`DROP TABLE resource_services`);
   }
 }
 ```
 
-Añadir a `apps/api/test/helpers.ts`:
+`packages/db/src/migrations/1725400250000-AddBookingSettingsToTenants.ts`:
 ```ts
-/** Ejecuta SQL como administrador. Solo para preparar y verificar en tests. */
-export async function adminQuery(sql: string, params: unknown[] = []): Promise<any[]> {
-  const ds = await adminDs();
-  return ds.query(sql, params);
-}
+import type { MigrationInterface, QueryRunner } from 'typeorm';
 
+/**
+ * Reglas de reserva por negocio (R1): anticipación mínima, horizonte máximo y
+ * cada cuántos minutos arranca una franja. Las fija `tenant:apply`.
+ */
+export class AddBookingSettingsToTenants1725400250000 implements MigrationInterface {
+  public async up(q: QueryRunner): Promise<void> {
+    await q.query(`
+      ALTER TABLE tenants
+        ADD COLUMN min_lead_minutes smallint NOT NULL DEFAULT 60 CHECK (min_lead_minutes >= 0),
+        ADD COLUMN horizon_days smallint NOT NULL DEFAULT 60 CHECK (horizon_days BETWEEN 1 AND 365),
+        ADD COLUMN slot_granularity_minutes smallint NOT NULL DEFAULT 15
+          CHECK (slot_granularity_minutes IN (5, 10, 15, 20, 30, 60))
+    `);
+  }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`
+      ALTER TABLE tenants
+        DROP COLUMN slot_granularity_minutes, DROP COLUMN horizon_days, DROP COLUMN min_lead_minutes
+    `);
+  }
+}
+```
+
+- [ ] **Step 4: Declarar las tablas en el guardia y escribir los helpers**
+
+En `packages/db/test/rls-inventory.test.ts`, dentro de `PRESUPUESTO`, después de `audit_log`:
+```ts
+  // Agenda: tenant-scoped con RLS.
+  services: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  resources: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  resource_services: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+```
+
+En `apps/api/test/helpers.ts`, el `TRUNCATE` de `resetDb` gana las tablas nuevas (antes de `tenants`):
+```ts
+    TRUNCATE webhook_events, audit_log, messages, conversation_sessions, conversations,
+             flows, resource_services, resources, services, contacts, whatsapp_channels, tenants
+    RESTART IDENTITY CASCADE
+```
+y al final del archivo:
+```ts
+/** Un servicio de 30 min ("corte") que presta un recurso ("maria"). */
 export async function seedCatalog(
   tenantId: string,
   over: { durationMin?: number; bufferMin?: number } = {},
 ): Promise<{ serviceId: string; resourceId: string }> {
   const ds = await adminDs();
   const [s] = await ds.query(
-    `INSERT INTO services (tenant_id, name, duration_min, buffer_min)
-     VALUES ($1, 'Corte de cabello', $2, $3) RETURNING id`,
-    [tenantId, over.durationMin ?? 30, over.bufferMin ?? 0],
-  );
+    `INSERT INTO services (tenant_id, key, name, duration_min, buffer_min)
+     VALUES ($1, 'corte', 'Corte de cabello', $2, $3) RETURNING id`,
+    [tenantId, over.durationMin ?? 30, over.bufferMin ?? 0]);
+  const resourceId = await addResource(tenantId, 'maria', 'María', s.id);
+  return { serviceId: s.id, resourceId };
+}
+
+/** Otro recurso que presta el servicio dado. */
+export async function addResource(
+  tenantId: string, key: string, name: string, serviceId: string,
+): Promise<string> {
+  const ds = await adminDs();
   const [r] = await ds.query(
-    `INSERT INTO resources (tenant_id, name) VALUES ($1, 'María') RETURNING id`,
-    [tenantId],
-  );
+    `INSERT INTO resources (tenant_id, key, name) VALUES ($1, $2, $3) RETURNING id`,
+    [tenantId, key, name]);
   await ds.query(
-    `INSERT INTO resource_services (tenant_id, resource_id, service_id) VALUES ($1,$2,$3)`,
-    [tenantId, r.id, s.id],
-  );
-  return { serviceId: s.id, resourceId: r.id };
+    `INSERT INTO resource_services (tenant_id, resource_id, service_id) VALUES ($1, $2, $3)`,
+    [tenantId, r.id, serviceId]);
+  return r.id;
 }
 ```
 
-Extender el `TRUNCATE` de `resetDb()` con `services, resources, resource_services`.
+- [ ] **Step 5: Correr los tests**
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+Run: `pnpm test apps/api/test/scheduling/catalog.test.ts packages/db/test`
+Expected: PASS.
 
-Run: `pnpm vitest run apps/api/test/scheduling/catalog`
-Expected: PASS, 3 tests.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(scheduling): modelar servicios, recursos y su relación con aislamiento por tenant"
+git add packages/db/src/migrations packages/db/test/rls-inventory.test.ts apps/api/test/helpers.ts apps/api/test/scheduling/catalog.test.ts
+git commit -m "feat(scheduling): modelar servicios, recursos y reglas de reserva por negocio"
 ```
 
 ---
@@ -245,11 +340,12 @@ git commit -m "feat(scheduling): modelar servicios, recursos y su relación con 
 
 **Files:**
 - Create: migraciones `1725400300000-CreateBusinessHours.ts`, `1725400400000-CreateTimeOff.ts`
+- Modify: `packages/db/test/rls-inventory.test.ts`, `apps/api/test/helpers.ts`
 - Test: `apps/api/test/scheduling/business-hours.test.ts`
 
 **Interfaces:**
 - Consumes: Task 1.
-- Produces: `business_hours` (`tenant_id, resource_id NULL, weekday 0-6, start_time time, end_time time`) y `time_off` (`tenant_id, resource_id NULL, starts_at, ends_at, reason`). `resource_id NULL` significa "aplica a todo el negocio". Helper `seedHours(tenantId, resourceId?)`.
+- Produces: `business_hours` (`tenant_id, resource_id NULL, weekday 0-6 (0 = domingo), start_time, end_time`) y `time_off` (`tenant_id, resource_id NULL, starts_at, ends_at, reason`). `resource_id NULL` = todo el negocio. Helper `seedHours(tenantId, resourceId?)`: lunes a viernes 09:00-18:00.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -271,107 +367,138 @@ describe('horarios y ausencias', () => {
   it('registra horario de lunes a viernes para todo el negocio', async () => {
     await seedHours(tenantId);
     const rows = await adminQuery(
-      `SELECT weekday, start_time, end_time FROM business_hours
-        WHERE tenant_id = $1 ORDER BY weekday`, [tenantId]);
+      `SELECT weekday, start_time, end_time, resource_id FROM business_hours ORDER BY weekday`);
     expect(rows).toHaveLength(5);
-    expect(rows[0].weekday).toBe(1);
-    expect(rows[0].start_time).toBe('09:00:00');
+    expect(rows[0]).toEqual({ weekday: 1, start_time: '09:00:00', end_time: '18:00:00', resource_id: null });
   });
 
   it('rechaza un horario que termina antes de empezar', async () => {
     await expect(adminQuery(
       `INSERT INTO business_hours (tenant_id, weekday, start_time, end_time)
-       VALUES ($1, 1, '18:00', '09:00')`, [tenantId])).rejects.toThrow();
+       VALUES ($1, 1, '18:00', '09:00')`, [tenantId])).rejects.toThrow(/check/i);
   });
 
-  it('rechaza un weekday fuera de 0..6', async () => {
+  it('rechaza un día fuera de 0..6', async () => {
     await expect(adminQuery(
       `INSERT INTO business_hours (tenant_id, weekday, start_time, end_time)
-       VALUES ($1, 7, '09:00', '18:00')`, [tenantId])).rejects.toThrow();
+       VALUES ($1, 7, '09:00', '18:00')`, [tenantId])).rejects.toThrow(/check/i);
   });
 
-  it('permite una ausencia acotada a un recurso concreto', async () => {
+  it('permite una ausencia acotada a un recurso', async () => {
     await adminQuery(
       `INSERT INTO time_off (tenant_id, resource_id, starts_at, ends_at, reason)
        VALUES ($1, $2, '2026-09-10T13:00:00Z', '2026-09-10T18:00:00Z', 'Cita médica')`,
       [tenantId, resourceId]);
-    const rows = await adminQuery(`SELECT * FROM time_off WHERE tenant_id = $1`, [tenantId]);
-    expect(rows[0].resource_id).toBe(resourceId);
+    const [row] = await adminQuery(`SELECT resource_id FROM time_off`);
+    expect(row.resource_id).toBe(resourceId);
   });
 
   it('rechaza una ausencia que termina antes de empezar', async () => {
     await expect(adminQuery(
       `INSERT INTO time_off (tenant_id, starts_at, ends_at)
-       VALUES ($1, '2026-09-10T18:00:00Z', '2026-09-10T13:00:00Z')`,
-      [tenantId])).rejects.toThrow();
+       VALUES ($1, '2026-09-10T18:00:00Z', '2026-09-10T13:00:00Z')`, [tenantId])).rejects.toThrow(/check/i);
   });
 });
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [ ] **Step 2: Correr y verlo fallar**
 
-Run: `pnpm vitest run apps/api/test/scheduling/business-hours`
-Expected: FAIL — no existen las tablas.
+Run: `pnpm test apps/api/test/scheduling/business-hours.test.ts`
+Expected: FAIL — `seedHours` no existe.
 
-- [ ] **Step 3: Implementar**
+- [ ] **Step 3: Escribir las migraciones**
 
+`packages/db/src/migrations/1725400300000-CreateBusinessHours.ts`:
 ```ts
-// 1725400300000-CreateBusinessHours.ts
-await q.query(`
-  CREATE TABLE business_hours (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    -- NULL = aplica a todo el negocio; con valor = solo a ese recurso.
-    resource_id uuid REFERENCES resources(id) ON DELETE CASCADE,
-    weekday     smallint NOT NULL CHECK (weekday BETWEEN 0 AND 6), -- 0 = domingo
-    start_time  time NOT NULL,
-    end_time    time NOT NULL,
-    CHECK (end_time > start_time)
-  )
-`);
-await q.query(`CREATE INDEX business_hours_lookup ON business_hours (tenant_id, weekday)`);
-for (const sql of tenantRlsSql('business_hours')) await q.query(sql);
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
 
-// 1725400400000-CreateTimeOff.ts
-await q.query(`
-  CREATE TABLE time_off (
-    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    resource_id uuid REFERENCES resources(id) ON DELETE CASCADE,
-    starts_at   timestamptz NOT NULL,
-    ends_at     timestamptz NOT NULL,
-    reason      varchar(255),
-    CHECK (ends_at > starts_at)
-  )
-`);
-await q.query(`CREATE INDEX time_off_lookup ON time_off (tenant_id, starts_at, ends_at)`);
-for (const sql of tenantRlsSql('time_off')) await q.query(sql);
+/**
+ * Horario semanal en hora LOCAL del negocio. `resource_id` NULL es el horario
+ * del negocio; con valor, el propio de ese recurso (que entonces reemplaza al
+ * del negocio para ese recurso).
+ */
+export class CreateBusinessHours1725400300000 implements MigrationInterface {
+  public async up(q: QueryRunner): Promise<void> {
+    await q.query(`
+      CREATE TABLE business_hours (
+        id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        resource_id uuid REFERENCES resources(id) ON DELETE CASCADE,
+        weekday     smallint NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+        start_time  time NOT NULL,
+        end_time    time NOT NULL,
+        CHECK (end_time > start_time)
+      )
+    `);
+    await q.query(`CREATE INDEX business_hours_lookup ON business_hours (tenant_id, resource_id, weekday)`);
+    for (const sql of tenantRlsSql('business_hours')) await q.query(sql);
+  }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`DROP TABLE business_hours`);
+  }
+}
 ```
 
-Helper en `apps/api/test/helpers.ts`:
+`packages/db/src/migrations/1725400400000-CreateTimeOff.ts`:
 ```ts
-/** Lunes a viernes, 09:00–18:00 en hora local del negocio. */
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
+
+/** Ausencias: festivos del negocio (resource_id NULL) o de un recurso. */
+export class CreateTimeOff1725400400000 implements MigrationInterface {
+  public async up(q: QueryRunner): Promise<void> {
+    await q.query(`
+      CREATE TABLE time_off (
+        id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id   uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        resource_id uuid REFERENCES resources(id) ON DELETE CASCADE,
+        starts_at   timestamptz NOT NULL,
+        ends_at     timestamptz NOT NULL,
+        reason      varchar(255),
+        CHECK (ends_at > starts_at)
+      )
+    `);
+    await q.query(`CREATE INDEX time_off_lookup ON time_off (tenant_id, starts_at, ends_at)`);
+    for (const sql of tenantRlsSql('time_off')) await q.query(sql);
+  }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`DROP TABLE time_off`);
+  }
+}
+```
+
+- [ ] **Step 4: Guardia y helper**
+
+En `PRESUPUESTO`:
+```ts
+  business_hours: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+  time_off: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+```
+En `resetDb`, añadir `business_hours, time_off` a la lista del `TRUNCATE` (antes de `resource_services`). En `helpers.ts`:
+```ts
+/** Lunes a viernes, 09:00-18:00 en hora local del negocio. */
 export async function seedHours(tenantId: string, resourceId?: string): Promise<void> {
   const ds = await adminDs();
   for (const weekday of [1, 2, 3, 4, 5]) {
     await ds.query(
       `INSERT INTO business_hours (tenant_id, resource_id, weekday, start_time, end_time)
-       VALUES ($1, $2, $3, '09:00', '18:00')`,
-      [tenantId, resourceId ?? null, weekday],
-    );
+       VALUES ($1, $2, $3, '09:00', '18:00')`, [tenantId, resourceId ?? null, weekday]);
   }
 }
 ```
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+- [ ] **Step 5: Correr los tests**
 
-Run: `pnpm vitest run apps/api/test/scheduling/business-hours`
-Expected: PASS, 5 tests.
+Run: `pnpm test apps/api/test/scheduling packages/db/test`
+Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A
+git add packages/db/src/migrations packages/db/test/rls-inventory.test.ts apps/api/test/helpers.ts apps/api/test/scheduling/business-hours.test.ts
 git commit -m "feat(scheduling): registrar horarios de atención y ausencias por negocio o recurso"
 ```
 
@@ -379,36 +506,32 @@ git commit -m "feat(scheduling): registrar horarios de atención y ausencias por
 
 ### Task 3: `appointments` y la restricción anti-doble-reserva
 
-Esta es la tarea central de la fase. El test de concurrencia demuestra que la
-prevención vive en el motor de base de datos, no en el código.
+La tarea central de la fase: el test de concurrencia demuestra que la prevención vive en el motor de base de datos.
 
 **Files:**
 - Create: migración `1725400500000-CreateAppointments.ts`
-- Create: `packages/db/src/entities/appointment.entity.ts`
+- Modify: `packages/db/test/rls-inventory.test.ts`, `apps/api/test/helpers.ts` (`seedContact`, `resetDb`)
 - Test: `apps/api/test/scheduling/appointments-overlap.test.ts`
 
 **Interfaces:**
 - Consumes: Tasks 1-2.
-- Produces: tabla `appointments` con la restricción `no_overlap` y el código de error `23P01` (`exclusion_violation`) como contrato para la capa de reservas.
+- Produces: tabla `appointments` (`id, tenant_id, resource_id, service_id, contact_id, conversation_id NULL, starts_at, ends_at, status ('confirmed'|'cancelled'|'completed'|'no_show'), customer_name, notes, google_event_id, google_sync_status, created_at, updated_at`) con la restricción `no_overlap`; el código `23P01` (`exclusion_violation`) como contrato. Helper `seedContact(tenantId, waId = '573001112233'): Promise<string>`.
 
 - [ ] **Step 1: Escribir el test que falla**
 
 `apps/api/test/scheduling/appointments-overlap.test.ts`:
 ```ts
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
-import { resetDb, seedChannel, seedCatalog, seedContact, adminQuery, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, seedContact, addResource, adminQuery, closeHelpers } from '../helpers';
 
 let tenantId: string, serviceId: string, resourceId: string, contactId: string;
 
-const insert = (starts: string, ends: string, status = 'confirmed') =>
+const insert = (starts: string, ends: string, status = 'confirmed', resource = resourceId) =>
   adminQuery(
-    `INSERT INTO appointments
-       (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-    [tenantId, resourceId, serviceId, contactId, starts, ends, status],
-  );
+    `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, status)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+    [tenantId, resource, serviceId, contactId, starts, ends, status]);
 
 beforeEach(async () => {
   await resetDb();
@@ -426,123 +549,108 @@ describe('restricción anti-doble-reserva', () => {
 
   it('rechaza una cita que se solapa con otra del mismo recurso', async () => {
     await insert('2026-09-10T14:00:00Z', '2026-09-10T14:30:00Z');
-    await expect(insert('2026-09-10T14:15:00Z', '2026-09-10T14:45:00Z'))
-      .rejects.toMatchObject({ code: '23P01' });
+    await expect(insert('2026-09-10T14:15:00Z', '2026-09-10T14:45:00Z')).rejects.toMatchObject({ code: '23P01' });
   });
 
   it('rechaza una cita contenida dentro de otra', async () => {
     await insert('2026-09-10T14:00:00Z', '2026-09-10T15:00:00Z');
-    await expect(insert('2026-09-10T14:10:00Z', '2026-09-10T14:20:00Z'))
-      .rejects.toMatchObject({ code: '23P01' });
+    await expect(insert('2026-09-10T14:10:00Z', '2026-09-10T14:20:00Z')).rejects.toMatchObject({ code: '23P01' });
   });
 
-  it('permite el solapamiento si una está cancelada', async () => {
+  it('una cita cancelada libera la franja', async () => {
     await insert('2026-09-10T14:00:00Z', '2026-09-10T14:30:00Z', 'cancelled');
     await expect(insert('2026-09-10T14:00:00Z', '2026-09-10T14:30:00Z')).resolves.toBeDefined();
   });
 
   it('permite el mismo horario en recursos distintos', async () => {
-    const [otro] = await adminQuery(
-      `INSERT INTO resources (tenant_id, name) VALUES ($1,'Pedro') RETURNING id`, [tenantId]);
+    const pedro = await addResource(tenantId, 'pedro', 'Pedro', serviceId);
     await insert('2026-09-10T14:00:00Z', '2026-09-10T14:30:00Z');
-    await expect(adminQuery(
-      `INSERT INTO appointments
-         (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, status)
-       VALUES ($1,$2,$3,$4,'2026-09-10T14:00:00Z','2026-09-10T14:30:00Z','confirmed')
-       RETURNING id`,
-      [tenantId, otro.id, serviceId, contactId])).resolves.toBeDefined();
+    await expect(insert('2026-09-10T14:00:00Z', '2026-09-10T14:30:00Z', 'confirmed', pedro)).resolves.toBeDefined();
   });
 
   it('EL CASO REAL: dos transacciones concurrentes por la misma franja, solo una gana', async () => {
     const a = createDataSource(process.env.DATABASE_ADMIN_URL!);
     const b = createDataSource(process.env.DATABASE_ADMIN_URL!);
     await a.initialize(); await b.initialize();
-
     const ra = a.createQueryRunner(); const rb = b.createQueryRunner();
     await ra.connect(); await rb.connect();
     await ra.startTransaction(); await rb.startTransaction();
+    try {
+      const sql = `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at)
+                   VALUES ($1, $2, $3, $4, '2026-09-10T15:00:00Z', '2026-09-10T15:30:00Z')`;
+      const args = [tenantId, resourceId, serviceId, contactId];
 
-    const sql = `INSERT INTO appointments
-      (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, status)
-      VALUES ($1,$2,$3,$4,'2026-09-10T15:00:00Z','2026-09-10T15:30:00Z','confirmed')`;
-    const args = [tenantId, resourceId, serviceId, contactId];
+      // A inserta y NO confirma: B queda bloqueada en la restricción hasta que A decida.
+      await ra.query(sql, args);
+      const bInsert = rb.query(sql, args);
+      await ra.commitTransaction();
+      await expect(bInsert).rejects.toMatchObject({ code: '23P01' });
+      await rb.rollbackTransaction();
 
-    // A inserta y NO confirma todavía: B queda bloqueada hasta que A decida.
-    await ra.query(sql, args);
-    const bInsert = rb.query(sql, args);
-
-    await ra.commitTransaction();
-    await expect(bInsert).rejects.toMatchObject({ code: '23P01' });
-    await rb.rollbackTransaction();
-
-    const rows = await adminQuery(
-      `SELECT count(*)::int AS n FROM appointments WHERE starts_at = '2026-09-10T15:00:00Z'`);
-    expect(rows[0].n).toBe(1);
-
-    await ra.release(); await rb.release();
-    await a.destroy(); await b.destroy();
+      const [{ n }] = await adminQuery(
+        `SELECT count(*)::int AS n FROM appointments WHERE starts_at = '2026-09-10T15:00:00Z'`);
+      expect(n).toBe(1);
+    } finally {
+      await ra.release(); await rb.release();
+      await a.destroy(); await b.destroy();
+    }
   });
 });
 ```
 
-> El último test es el que justifica toda la decisión D5 del spec. Si alguna vez
-> falla, significa que la restricción se cayó de una migración y el sistema volvió a
-> ser capaz de poner a dos personas en la misma silla a la misma hora.
+- [ ] **Step 2: Correr y verlo fallar**
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+Run: `pnpm test apps/api/test/scheduling/appointments-overlap.test.ts`
+Expected: FAIL — `seedContact` no existe.
 
-Run: `pnpm vitest run apps/api/test/scheduling/appointments-overlap`
-Expected: FAIL — no existe la tabla `appointments`.
-
-- [ ] **Step 3: Implementar**
+- [ ] **Step 3: Escribir la migración**
 
 `packages/db/src/migrations/1725400500000-CreateAppointments.ts`:
 ```ts
-import { MigrationInterface, QueryRunner } from 'typeorm';
-import { tenantRlsSql } from '../rls';
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
 
+/**
+ * La fuente de verdad de las citas (D4). La doble reserva la impide Postgres
+ * con una restricción de exclusión (D5): consultar y luego reservar es una
+ * carrera inevitable, y un `if` no la resuelve.
+ */
 export class CreateAppointments1725400500000 implements MigrationInterface {
   public async up(q: QueryRunner): Promise<void> {
     await q.query(`
       CREATE TABLE appointments (
-        id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-        tenant_id       uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-        resource_id     uuid NOT NULL REFERENCES resources(id),
-        service_id      uuid NOT NULL REFERENCES services(id),
-        contact_id      uuid NOT NULL REFERENCES contacts(id),
-        conversation_id uuid REFERENCES conversations(id) ON DELETE SET NULL,
-        starts_at       timestamptz NOT NULL,
-        ends_at         timestamptz NOT NULL,
-        status          varchar(32) NOT NULL DEFAULT 'confirmed'
-                          CHECK (status IN ('confirmed','cancelled','completed','no_show')),
-        customer_name   varchar(255),
-        notes           text,
-        -- Fase 3: proyección hacia Google Calendar.
-        google_event_id   varchar(1024),
-        google_sync_status varchar(32) NOT NULL DEFAULT 'pending',
-        created_at      timestamptz NOT NULL DEFAULT now(),
-        updated_at      timestamptz NOT NULL DEFAULT now(),
+        id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id          uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        resource_id        uuid NOT NULL REFERENCES resources(id),
+        service_id         uuid NOT NULL REFERENCES services(id),
+        contact_id         uuid NOT NULL REFERENCES contacts(id),
+        conversation_id    uuid REFERENCES conversations(id) ON DELETE SET NULL,
+        starts_at          timestamptz NOT NULL,
+        ends_at            timestamptz NOT NULL,
+        status             varchar(16) NOT NULL DEFAULT 'confirmed'
+                             CHECK (status IN ('confirmed', 'cancelled', 'completed', 'no_show')),
+        customer_name      varchar(255),
+        notes              text,
+        -- Fase 4 (Google Calendar): proyección de la cita.
+        google_event_id    varchar(1024),
+        google_sync_status varchar(16) NOT NULL DEFAULT 'pending',
+        created_at         timestamptz NOT NULL DEFAULT now(),
+        updated_at         timestamptz NOT NULL DEFAULT now(),
         CHECK (ends_at > starts_at)
       )
     `);
-
-    // btree_gist ya se creó en la migración del rol de aplicación (Fase 1).
-    // Solo las confirmadas ocupan la franja: cancelar libera el espacio.
+    // btree_gist lo creó la migración del rol (Fase 1). Solo las confirmadas
+    // ocupan la franja: cancelar la libera.
     await q.query(`
       ALTER TABLE appointments ADD CONSTRAINT no_overlap
-        EXCLUDE USING gist (
-          resource_id WITH =,
-          tstzrange(starts_at, ends_at) WITH &&
-        ) WHERE (status = 'confirmed')
+        EXCLUDE USING gist (resource_id WITH =, tstzrange(starts_at, ends_at) WITH &&)
+        WHERE (status = 'confirmed')
     `);
-
     await q.query(`
-      CREATE INDEX appointments_lookup
-        ON appointments (tenant_id, resource_id, starts_at)
+      CREATE INDEX appointments_lookup ON appointments (tenant_id, resource_id, starts_at)
         WHERE status = 'confirmed'
     `);
     await q.query(`CREATE INDEX appointments_by_contact ON appointments (contact_id, starts_at DESC)`);
-
     for (const sql of tenantRlsSql('appointments')) await q.query(sql);
   }
 
@@ -552,161 +660,153 @@ export class CreateAppointments1725400500000 implements MigrationInterface {
 }
 ```
 
-Helper en `apps/api/test/helpers.ts`:
+- [ ] **Step 4: Guardia y helpers**
+
+En `PRESUPUESTO`:
+```ts
+  appointments: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
+```
+En `resetDb`, añadir `appointments` al `TRUNCATE` (antes de `business_hours`). En `helpers.ts`:
 ```ts
 export async function seedContact(tenantId: string, waId = '573001112233'): Promise<string> {
   const ds = await adminDs();
   const [c] = await ds.query(
-    `INSERT INTO contacts (tenant_id, wa_id, name) VALUES ($1,$2,'Ana') RETURNING id`,
-    [tenantId, waId],
-  );
+    `INSERT INTO contacts (tenant_id, wa_id, name) VALUES ($1, $2, 'Ana') RETURNING id`, [tenantId, waId]);
   return c.id;
 }
 ```
 
-Extender el `TRUNCATE` de `resetDb()` con `appointments, business_hours, time_off`.
+- [ ] **Step 5: Correr los tests**
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+Run: `pnpm test apps/api/test/scheduling packages/db/test`
+Expected: PASS, incluido el de concurrencia.
 
-Run: `pnpm vitest run apps/api/test/scheduling/appointments-overlap`
-Expected: PASS, 6 tests.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(scheduling): impedir doble reserva con restricción de exclusión sobre appointments"
+git add packages/db/src/migrations packages/db/test/rls-inventory.test.ts apps/api/test/helpers.ts apps/api/test/scheduling/appointments-overlap.test.ts
+git commit -m "feat(scheduling): impedir la doble reserva con una restricción de exclusión sobre appointments"
 ```
 
 ---
 
-### Task 4: Cálculo de disponibilidad — función pura
-
-El algoritmo más delicado del sistema. Se prueba sin base de datos, con tablas de casos,
-incluyendo un cambio de horario de verano para demostrar que la aritmética de zonas es
-correcta y no una suma de milisegundos disfrazada.
+### Task 4: Cálculo de franjas — función pura
 
 **Files:**
 - Create: `apps/api/src/scheduling/availability.ts`
 - Test: `apps/api/test/scheduling/availability.test.ts`
 
 **Interfaces:**
-- Consumes: nada (función pura).
 - Produces:
 ```ts
-interface HoursBlock { weekday: number; start: string; end: string } // hora LOCAL 'HH:mm'
-interface BusyInterval { start: Date; end: Date }                    // instantes UTC
-interface Slot { start: Date; end: Date }
-
-function computeSlots(input: {
+export interface HoursBlock { weekday: number; start: string; end: string } // hora LOCAL 'HH:MM', 0 = domingo
+export interface BusyInterval { start: Date; end: Date }
+export interface Slot { start: Date; end: Date }
+export interface SlotInput {
   from: Date; to: Date; timezone: string;
-  durationMin: number; bufferMin: number; granularityMin: number; minLeadMin: number;
+  durationMin: number; bufferMin: number; granularityMin: number;
+  minLeadMin: number; horizonDays: number;
   now: Date; hours: HoursBlock[]; busy: BusyInterval[];
-}): Slot[];
+}
+export function computeSlots(input: SlotInput): Slot[]; // UN recurso; ordenadas y sin duplicados
+```
+Semántica: una franja empieza en `bloque.start + k·granularity`, termina antes o justo al cierre del bloque, cae entera dentro de `[from, to]`, empieza no antes de `now + minLead` ni después de `now + horizonDays` días, y no toca lo ocupado expandido por `bufferMin` a ambos lados.
+
+- [ ] **Step 1: Instalar Luxon**
+
+```bash
+pnpm --filter @citara/api add luxon@^3
+```
+```bash
+pnpm --filter @citara/api add -D @types/luxon@^3
 ```
 
-- [ ] **Step 1: Escribir el test que falla**
+- [ ] **Step 2: Escribir el test que falla**
 
 `apps/api/test/scheduling/availability.test.ts`:
 ```ts
 import { describe, it, expect } from 'vitest';
-import { computeSlots } from '../../src/scheduling/availability';
+import { computeSlots, type SlotInput } from '../../src/scheduling/availability';
 
-const BOGOTA = 'America/Bogota';   // UTC-5 todo el año, sin horario de verano
-const NY = 'America/New_York';     // con horario de verano: el caso interesante
+const BOGOTA = 'America/Bogota'; // UTC-5 todo el año
+const NY = 'America/New_York';   // con horario de verano
 
-// Jueves 10 de septiembre de 2026, 09:00–12:00 local.
-const hours = [{ weekday: 4, start: '09:00', end: '12:00' }];
-
-const base = {
+// Jueves 10 de septiembre de 2026, 09:00-12:00 local.
+const base: SlotInput = {
   timezone: BOGOTA,
-  durationMin: 30, bufferMin: 0, granularityMin: 30, minLeadMin: 0,
+  durationMin: 30, bufferMin: 0, granularityMin: 30, minLeadMin: 0, horizonDays: 365,
   now: new Date('2026-09-01T00:00:00Z'),
-  hours, busy: [] as { start: Date; end: Date }[],
+  hours: [{ weekday: 4, start: '09:00', end: '12:00' }],
+  busy: [],
   from: new Date('2026-09-10T00:00:00Z'),
-  to:   new Date('2026-09-11T00:00:00Z'),
+  to: new Date('2026-09-11T00:00:00Z'),
 };
 
 const hhmm = (d: Date, tz = BOGOTA) =>
-  new Intl.DateTimeFormat('es-CO', {
-    timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(d);
+  new Intl.DateTimeFormat('es-CO', { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false }).format(d);
+const starts = (input: SlotInput, tz = BOGOTA) => computeSlots(input).map((s) => hhmm(s.start, tz));
 
 describe('computeSlots', () => {
   it('genera franjas de 30 min entre 09:00 y 12:00 hora local', () => {
-    const slots = computeSlots(base);
-    expect(slots.map((s) => hhmm(s.start)))
-      .toEqual(['09:00', '09:30', '10:00', '10:30', '11:00', '11:30']);
+    expect(starts(base)).toEqual(['09:00', '09:30', '10:00', '10:30', '11:00', '11:30']);
   });
 
-  it('la última franja termina exactamente al cierre, nunca después', () => {
+  it('la última franja termina justo al cierre, nunca después', () => {
     const slots = computeSlots({ ...base, durationMin: 45, granularityMin: 45 });
-    expect(slots.map((s) => hhmm(s.start))).toEqual(['09:00', '09:45', '10:30']);
-    expect(hhmm(slots[slots.length - 1].end)).toBe('11:15');
+    expect(slots.map((s) => hhmm(s.start))).toEqual(['09:00', '09:45', '10:30', '11:15']);
+    expect(hhmm(slots.at(-1)!.end)).toBe('12:00');
   });
 
   it('excluye las franjas ocupadas por una cita existente', () => {
-    const slots = computeSlots({
-      ...base,
-      busy: [{ start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z') }],
-    }); // 15:00Z = 10:00 en Bogotá
-    expect(slots.map((s) => hhmm(s.start)))
-      .toEqual(['09:00', '09:30', '10:30', '11:00', '11:30']);
+    expect(starts({ ...base, busy: [{ start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z') }] }))
+      .toEqual(['09:00', '09:30', '10:30', '11:00', '11:30']); // 15:00Z = 10:00 Bogotá
   });
 
   it('el buffer del servicio bloquea también los bordes de lo ocupado', () => {
-    const slots = computeSlots({
-      ...base, bufferMin: 15,
-      busy: [{ start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z') }],
-    });
-    // 09:30 ya no cabe: terminaría a las 10:00, pegada al buffer previo.
-    expect(slots.map((s) => hhmm(s.start))).toEqual(['09:00', '11:00', '11:30']);
+    expect(starts({ ...base, bufferMin: 15,
+      busy: [{ start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z') }] }))
+      .toEqual(['09:00', '11:00', '11:30']);
   });
 
   it('respeta la anticipación mínima', () => {
-    const slots = computeSlots({
-      ...base,
-      now: new Date('2026-09-10T14:40:00Z'), // 09:40 en Bogotá
-      minLeadMin: 60,
-    });
-    // Nada antes de las 10:40 local → la primera válida es 11:00.
-    expect(slots.map((s) => hhmm(s.start))).toEqual(['11:00', '11:30']);
+    expect(starts({ ...base, now: new Date('2026-09-10T14:40:00Z'), minLeadMin: 60 }))
+      .toEqual(['11:00', '11:30']); // 09:40 local + 60 min
   });
 
-  it('devuelve vacío en un día sin horario definido', () => {
-    const slots = computeSlots({
-      ...base,
-      from: new Date('2026-09-12T00:00:00Z'), // sábado
-      to:   new Date('2026-09-13T00:00:00Z'),
-    });
-    expect(slots).toEqual([]);
+  it('respeta el horizonte máximo', () => {
+    expect(computeSlots({ ...base, horizonDays: 5 })).toEqual([]); // el 10 está a 9 días del 1
   });
 
-  it('cubre varios días del rango', () => {
-    const slots = computeSlots({
-      ...base,
-      hours: [{ weekday: 4, start: '09:00', end: '10:00' },
-              { weekday: 5, start: '09:00', end: '10:00' }],
-      from: new Date('2026-09-10T00:00:00Z'),
-      to:   new Date('2026-09-12T00:00:00Z'),
-    });
-    expect(slots).toHaveLength(4); // 2 días × 2 franjas
+  it('devuelve vacío en un día sin horario', () => {
+    expect(computeSlots({ ...base, from: new Date('2026-09-12T00:00:00Z'), to: new Date('2026-09-13T00:00:00Z') }))
+      .toEqual([]);
+  });
+
+  it('cubre todos los días locales del rango, incluido el del límite superior', () => {
+    // Hasta el sábado 00:00Z = viernes 19:00 en Bogotá: el viernes entra.
+    const slots = computeSlots({ ...base,
+      hours: [{ weekday: 4, start: '09:00', end: '10:00' }, { weekday: 5, start: '09:00', end: '10:00' }],
+      to: new Date('2026-09-12T00:00:00Z') });
+    expect(slots).toHaveLength(4);
+  });
+
+  it('no devuelve franjas fuera del rango pedido', () => {
+    expect(starts({ ...base, from: new Date('2026-09-10T15:00:00Z'), to: new Date('2026-09-10T16:00:00Z') }))
+      .toEqual(['10:00', '10:30']);
+  });
+
+  it('bloques que se solapan no duplican franjas', () => {
+    expect(starts({ ...base, hours: [{ weekday: 4, start: '09:00', end: '11:00' }, { weekday: 4, start: '10:00', end: '12:00' }] }))
+      .toEqual(['09:00', '09:30', '10:00', '10:30', '11:00', '11:30']);
   });
 
   it('honra el horario LOCAL a través de un cambio de horario de verano', () => {
     // Nueva York vuelve a hora estándar el domingo 1 de noviembre de 2026.
-    // El lunes 2 sigue siendo 09:00 local aunque el offset UTC haya cambiado.
-    const slots = computeSlots({
-      ...base,
-      timezone: NY,
+    const slots = computeSlots({ ...base, timezone: NY,
       hours: [{ weekday: 1, start: '09:00', end: '10:00' }],
-      from: new Date('2026-10-25T00:00:00Z'),
-      to:   new Date('2026-11-03T00:00:00Z'),
-      now: new Date('2026-10-01T00:00:00Z'),
-    });
-    const locales = slots.map((s) => hhmm(s.start, NY));
-    expect(locales).toEqual(['09:00', '09:30', '09:00', '09:30']);
-    // Y en UTC los dos lunes NO coinciden: 13:00Z antes, 14:00Z después.
+      from: new Date('2026-10-25T00:00:00Z'), to: new Date('2026-11-03T00:00:00Z'),
+      now: new Date('2026-10-01T00:00:00Z') });
+    expect(slots.map((s) => hhmm(s.start, NY))).toEqual(['09:00', '09:30', '09:00', '09:30']);
     expect(slots[0].start.toISOString()).toBe('2026-10-26T13:00:00.000Z');
     expect(slots[2].start.toISOString()).toBe('2026-11-02T14:00:00.000Z');
   });
@@ -717,17 +817,12 @@ describe('computeSlots', () => {
 });
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [ ] **Step 3: Correr y verlo fallar**
 
-Run: `pnpm vitest run apps/api/test/scheduling/availability`
-Expected: FAIL — no existe `computeSlots`.
+Run: `pnpm test apps/api/test/scheduling/availability.test.ts`
+Expected: FAIL — no existe `availability.ts`.
 
-- [ ] **Step 3: Implementar**
-
-```bash
-pnpm --filter @citara/api add luxon
-pnpm --filter @citara/api add -D @types/luxon
-```
+- [ ] **Step 4: Escribir la función**
 
 `apps/api/src/scheduling/availability.ts`:
 ```ts
@@ -740,1502 +835,2604 @@ export interface Slot { start: Date; end: Date }
 export interface SlotInput {
   from: Date;
   to: Date;
-  /** IANA, de tenants.timezone. Toda la aritmética local depende de esto. */
+  /** IANA, de tenants.timezone. Toda la aritmética de calendario depende de esto. */
   timezone: string;
   durationMin: number;
   bufferMin: number;
   granularityMin: number;
   minLeadMin: number;
+  horizonDays: number;
   now: Date;
   hours: HoursBlock[];
   busy: BusyInterval[];
 }
 
+const at = (day: DateTime, hhmm: string) => {
+  const [hour, minute] = hhmm.split(':').map(Number);
+  return day.set({ hour, minute, second: 0, millisecond: 0 });
+};
+
 /**
- * Calcula las franjas libres. Función PURA: no consulta, no persiste.
+ * Franjas libres de UN recurso. Función PURA: no consulta ni persiste.
  *
  * Trabaja en la zona del negocio y deja que Luxon resuelva los offsets: sumar
- * 24h en milisegundos se rompe en los cambios de horario de verano, avanzar un
- * día calendario no.
+ * 24 h en milisegundos se rompe en los cambios de horario de verano; avanzar un
+ * día de calendario, no. Recorre todos los días LOCALES que toca [from, to],
+ * incluido el del límite superior, y descarta lo que se salga del rango.
  */
 export function computeSlots(input: SlotInput): Slot[] {
-  const {
-    from, to, timezone, durationMin, bufferMin,
-    granularityMin, minLeadMin, now, hours, busy,
-  } = input;
+  const { timezone, durationMin, bufferMin, granularityMin, hours } = input;
+  const from = DateTime.fromJSDate(input.from);
+  const to = DateTime.fromJSDate(input.to);
+  const now = DateTime.fromJSDate(input.now).setZone(timezone);
+  const earliest = now.plus({ minutes: input.minLeadMin });
+  const latest = now.plus({ days: input.horizonDays });
 
+  // Lo ocupado se expande con el buffer a ambos lados.
+  const blocked = input.busy.map((b) => Interval.fromDateTimes(
+    DateTime.fromJSDate(b.start).minus({ minutes: bufferMin }),
+    DateTime.fromJSDate(b.end).plus({ minutes: bufferMin }),
+  ));
+
+  const seen = new Set<number>();
   const slots: Slot[] = [];
+  const lastDay = to.setZone(timezone).startOf('day');
 
-  // Lo ocupado se expande con el buffer a ambos lados: una cita no solo bloquea
-  // su duración, también el margen de preparación antes y después.
-  const blocked = busy.map((b) =>
-    Interval.fromDateTimes(
-      DateTime.fromJSDate(b.start).minus({ minutes: bufferMin }),
-      DateTime.fromJSDate(b.end).plus({ minutes: bufferMin }),
-    ),
-  );
-
-  const earliest = DateTime.fromJSDate(now).plus({ minutes: minLeadMin });
-
-  let day = DateTime.fromJSDate(from).setZone(timezone).startOf('day');
-  const lastDay = DateTime.fromJSDate(to).setZone(timezone).startOf('day');
-
-  while (day < lastDay) {
-    // Luxon: 1=lunes … 7=domingo. Nuestro esquema: 0=domingo … 6=sábado.
-    const weekday = day.weekday === 7 ? 0 : day.weekday;
-
+  for (let day = from.setZone(timezone).startOf('day'); day <= lastDay; day = day.plus({ days: 1 }).startOf('day')) {
+    // Luxon: 1 = lunes … 7 = domingo. Nuestro esquema: 0 = domingo … 6 = sábado.
+    const weekday = day.weekday % 7;
     for (const block of hours.filter((h) => h.weekday === weekday)) {
-      const [sh, sm] = block.start.split(':').map(Number);
-      const [eh, em] = block.end.split(':').map(Number);
-
-      const blockStart = day.set({ hour: sh, minute: sm, second: 0, millisecond: 0 });
-      const blockEnd = day.set({ hour: eh, minute: em, second: 0, millisecond: 0 });
-
-      let cursor = blockStart;
-      while (true) {
-        const slotEnd = cursor.plus({ minutes: durationMin });
-        if (slotEnd > blockEnd) break;
-
-        const fitsLead = cursor >= earliest;
-        const candidate = Interval.fromDateTimes(cursor, slotEnd);
-        const free = !blocked.some((b) => b.overlaps(candidate));
-
-        if (fitsLead && free) {
-          slots.push({ start: cursor.toJSDate(), end: slotEnd.toJSDate() });
-        }
-        cursor = cursor.plus({ minutes: granularityMin });
+      const blockEnd = at(day, block.end);
+      for (let start = at(day, block.start); ; start = start.plus({ minutes: granularityMin })) {
+        const end = start.plus({ minutes: durationMin });
+        if (end > blockEnd) break;
+        if (start < from || end > to) continue;
+        if (start < earliest || start > latest) continue;
+        const candidate = Interval.fromDateTimes(start, end);
+        if (blocked.some((b) => b.overlaps(candidate))) continue;
+        if (seen.has(start.toMillis())) continue; // bloques solapados
+        seen.add(start.toMillis());
+        slots.push({ start: start.toJSDate(), end: end.toJSDate() });
       }
     }
-
-    // Avanzar un DÍA CALENDARIO, no 24 horas: es lo que sobrevive al DST.
-    day = day.plus({ days: 1 }).startOf('day');
   }
-
-  return slots;
+  return slots.sort((a, b) => a.start.getTime() - b.start.getTime());
 }
 ```
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+- [ ] **Step 5: Correr los tests**
 
-Run: `pnpm vitest run apps/api/test/scheduling/availability`
-Expected: PASS, 9 tests.
+Run: `pnpm test apps/api/test/scheduling/availability.test.ts && pnpm typecheck`
+Expected: PASS, 12 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(scheduling): calcular franjas disponibles respetando zona horaria del negocio"
+git add apps/api/package.json pnpm-lock.yaml apps/api/src/scheduling/availability.ts apps/api/test/scheduling/availability.test.ts
+git commit -m "feat(scheduling): calcular franjas libres en la zona horaria del negocio"
 ```
 
 ---
 
-### Task 5: Reserva con traducción de errores de Postgres
+### Task 5: Disponibilidad y reservas sobre la transacción del llamador
 
 **Files:**
-- Create: `apps/api/src/scheduling/scheduling.errors.ts`, `booking.service.ts`, `availability.service.ts`
+- Create: `apps/api/src/scheduling/scheduling.errors.ts`, `availability.service.ts`, `booking.service.ts`
+- Modify: `apps/api/src/app.module.ts` (providers), `apps/api/test/helpers.ts` (`buildScheduling`)
 - Test: `apps/api/test/scheduling/booking.service.test.ts`
 
 **Interfaces:**
-- Consumes: `computeSlots`, `runInTenant`, tablas de Tasks 1-3.
+- Consumes: `computeSlots` (Task 4), tablas de las Tasks 1-3.
 - Produces:
 ```ts
-class SlotTakenError extends Error {}
-class OutsideHoursError extends Error {}
-class TooSoonError extends Error {}
-class NotFoundError extends Error {}
+// scheduling.errors.ts
+export class SchedulingError extends Error {}
+export class SlotTakenError extends SchedulingError {}
+export class OutsideHoursError extends SchedulingError {}
+export class TooSoonError extends SchedulingError {}
+export class TooFarError extends SchedulingError {}
+export class NotFoundError extends SchedulingError {}
 
+// availability.service.ts
+export interface BookingSettings { timezone: string; minLeadMin: number; horizonDays: number; granularityMin: number }
+export interface ResourceSlot { start: Date; end: Date; resourceId: string; resourceName: string }
+export type Bookability = 'ok' | 'too_soon' | 'too_far' | 'outside_hours' | 'taken';
 class AvailabilityService {
-  slotsFor(tenantId, serviceId, resourceId | null, from: Date, to: Date, now?: Date): Promise<Slot[]>;
+  settings(m: EntityManager, tenantId: string): Promise<BookingSettings>;
+  listServices(m: EntityManager): Promise<{ id: string; key: string; nombre: string; duracion_min: number; precio_centavos: number | null }[]>;
+  slotsFor(m, tenantId, q: { serviceId: string; resourceId: string | null; from: Date; to: Date; now: Date; ignoreBusy?: boolean }): Promise<ResourceSlot[]>;
+  check(m, tenantId, q: { serviceId: string; resourceId: string; start: Date; now: Date }): Promise<Bookability>;
 }
+
+// booking.service.ts
+export interface BookInput { serviceId: string; resourceId: string; contactId: string; startsAt: Date;
+  customerName: string; conversationId?: string | null; notes?: string | null; now: Date }
+export interface Appointment { id: string; serviceId: string; resourceId: string; contactId: string;
+  conversationId: string | null; startsAt: Date; endsAt: Date; status: string;
+  customerName: string | null; notes: string | null; googleSyncStatus: string }
+export interface AppointmentView { id: string; startsAt: Date; endsAt: Date; serviceName: string; resourceName: string }
 class BookingService {
-  book(tenantId, input: BookInput): Promise<Appointment>;
-  cancel(tenantId, appointmentId, contactId): Promise<Appointment>;
-  reschedule(tenantId, appointmentId, contactId, newStart: Date): Promise<Appointment>;
-  listForContact(tenantId, contactId, now: Date): Promise<Appointment[]>;
+  book(m, tenantId, input: BookInput): Promise<Appointment>;
+  cancel(m, appointmentId: string, contactId: string): Promise<Appointment>;
+  reschedule(m, tenantId, appointmentId: string, contactId: string, newStart: Date, now: Date): Promise<Appointment>;
+  listForContact(m, contactId: string, now: Date): Promise<AppointmentView[]>;
+  findForContact(m, appointmentId: string, contactId: string): Promise<Appointment | null>;
 }
-type BookInput = { serviceId: string; resourceId: string; contactId: string;
-                   startsAt: Date; customerName: string; conversationId?: string; notes?: string };
 ```
+- Produces (helper): `buildScheduling(): { availability: AvailabilityService; booking: BookingService }`.
 
 - [ ] **Step 1: Escribir el test que falla**
 
 `apps/api/test/scheduling/booking.service.test.ts`:
 ```ts
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { DataSource } from 'typeorm';
+import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vitest';
+import { DataSource, type EntityManager } from 'typeorm';
 import { createDataSource } from '@citara/db';
-import { BookingService } from '../../src/scheduling/booking.service';
-import { AvailabilityService } from '../../src/scheduling/availability.service';
-import { SlotTakenError, OutsideHoursError, TooSoonError, NotFoundError }
+import { runInTenant } from '../../src/tenancy/tenant-context';
+import { NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError }
   from '../../src/scheduling/scheduling.errors';
-import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, addResource,
+         adminQuery, closeHelpers, buildScheduling } from '../helpers';
 
-let ds: DataSource, booking: BookingService, availability: AvailabilityService;
+let app: DataSource;
 let tenantId: string, serviceId: string, resourceId: string, contactId: string;
+let s: ReturnType<typeof buildScheduling>;
 
-// Jueves 10 de septiembre de 2026, 10:00 en Bogotá = 15:00 UTC.
-const JUEVES_10AM = new Date('2026-09-10T15:00:00Z');
+const JUEVES_10AM = new Date('2026-09-10T15:00:00Z'); // 10:00 en Bogotá
 const AHORA = new Date('2026-09-08T12:00:00Z');
+const inTenant = <T>(fn: (m: EntityManager) => Promise<T>) => runInTenant(app, tenantId, fn);
+const input = (startsAt = JUEVES_10AM, now = AHORA) =>
+  ({ serviceId, resourceId, contactId, startsAt, customerName: 'Ana', now });
 
+beforeAll(async () => { app = createDataSource(process.env.DATABASE_URL!); await app.initialize(); });
+afterAll(async () => { await app.destroy(); await closeHelpers(); });
 beforeEach(async () => {
   await resetDb();
   ({ tenantId } = await seedChannel());
   ({ serviceId, resourceId } = await seedCatalog(tenantId));
   await seedHours(tenantId);
   contactId = await seedContact(tenantId);
-  if (!ds) { ds = createDataSource(process.env.DATABASE_URL!); await ds.initialize(); }
-  availability = new AvailabilityService(ds);
-  booking = new BookingService(ds, availability);
-});
-afterAll(async () => { await ds.destroy(); await closeHelpers(); });
-
-const input = (startsAt = JUEVES_10AM) => ({
-  serviceId, resourceId, contactId, startsAt, customerName: 'Ana',
+  s = buildScheduling();
 });
 
 describe('BookingService.book', () => {
-  it('reserva una franja libre y calcula ends_at desde la duración del servicio', async () => {
-    const cita = await booking.book(tenantId, { ...input(), now: AHORA });
+  it('reserva una franja libre y calcula el fin con la duración del servicio', async () => {
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
     expect(cita.startsAt.toISOString()).toBe(JUEVES_10AM.toISOString());
     expect(cita.endsAt.toISOString()).toBe('2026-09-10T15:30:00.000Z');
-    expect(cita.status).toBe('confirmed');
-    expect(cita.googleSyncStatus).toBe('pending');
+    expect([cita.status, cita.googleSyncStatus]).toEqual(['confirmed', 'pending']);
   });
 
-  it('lanza SlotTakenError si la franja se ocupó entre consulta y reserva', async () => {
-    await booking.book(tenantId, { ...input(), now: AHORA });
-    await expect(booking.book(tenantId, { ...input(), now: AHORA }))
+  it('lanza SlotTakenError si la franja ya está ocupada', async () => {
+    await inTenant((m) => s.booking.book(m, tenantId, input()));
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input()))).rejects.toBeInstanceOf(SlotTakenError);
+  });
+
+  it('el buffer del servicio cuenta como ocupado', async () => {
+    await adminQuery(`UPDATE services SET buffer_min = 15`);
+    await inTenant((m) => s.booking.book(m, tenantId, input()));
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input(new Date('2026-09-10T15:30:00Z')))))
       .rejects.toBeInstanceOf(SlotTakenError);
   });
 
-  it('lanza OutsideHoursError fuera del horario de atención', async () => {
-    // Domingo: no hay horario definido.
-    await expect(booking.book(tenantId, {
-      ...input(new Date('2026-09-13T15:00:00Z')), now: AHORA,
-    })).rejects.toBeInstanceOf(OutsideHoursError);
+  it('si Postgres rechaza por solapamiento, la transacción de quien llama sigue viva', async () => {
+    // Simula la carrera: la verificación dice "libre" pero otro ya insertó.
+    await inTenant((m) => s.booking.book(m, tenantId, input()));
+    vi.spyOn(s.availability, 'check').mockResolvedValue('ok');
+    const n = await inTenant(async (m) => {
+      await expect(s.booking.book(m, tenantId, input())).rejects.toBeInstanceOf(SlotTakenError);
+      const [{ n }] = await m.query(`SELECT count(*)::int AS n FROM appointments`);
+      return n;
+    });
+    expect(n).toBe(1);
   });
 
-  it('lanza OutsideHoursError si la cita se sale del cierre', async () => {
-    // 17:45 local + 30 min = 18:15, pasado el cierre de las 18:00.
-    await expect(booking.book(tenantId, {
-      ...input(new Date('2026-09-10T22:45:00Z')), now: AHORA,
-    })).rejects.toBeInstanceOf(OutsideHoursError);
+  it('rechaza fuera del horario: domingo, pasado el cierre o de madrugada', async () => {
+    for (const at of ['2026-09-13T15:00:00Z', '2026-09-10T22:45:00Z', '2026-09-10T08:00:00Z']) {
+      await expect(inTenant((m) => s.booking.book(m, tenantId, input(new Date(at)))))
+        .rejects.toBeInstanceOf(OutsideHoursError);
+    }
   });
 
-  it('lanza TooSoonError si no respeta la anticipación mínima', async () => {
-    await expect(booking.book(tenantId, {
-      ...input(), now: new Date('2026-09-10T14:50:00Z'), // 10 min antes
-    })).rejects.toBeInstanceOf(TooSoonError);
+  it('rechaza sin la anticipación mínima y más allá del horizonte', async () => {
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input(JUEVES_10AM, new Date('2026-09-10T14:50:00Z')))))
+      .rejects.toBeInstanceOf(TooSoonError);
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input(new Date('2027-03-04T15:00:00Z')))))
+      .rejects.toBeInstanceOf(TooFarError);
   });
 
-  it('NO confía en el llamador: valida aunque le pasen una hora arbitraria', async () => {
-    // Las 3 de la madrugada nunca es válida, la pida quien la pida.
-    await expect(booking.book(tenantId, {
-      ...input(new Date('2026-09-10T08:00:00Z')), now: AHORA,
-    })).rejects.toBeInstanceOf(OutsideHoursError);
+  it('reserva una franja que cruza la medianoche UTC', async () => {
+    // 19:00 en Bogotá = 00:00Z del día siguiente.
+    await adminQuery(`INSERT INTO business_hours (tenant_id, weekday, start_time, end_time)
+                      VALUES ($1, 4, '18:00', '21:00')`, [tenantId]);
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input(new Date('2026-09-11T00:00:00Z'))));
+    expect(cita.status).toBe('confirmed');
   });
 });
 
-describe('BookingService.cancel', () => {
-  it('cancela una cita propia y libera la franja', async () => {
-    const cita = await booking.book(tenantId, { ...input(), now: AHORA });
-    const cancelada = await booking.cancel(tenantId, cita.id, contactId);
-    expect(cancelada.status).toBe('cancelled');
+describe('AvailabilityService.slotsFor', () => {
+  it('con varios recursos, lo ocupado de uno no oculta lo libre del otro', async () => {
+    const pedro = await addResource(tenantId, 'pedro', 'Pedro', serviceId);
+    await inTenant((m) => s.booking.book(m, tenantId, input())); // María a las 10:00
 
-    // La franja vuelve a estar disponible.
-    await expect(booking.book(tenantId, { ...input(), now: AHORA })).resolves.toBeDefined();
+    const slots = await inTenant((m) => s.availability.slotsFor(m, tenantId, {
+      serviceId, resourceId: null, from: JUEVES_10AM, to: new Date('2026-09-10T15:30:00Z'), now: AHORA }));
+
+    expect(slots.map((x) => x.resourceId)).toEqual([pedro]);
+  });
+
+  it('un recurso con horario propio usa el suyo y no el del negocio', async () => {
+    await adminQuery(`INSERT INTO business_hours (tenant_id, resource_id, weekday, start_time, end_time)
+                      VALUES ($1, $2, 4, '14:00', '15:00')`, [tenantId, resourceId]);
+    const slots = await inTenant((m) => s.availability.slotsFor(m, tenantId, {
+      serviceId, resourceId, from: new Date('2026-09-10T05:00:00Z'), to: new Date('2026-09-11T05:00:00Z'), now: AHORA }));
+    expect(slots).toHaveLength(3); // bloque de una hora, 30 min cada 15: 14:00, 14:15 y 14:30
+  });
+});
+
+describe('BookingService.cancel y reschedule', () => {
+  it('cancela una cita propia y libera la franja', async () => {
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
+    const cancelada = await inTenant((m) => s.booking.cancel(m, cita.id, contactId));
+    expect(cancelada.status).toBe('cancelled');
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input()))).resolves.toBeDefined();
   });
 
   it('no deja cancelar la cita de otro contacto', async () => {
-    const cita = await booking.book(tenantId, { ...input(), now: AHORA });
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
     const otro = await seedContact(tenantId, '573009998877');
-    await expect(booking.cancel(tenantId, cita.id, otro))
-      .rejects.toBeInstanceOf(NotFoundError);
+    await expect(inTenant((m) => s.booking.cancel(m, cita.id, otro))).rejects.toBeInstanceOf(NotFoundError);
   });
-});
 
-describe('BookingService.listForContact', () => {
+  it('reprogramar mueve la cita y conserva el nombre', async () => {
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
+    const nueva = await inTenant((m) => s.booking.reschedule(
+      m, tenantId, cita.id, contactId, new Date('2026-09-10T16:00:00Z'), AHORA));
+    expect(nueva.customerName).toBe('Ana');
+    const rows = await adminQuery(`SELECT status, starts_at FROM appointments ORDER BY created_at`);
+    expect(rows.map((r: { status: string }) => r.status)).toEqual(['cancelled', 'confirmed']);
+  });
+
+  it('si el horario nuevo está ocupado, la cita original sigue en pie', async () => {
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
+    const otro = await seedContact(tenantId, '573009998877');
+    await inTenant((m) => s.booking.book(m, tenantId, { ...input(new Date('2026-09-10T16:00:00Z')), contactId: otro }));
+
+    // Dentro de UNA transacción, como en un turno: si la del llamador se
+    // revirtiera entera, el test pasaría sin probar el savepoint.
+    const status = await inTenant(async (m) => {
+      await expect(s.booking.reschedule(m, tenantId, cita.id, contactId, new Date('2026-09-10T16:00:00Z'), AHORA))
+        .rejects.toBeInstanceOf(SlotTakenError);
+      const [r] = await m.query(`SELECT status FROM appointments WHERE id = $1`, [cita.id]);
+      return r.status;
+    });
+    expect(status).toBe('confirmed');
+  });
+
   it('lista solo las citas futuras confirmadas del contacto', async () => {
-    const futura = await booking.book(tenantId, { ...input(), now: AHORA });
-    const otra = await booking.book(tenantId, {
-      ...input(new Date('2026-09-11T15:00:00Z')), now: AHORA });
-    await booking.cancel(tenantId, otra.id, contactId);
+    const futura = await inTenant((m) => s.booking.book(m, tenantId, input()));
+    const otra = await inTenant((m) => s.booking.book(m, tenantId, input(new Date('2026-09-11T15:00:00Z'))));
+    await inTenant((m) => s.booking.cancel(m, otra.id, contactId));
 
-    const citas = await booking.listForContact(tenantId, contactId, AHORA);
+    const citas = await inTenant((m) => s.booking.listForContact(m, contactId, AHORA));
     expect(citas.map((c) => c.id)).toEqual([futura.id]);
+    expect(citas[0]).toMatchObject({ serviceName: 'Corte de cabello', resourceName: 'María' });
   });
 });
 ```
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+- [ ] **Step 2: Correr y verlo fallar**
 
-Run: `pnpm vitest run apps/api/test/scheduling/booking`
-Expected: FAIL — no existe `BookingService`.
+Run: `pnpm test apps/api/test/scheduling/booking.service.test.ts`
+Expected: FAIL — `buildScheduling` no existe.
 
-- [ ] **Step 3: Implementar**
+- [ ] **Step 3: Errores de dominio**
 
 `apps/api/src/scheduling/scheduling.errors.ts`:
 ```ts
+/** Errores que se le explican al usuario; cualquier otro es un fallo del sistema. */
 export class SchedulingError extends Error {}
 
-/** La franja se ocupó entre la consulta y la reserva. Ofrecer alternativas. */
 export class SlotTakenError extends SchedulingError {
-  constructor() { super('La franja ya está ocupada'); }
+  constructor() { super('Esa franja ya está ocupada'); }
 }
 export class OutsideHoursError extends SchedulingError {
-  constructor() { super('El horario solicitado está fuera de la atención del negocio'); }
+  constructor() { super('Ese horario está fuera de la atención del negocio'); }
 }
 export class TooSoonError extends SchedulingError {
-  constructor(minLeadMin: number) {
-    super(`Se requiere al menos ${minLeadMin} minutos de anticipación`);
-  }
+  constructor(minLeadMin: number) { super(`Se necesita al menos ${minLeadMin} minutos de anticipación`); }
+}
+export class TooFarError extends SchedulingError {
+  constructor(horizonDays: number) { super(`Solo se agenda con hasta ${horizonDays} días de anticipación`); }
 }
 export class NotFoundError extends SchedulingError {
-  constructor(what = 'recurso') { super(`No se encontró el ${what}`); }
+  constructor(what = 'recurso') { super(`No se encontró ${what}`); }
 }
 ```
+
+- [ ] **Step 4: Disponibilidad**
 
 `apps/api/src/scheduling/availability.service.ts`:
 ```ts
 import { Injectable } from '@nestjs/common';
-import type { DataSource } from 'typeorm';
-import { computeSlots, type Slot } from './availability';
-import { runInTenant } from '../tenancy/tenant-context';
+import type { EntityManager } from 'typeorm';
+import { DateTime } from 'luxon';
+import { computeSlots, type BusyInterval, type HoursBlock } from './availability';
 import { NotFoundError } from './scheduling.errors';
 
-export const DEFAULT_GRANULARITY_MIN = 15;
-export const DEFAULT_MIN_LEAD_MIN = 60;
+export interface BookingSettings { timezone: string; minLeadMin: number; horizonDays: number; granularityMin: number }
+export interface ResourceSlot { start: Date; end: Date; resourceId: string; resourceName: string }
+export type Bookability = 'ok' | 'too_soon' | 'too_far' | 'outside_hours' | 'taken';
 
+const HOURS_COLUMNS = `weekday, to_char(start_time, 'HH24:MI') AS start, to_char(end_time, 'HH24:MI') AS "end"`;
+
+/**
+ * Sin estado: recibe el EntityManager de quien llama. Dentro de un turno corre
+ * en la transacción del turno (RLS fijado, conversación bloqueada) y no abre
+ * conexiones propias: con el lock tomado, una segunda conexión que necesitara
+ * la misma fila colgaría el job sin que Postgres lo viera como deadlock.
+ */
 @Injectable()
 export class AvailabilityService {
-  constructor(private readonly ds: DataSource) {}
+  async settings(m: EntityManager, tenantId: string): Promise<BookingSettings> {
+    const [t] = await m.query(
+      `SELECT timezone, min_lead_minutes, horizon_days, slot_granularity_minutes FROM tenants WHERE id = $1`,
+      [tenantId]);
+    if (!t) throw new NotFoundError('el negocio');
+    return { timezone: t.timezone, minLeadMin: t.min_lead_minutes,
+             horizonDays: t.horizon_days, granularityMin: t.slot_granularity_minutes };
+  }
 
+  listServices(m: EntityManager) {
+    return m.query(
+      `SELECT id, key, name AS nombre, duration_min AS duracion_min, price_cents AS precio_centavos
+         FROM services WHERE active ORDER BY name`);
+  }
+
+  /** Franjas libres por recurso. Con `resourceId` NULL, de todos los que prestan el servicio. */
   async slotsFor(
-    tenantId: string,
-    serviceId: string,
-    resourceId: string | null,
-    from: Date,
-    to: Date,
-    now: Date = new Date(),
-  ): Promise<Slot[]> {
-    return runInTenant(this.ds, tenantId, async (m) => {
-      const [tenant] = await m.query(`SELECT timezone FROM tenants WHERE id = $1`, [tenantId]);
-      if (!tenant) throw new NotFoundError('negocio');
+    m: EntityManager, tenantId: string,
+    q: { serviceId: string; resourceId: string | null; from: Date; to: Date; now: Date; ignoreBusy?: boolean },
+  ): Promise<ResourceSlot[]> {
+    const settings = await this.settings(m, tenantId);
+    const [service] = await m.query(
+      `SELECT duration_min, buffer_min FROM services WHERE id = $1 AND active`, [q.serviceId]);
+    if (!service) throw new NotFoundError('el servicio');
 
-      const [service] = await m.query(
-        `SELECT duration_min, buffer_min FROM services WHERE id = $1 AND active`, [serviceId]);
-      if (!service) throw new NotFoundError('servicio');
+    const resources: { id: string; name: string }[] = await m.query(
+      `SELECT r.id, r.name FROM resources r
+         JOIN resource_services rs ON rs.resource_id = r.id
+        WHERE rs.service_id = $1 AND r.active AND ($2::uuid IS NULL OR r.id = $2)
+        ORDER BY r.name`, [q.serviceId, q.resourceId]);
 
-      const hours = await m.query(
-        `SELECT weekday, to_char(start_time,'HH24:MI') AS start,
-                to_char(end_time,'HH24:MI') AS end
-           FROM business_hours
-          WHERE resource_id IS NOT DISTINCT FROM $1 OR resource_id IS NULL`,
-        [resourceId],
-      );
-
-      const busy = await m.query(
-        `SELECT starts_at AS start, ends_at AS end FROM appointments
-          WHERE status = 'confirmed' AND starts_at < $2 AND ends_at > $1
-            AND ($3::uuid IS NULL OR resource_id = $3)
+    // Lo ocupado se busca con margen: el buffer de una cita justo fuera del
+    // rango puede bloquear el borde de una franja de adentro.
+    const margin = service.buffer_min * 60_000;
+    const out: ResourceSlot[] = [];
+    for (const r of resources) {
+      const own: HoursBlock[] = await m.query(
+        `SELECT ${HOURS_COLUMNS} FROM business_hours WHERE resource_id = $1`, [r.id]);
+      // Un recurso con horario propio usa el suyo; si no, el del negocio.
+      const hours: HoursBlock[] = own.length ? own : await m.query(
+        `SELECT ${HOURS_COLUMNS} FROM business_hours WHERE resource_id IS NULL`);
+      const busy: BusyInterval[] = q.ignoreBusy ? [] : await m.query(
+        `SELECT starts_at AS start, ends_at AS "end" FROM appointments
+          WHERE resource_id = $1 AND status = 'confirmed' AND starts_at < $3 AND ends_at > $2
          UNION ALL
          SELECT starts_at, ends_at FROM time_off
-          WHERE starts_at < $2 AND ends_at > $1
-            AND ($3::uuid IS NULL OR resource_id = $3 OR resource_id IS NULL)`,
-        [from, to, resourceId],
-      );
+          WHERE (resource_id = $1 OR resource_id IS NULL) AND starts_at < $3 AND ends_at > $2`,
+        [r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin)]);
 
-      return computeSlots({
-        from, to, now,
-        timezone: tenant.timezone,
-        durationMin: service.duration_min,
-        bufferMin: service.buffer_min,
-        granularityMin: DEFAULT_GRANULARITY_MIN,
-        minLeadMin: DEFAULT_MIN_LEAD_MIN,
-        hours,
-        busy: busy.map((b: { start: Date; end: Date }) => ({ start: b.start, end: b.end })),
-      });
-    });
+      for (const slot of computeSlots({
+        from: q.from, to: q.to, now: q.now, timezone: settings.timezone,
+        durationMin: service.duration_min, bufferMin: service.buffer_min,
+        granularityMin: settings.granularityMin, minLeadMin: settings.minLeadMin,
+        horizonDays: settings.horizonDays, hours, busy,
+      })) {
+        out.push({ ...slot, resourceId: r.id, resourceName: r.name });
+      }
+    }
+    return out.sort((a, b) => a.start.getTime() - b.start.getTime() || a.resourceName.localeCompare(b.resourceName));
+  }
+
+  /**
+   * Veredicto de reserva (R1: la herramienta valida por su cuenta). Distingue
+   * "fuera de horario" de "ocupado" para que el usuario reciba el motivo real.
+   */
+  async check(
+    m: EntityManager, tenantId: string,
+    q: { serviceId: string; resourceId: string; start: Date; now: Date },
+  ): Promise<Bookability> {
+    const settings = await this.settings(m, tenantId);
+    if (q.start.getTime() < q.now.getTime() + settings.minLeadMin * 60_000) return 'too_soon';
+    const latest = DateTime.fromJSDate(q.now).setZone(settings.timezone).plus({ days: settings.horizonDays });
+    if (DateTime.fromJSDate(q.start) > latest) return 'too_far';
+
+    const [service] = await m.query(`SELECT duration_min FROM services WHERE id = $1 AND active`, [q.serviceId]);
+    if (!service) return 'outside_hours';
+    const window = { from: q.start, to: new Date(q.start.getTime() + service.duration_min * 60_000) };
+    const fits = (slots: ResourceSlot[]) => slots.some((x) => x.start.getTime() === q.start.getTime());
+
+    if (!fits(await this.slotsFor(m, tenantId, { ...q, ...window, ignoreBusy: true }))) return 'outside_hours';
+    if (!fits(await this.slotsFor(m, tenantId, { ...q, ...window }))) return 'taken';
+    return 'ok';
   }
 }
 ```
+
+- [ ] **Step 5: Reservas**
 
 `apps/api/src/scheduling/booking.service.ts`:
 ```ts
 import { Injectable } from '@nestjs/common';
-import type { DataSource } from 'typeorm';
-import { runInTenant } from '../tenancy/tenant-context';
-import { AvailabilityService, DEFAULT_MIN_LEAD_MIN } from './availability.service';
-import { SlotTakenError, OutsideHoursError, TooSoonError, NotFoundError } from './scheduling.errors';
+import type { EntityManager } from 'typeorm';
+// Import de VALOR: BookingService es @Injectable() y Nest resuelve
+// AvailabilityService por el design:paramtype que emite el decorador.
+import { AvailabilityService } from './availability.service';
+import {
+  NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError,
+} from './scheduling.errors';
 
 const PG_EXCLUSION_VIOLATION = '23P01';
+const COLUMNS = `id, service_id, resource_id, contact_id, conversation_id, starts_at, ends_at,
+                 status, customer_name, notes, google_sync_status`;
 
 export interface BookInput {
-  serviceId: string;
-  resourceId: string;
-  contactId: string;
-  startsAt: Date;
-  customerName: string;
-  conversationId?: string;
-  notes?: string;
-  now?: Date;
+  serviceId: string; resourceId: string; contactId: string; startsAt: Date;
+  customerName: string; conversationId?: string | null; notes?: string | null; now: Date;
 }
 
 export interface Appointment {
-  id: string;
-  startsAt: Date;
-  endsAt: Date;
-  status: string;
+  id: string; serviceId: string; resourceId: string; contactId: string; conversationId: string | null;
+  startsAt: Date; endsAt: Date; status: string; customerName: string | null; notes: string | null;
   googleSyncStatus: string;
 }
 
+export interface AppointmentView { id: string; startsAt: Date; endsAt: Date; serviceName: string; resourceName: string }
+
+type Row = Record<string, any>;
+
 @Injectable()
 export class BookingService {
-  constructor(
-    private readonly ds: DataSource,
-    private readonly availability: AvailabilityService,
-  ) {}
+  constructor(private readonly availability: AvailabilityService) {}
 
-  async book(tenantId: string, input: BookInput): Promise<Appointment> {
-    const now = input.now ?? new Date();
-
-    if (input.startsAt.getTime() - now.getTime() < DEFAULT_MIN_LEAD_MIN * 60_000) {
-      throw new TooSoonError(DEFAULT_MIN_LEAD_MIN);
+  async book(m: EntityManager, tenantId: string, input: BookInput): Promise<Appointment> {
+    const verdict = await this.availability.check(m, tenantId, {
+      serviceId: input.serviceId, resourceId: input.resourceId, start: input.startsAt, now: input.now });
+    if (verdict !== 'ok') {
+      const settings = await this.availability.settings(m, tenantId);
+      if (verdict === 'too_soon') throw new TooSoonError(settings.minLeadMin);
+      if (verdict === 'too_far') throw new TooFarError(settings.horizonDays);
+      if (verdict === 'taken') throw new SlotTakenError();
+      throw new OutsideHoursError();
     }
 
-    // REGLA R1 del spec: la herramienta valida por su cuenta. No se asume que
-    // el llamador (menú hoy, LLM en la Fase 4) haya elegido una franja legítima.
-    const dayStart = new Date(input.startsAt); dayStart.setUTCHours(0, 0, 0, 0);
-    const dayEnd = new Date(dayStart.getTime() + 24 * 3600_000);
-    const slots = await this.availability.slotsFor(
-      tenantId, input.serviceId, input.resourceId, dayStart, dayEnd, now,
-    );
-    const legit = slots.some((s) => s.start.getTime() === input.startsAt.getTime());
-    if (!legit) throw new OutsideHoursError();
+    const [service] = await m.query(`SELECT duration_min FROM services WHERE id = $1`, [input.serviceId]);
+    const endsAt = new Date(input.startsAt.getTime() + service.duration_min * 60_000);
 
-    return runInTenant(this.ds, tenantId, async (m) => {
-      const [service] = await m.query(
-        `SELECT duration_min FROM services WHERE id = $1`, [input.serviceId]);
-      if (!service) throw new NotFoundError('servicio');
-
-      const endsAt = new Date(input.startsAt.getTime() + service.duration_min * 60_000);
-
-      try {
-        const [row] = await m.query(
-          `INSERT INTO appointments
-             (tenant_id, resource_id, service_id, contact_id, conversation_id,
-              starts_at, ends_at, customer_name, notes)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-           RETURNING id, starts_at, ends_at, status, google_sync_status`,
-          [tenantId, input.resourceId, input.serviceId, input.contactId,
-           input.conversationId ?? null, input.startsAt, endsAt,
-           input.customerName, input.notes ?? null],
-        );
-        return this.toAppointment(row);
-      } catch (err: unknown) {
-        // La carrera consultar→reservar la resuelve el motor, no un if previo.
-        if ((err as { code?: string }).code === PG_EXCLUSION_VIOLATION) {
-          throw new SlotTakenError();
-        }
-        throw err;
-      }
-    });
-  }
-
-  async cancel(tenantId: string, appointmentId: string, contactId: string): Promise<Appointment> {
-    return runInTenant(this.ds, tenantId, async (m) => {
-      // La propiedad se verifica en SQL: el llamador no puede saltársela.
-      const [row] = await m.query(
-        `UPDATE appointments
-            SET status = 'cancelled', updated_at = now()
-          WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
-          RETURNING id, starts_at, ends_at, status, google_sync_status`,
-        [appointmentId, contactId],
-      );
-      if (!row) throw new NotFoundError('cita');
-      return this.toAppointment(row);
-    });
-  }
-
-  async reschedule(
-    tenantId: string, appointmentId: string, contactId: string, newStart: Date, now = new Date(),
-  ): Promise<Appointment> {
-    const [existing] = await runInTenant(this.ds, tenantId, (m) =>
-      m.query(`SELECT service_id, resource_id FROM appointments
-                WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'`,
-              [appointmentId, contactId]));
-    if (!existing) throw new NotFoundError('cita');
-
-    // Cancelar libera la franja vieja ANTES de reservar la nueva; si la nueva
-    // falla, la cancelación se revierte con el throw.
-    await this.cancel(tenantId, appointmentId, contactId);
+    // SAVEPOINT: la violación de exclusión aborta la transacción entera. Dentro
+    // de un turno eso tumbaría todo el turno; con el savepoint solo se revierte
+    // el INSERT y el flujo puede responder "esa franja se acaba de ocupar".
+    await m.query(`SAVEPOINT reservar_cita`);
     try {
-      return await this.book(tenantId, {
-        serviceId: existing.service_id, resourceId: existing.resource_id,
-        contactId, startsAt: newStart, customerName: '', now,
-      });
+      const [row] = await m.query(
+        `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, conversation_id,
+                                   starts_at, ends_at, customer_name, notes)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING ${COLUMNS}`,
+        [tenantId, input.resourceId, input.serviceId, input.contactId, input.conversationId ?? null,
+         input.startsAt, endsAt, input.customerName, input.notes ?? null]);
+      await m.query(`RELEASE SAVEPOINT reservar_cita`);
+      return toAppointment(row);
     } catch (err) {
-      await runInTenant(this.ds, tenantId, (m) =>
-        m.query(`UPDATE appointments SET status = 'confirmed' WHERE id = $1`, [appointmentId]));
+      await m.query(`ROLLBACK TO SAVEPOINT reservar_cita`);
+      // La carrera consultar→reservar la resuelve el motor, no un if previo.
+      if ((err as { code?: string }).code === PG_EXCLUSION_VIOLATION) throw new SlotTakenError();
       throw err;
     }
   }
 
-  async listForContact(tenantId: string, contactId: string, now: Date): Promise<Appointment[]> {
-    const rows = await runInTenant(this.ds, tenantId, (m) =>
-      m.query(
-        `SELECT id, starts_at, ends_at, status, google_sync_status
-           FROM appointments
-          WHERE contact_id = $1 AND status = 'confirmed' AND starts_at >= $2
-          ORDER BY starts_at`,
-        [contactId, now]));
-    return rows.map((r: Record<string, unknown>) => this.toAppointment(r));
+  async cancel(m: EntityManager, appointmentId: string, contactId: string): Promise<Appointment> {
+    // La propiedad se verifica en SQL (R3). Con UPDATE, TypeORM devuelve [filas, conteo].
+    const [rows] = (await m.query(
+      `UPDATE appointments SET status = 'cancelled', updated_at = now()
+        WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
+        RETURNING ${COLUMNS}`, [appointmentId, contactId])) as [Row[], number];
+    if (!rows[0]) throw new NotFoundError('esa cita');
+    return toAppointment(rows[0]);
   }
 
-  private toAppointment(row: Record<string, any>): Appointment {
-    return {
-      id: row.id,
-      startsAt: row.starts_at,
-      endsAt: row.ends_at,
-      status: row.status,
-      googleSyncStatus: row.google_sync_status,
-    };
+  /** Atómico: si el horario nuevo falla, la cita original queda como estaba. */
+  async reschedule(
+    m: EntityManager, tenantId: string, appointmentId: string, contactId: string, newStart: Date, now: Date,
+  ): Promise<Appointment> {
+    const existing = await this.findForContact(m, appointmentId, contactId);
+    if (!existing) throw new NotFoundError('esa cita');
+
+    await m.query(`SAVEPOINT reprogramar_cita`);
+    try {
+      // Cancelar primero libera la franja vieja: mover la cita 15 minutos debe poder.
+      await this.cancel(m, appointmentId, contactId);
+      const nueva = await this.book(m, tenantId, {
+        serviceId: existing.serviceId, resourceId: existing.resourceId, contactId,
+        startsAt: newStart, customerName: existing.customerName ?? '',
+        conversationId: existing.conversationId, notes: existing.notes, now,
+      });
+      await m.query(`RELEASE SAVEPOINT reprogramar_cita`);
+      return nueva;
+    } catch (err) {
+      await m.query(`ROLLBACK TO SAVEPOINT reprogramar_cita`);
+      throw err;
+    }
   }
+
+  async listForContact(m: EntityManager, contactId: string, now: Date): Promise<AppointmentView[]> {
+    const rows: Row[] = await m.query(
+      `SELECT a.id, a.starts_at, a.ends_at, s.name AS service_name, r.name AS resource_name
+         FROM appointments a
+         JOIN services s ON s.id = a.service_id
+         JOIN resources r ON r.id = a.resource_id
+        WHERE a.contact_id = $1 AND a.status = 'confirmed' AND a.starts_at >= $2
+        ORDER BY a.starts_at`, [contactId, now]);
+    return rows.map((r) => ({ id: r.id, startsAt: r.starts_at, endsAt: r.ends_at,
+                              serviceName: r.service_name, resourceName: r.resource_name }));
+  }
+
+  async findForContact(m: EntityManager, appointmentId: string, contactId: string): Promise<Appointment | null> {
+    const [row] = await m.query(
+      `SELECT ${COLUMNS} FROM appointments WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'`,
+      [appointmentId, contactId]);
+    return row ? toAppointment(row) : null;
+  }
+}
+
+function toAppointment(r: Row): Appointment {
+  return {
+    id: r.id, serviceId: r.service_id, resourceId: r.resource_id, contactId: r.contact_id,
+    conversationId: r.conversation_id, startsAt: r.starts_at, endsAt: r.ends_at, status: r.status,
+    customerName: r.customer_name, notes: r.notes, googleSyncStatus: r.google_sync_status,
+  };
 }
 ```
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+- [ ] **Step 6: Registrar y helper**
 
-Run: `pnpm vitest run apps/api/test/scheduling/booking`
-Expected: PASS, 9 tests.
+En `apps/api/src/app.module.ts`, importar y añadir a `providers`:
+```ts
+import { AvailabilityService } from './scheduling/availability.service';
+import { BookingService } from './scheduling/booking.service';
+```
+```ts
+    // Agenda (Fase 2). Sin estado: reciben el EntityManager de quien llama.
+    AvailabilityService,
+    BookingService,
+```
+En `apps/api/test/helpers.ts`:
+```ts
+import { AvailabilityService } from '../src/scheduling/availability.service';
+import { BookingService } from '../src/scheduling/booking.service';
+```
+```ts
+/** Los servicios de agenda, cableados como en AppModule. Sin estado ni conexiones. */
+export function buildScheduling() {
+  const availability = new AvailabilityService();
+  const booking = new BookingService(availability);
+  return { availability, booking };
+}
+```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 7: Correr los tests**
+
+Run: `pnpm test apps/api/test/scheduling && pnpm typecheck`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(scheduling): reservar y cancelar citas traduciendo la violación de exclusión a error de dominio"
+git add apps/api/src/scheduling apps/api/src/app.module.ts apps/api/test/helpers.ts apps/api/test/scheduling/booking.service.test.ts
+git commit -m "feat(scheduling): reservar, cancelar y reprogramar dentro de la transacción de quien llama"
 ```
 
 ---
 
-### Task 6: Registro de herramientas de agenda
+### Task 6: Las herramientas de agenda
 
-El contrato que la Fase 4 entregará al modelo **sin modificarlo**. Hoy lo invoca un
-menú determinista; mañana lo invoca el agente. Esa es la razón de construirlo ahora:
-para cuando llegue el LLM, estas operaciones ya llevan semanas probadas.
+El contrato que la Fase 5 (agente) entregará al modelo sin modificarlo. Hoy lo invoca un menú.
 
 **Files:**
-- Create: `apps/api/src/scheduling/tools/index.ts` y los seis archivos de herramienta
+- Create: `apps/api/src/scheduling/format.ts`, `apps/api/src/scheduling/tools/registry.ts`
+- Modify: `apps/api/src/app.module.ts`, `apps/api/test/helpers.ts` (`buildScheduling` gana `tools`)
 - Test: `apps/api/test/scheduling/tools.test.ts`
 
 **Interfaces:**
-- Consumes: `AvailabilityService`, `BookingService`.
+- Consumes: `AvailabilityService`, `BookingService` (Task 5).
 - Produces:
 ```ts
-interface ToolContext { tenantId: string; contactId: string; conversationId: string; now: Date }
-interface ToolResult { ok: boolean; data?: unknown; error?: string; confirmationToken?: string }
-interface ToolDefinition {
-  name: string;
-  description: string;             // se le entrega al modelo en la Fase 4
-  schema: z.ZodTypeAny;            // valida ANTES de ejecutar
-  destructive: boolean;            // exige confirmación en dos tiempos
-  run(args: unknown, ctx: ToolContext): Promise<ToolResult>;
-}
-const TOOLS: Record<string, ToolDefinition>;
-async function runTool(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult>;
+export interface ToolContext { m: EntityManager; tenantId: string; contactId: string; conversationId: string; now: Date }
+export interface ToolResult { ok: boolean; data?: unknown; error?: string; confirmationToken?: string }
+export interface ToolDefinition { name: string; description: string; schema: z.ZodObject<z.ZodRawShape>;
+  destructive: boolean; run(args: any, ctx: ToolContext): Promise<ToolResult> }
+class ToolRegistry { readonly tools: Record<string, ToolDefinition>; run(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> }
+export function labelFor(date: Date, timezone: string): string; // format.ts — "jueves 10 de septiembre, 09:00"
+```
+Herramientas y su salida:
+- `consultar_servicios()` → `[{ id, key, nombre, duracion_min, precio_centavos }]`
+- `consultar_disponibilidad(servicio_id, recurso_id?, desde?, hasta?, limite?)` → `[{ inicio, fin, recurso_id, recurso, etiqueta }]`; `desde` por defecto hoy (zona del negocio), `hasta` por defecto `desde + 6 días`, `limite` 20.
+- `consultar_mis_citas()` → `[{ id, inicio, servicio, recurso, etiqueta }]`
+- `agendar_cita(servicio_id, recurso_id, inicio, nombre, notas?)` → `{ id, inicio, estado, etiqueta }`
+- `cancelar_cita(cita_id, confirmation_token?, motivo?)` y `reprogramar_cita(cita_id, nuevo_inicio, confirmation_token?)`: en dos tiempos.
+
+- [ ] **Step 1: Instalar Zod**
+
+```bash
+pnpm --filter @citara/api add zod@^3
 ```
 
-- [ ] **Step 1: Escribir el test que falla**
+- [ ] **Step 2: Escribir el test que falla**
 
 `apps/api/test/scheduling/tools.test.ts`:
 ```ts
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { runTool, TOOLS } from '../../src/scheduling/tools';
-import { resetDb, seedChannel, seedCatalog, seedHours, seedContact,
-         seedConversation, closeHelpers, buildToolRegistry } from '../helpers';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { DataSource } from 'typeorm';
+import { createDataSource } from '@citara/db';
+import { runInTenant } from '../../src/tenancy/tenant-context';
+import type { ToolContext, ToolResult } from '../../src/scheduling/tools/registry';
+import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, adminQuery,
+         closeHelpers, buildScheduling } from '../helpers';
 
-let ctx: { tenantId: string; contactId: string; conversationId: string; now: Date };
-let serviceId: string, resourceId: string;
+let app: DataSource;
+let s: ReturnType<typeof buildScheduling>;
+let tenantId: string, contactId: string, conversationId: string, serviceId: string, resourceId: string;
 
 const AHORA = new Date('2026-09-08T12:00:00Z');
+const run = (name: string, args: unknown, who = contactId): Promise<ToolResult> =>
+  runInTenant(app, tenantId, (m) =>
+    s.tools.run(name, args, { m, tenantId, contactId: who, conversationId, now: AHORA } satisfies ToolContext));
+const agendar = () => run('agendar_cita', {
+  servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' });
 
+beforeAll(async () => { app = createDataSource(process.env.DATABASE_URL!); await app.initialize(); });
+afterAll(async () => { await app.destroy(); await closeHelpers(); });
 beforeEach(async () => {
   await resetDb();
-  const { tenantId } = await seedChannel();
+  let channelId: string;
+  ({ tenantId, channelId } = await seedChannel());
   ({ serviceId, resourceId } = await seedCatalog(tenantId));
   await seedHours(tenantId);
-  const contactId = await seedContact(tenantId);
-  const conversationId = await seedConversation(tenantId, contactId);
-  ctx = { tenantId, contactId, conversationId, now: AHORA };
-  await buildToolRegistry();
+  contactId = await seedContact(tenantId);
+  const [c] = await adminQuery(
+    `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
+     VALUES ($1, $2, $3, now()) RETURNING id`, [tenantId, contactId, channelId]);
+  conversationId = c.id;
+  s = buildScheduling();
 });
-afterAll(async () => { await closeHelpers(); });
 
 describe('registro de herramientas', () => {
   it('marca como destructivas solo cancelar y reprogramar', () => {
-    const destructivas = Object.values(TOOLS).filter((t) => t.destructive).map((t) => t.name);
+    const destructivas = Object.values(s.tools.tools).filter((t) => t.destructive).map((t) => t.name);
     expect(destructivas.sort()).toEqual(['cancelar_cita', 'reprogramar_cita']);
   });
 
-  it('ninguna herramienta acepta tenant_id ni contact_id como argumento', () => {
-    // REGLA R3: la identidad la inyecta el runtime, no el modelo.
-    for (const tool of Object.values(TOOLS)) {
-      const shape = (tool.schema as any)._def?.shape?.() ?? {};
-      expect(Object.keys(shape)).not.toContain('tenant_id');
-      expect(Object.keys(shape)).not.toContain('contact_id');
+  it('ninguna herramienta acepta la identidad como argumento (R3)', () => {
+    for (const tool of Object.values(s.tools.tools)) {
+      const keys = Object.keys(tool.schema.shape);
+      for (const k of ['tenant_id', 'contact_id', 'tenantId', 'contactId']) expect(keys).not.toContain(k);
     }
   });
-});
 
-describe('consultar_servicios', () => {
-  it('lista los servicios activos con duración y precio', async () => {
-    const res = await runTool('consultar_servicios', {}, ctx);
-    expect(res.ok).toBe(true);
-    expect(res.data).toMatchObject([{ id: serviceId, nombre: 'Corte de cabello', duracion_min: 30 }]);
+  it('una herramienta desconocida o argumentos inválidos vuelven como error, sin lanzar', async () => {
+    expect((await run('borrar_todo', {})).ok).toBe(false);
+    expect((await run('consultar_disponibilidad', { servicio_id: 'no-es-uuid' })).ok).toBe(false);
   });
 });
 
-describe('consultar_disponibilidad', () => {
-  it('devuelve franjas en ISO con offset del negocio', async () => {
-    const res = await runTool('consultar_disponibilidad', {
-      servicio_id: serviceId, desde: '2026-09-10', hasta: '2026-09-11',
-    }, ctx);
-    expect(res.ok).toBe(true);
+describe('consultas', () => {
+  it('consultar_servicios lista los servicios activos', async () => {
+    const res = await run('consultar_servicios', {});
+    expect(res.data).toEqual([expect.objectContaining({ id: serviceId, nombre: 'Corte de cabello', duracion_min: 30 })]);
+  });
+
+  it('consultar_disponibilidad devuelve franjas con offset, recurso y etiqueta', async () => {
+    const res = await run('consultar_disponibilidad', { servicio_id: serviceId, desde: '2026-09-10', hasta: '2026-09-10' });
+    const [primera] = res.data as { inicio: string; recurso_id: string; etiqueta: string }[];
+    expect(primera.inicio).toBe('2026-09-10T09:00:00-05:00');
+    expect(primera.recurso_id).toBe(resourceId);
+    expect(primera.etiqueta).toContain('09:00');
+  });
+
+  it('sin fechas mira desde hoy, y respeta el límite', async () => {
+    const res = await run('consultar_disponibilidad', { servicio_id: serviceId, limite: '3' });
     const franjas = res.data as { inicio: string }[];
-    expect(franjas[0].inicio).toMatch(/^2026-09-10T09:00:00-05:00$/);
+    expect(franjas).toHaveLength(3);
+    expect(franjas[0].inicio).toBe('2026-09-08T09:00:00-05:00'); // martes 07:00 local + 60 min de anticipación
   });
 
   it('rechaza un rango invertido con un error legible', async () => {
-    const res = await runTool('consultar_disponibilidad', {
-      servicio_id: serviceId, desde: '2026-09-11', hasta: '2026-09-10',
-    }, ctx);
-    expect(res.ok).toBe(false);
+    const res = await run('consultar_disponibilidad', { servicio_id: serviceId, desde: '2026-09-11', hasta: '2026-09-10' });
     expect(res.error).toMatch(/rango/i);
-  });
-
-  it('rechaza un servicio inexistente sin lanzar', async () => {
-    const res = await runTool('consultar_disponibilidad', {
-      servicio_id: '00000000-0000-0000-0000-000000000000',
-      desde: '2026-09-10', hasta: '2026-09-11',
-    }, ctx);
-    expect(res.ok).toBe(false);
   });
 });
 
 describe('agendar_cita', () => {
-  it('agenda y devuelve el identificador de la cita', async () => {
-    const res = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana',
-    }, ctx);
-    expect(res.ok).toBe(true);
-    expect(res.data).toMatchObject({ estado: 'confirmed' });
+  it('agenda y devuelve la cita', async () => {
+    const res = await agendar();
+    expect(res.data).toMatchObject({ estado: 'confirmed', inicio: '2026-09-10T10:00:00-05:00' });
   });
 
-  it('devuelve ok:false con mensaje útil si la franja se ocupó', async () => {
-    const args = { servicio_id: serviceId, recurso_id: resourceId,
-                   inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' };
-    await runTool('agendar_cita', args, ctx);
-    const res = await runTool('agendar_cita', args, ctx);
+  it('si la franja está ocupada, responde con un mensaje útil', async () => {
+    await agendar();
+    const res = await agendar();
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/ocupada/i);
   });
 
-  it('rechaza una fecha sin offset de zona — nunca adivina la zona', async () => {
-    const res = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2026-09-10T10:00:00', nombre: 'Ana',
-    }, ctx);
-    expect(res.ok).toBe(false);
-    expect(res.error).toMatch(/zona|offset/i);
+  it('rechaza una fecha sin offset: nunca adivina la zona (R2)', async () => {
+    const res = await run('agendar_cita', { servicio_id: serviceId, recurso_id: resourceId,
+                                            inicio: '2026-09-10T10:00:00', nombre: 'Ana' });
+    expect(res.error).toMatch(/offset/i);
   });
 
   it('rechaza una fecha en el pasado', async () => {
-    const res = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2020-01-01T10:00:00-05:00', nombre: 'Ana',
-    }, ctx);
+    const res = await run('agendar_cita', { servicio_id: serviceId, recurso_id: resourceId,
+                                            inicio: '2020-01-01T10:00:00-05:00', nombre: 'Ana' });
     expect(res.ok).toBe(false);
   });
 });
 
-describe('cancelar_cita — confirmación en dos tiempos', () => {
-  it('la primera llamada NO cancela: devuelve detalles y un token', async () => {
-    const creada = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana',
-    }, ctx);
-    const citaId = (creada.data as { id: string }).id;
-
-    const primera = await runTool('cancelar_cita', { cita_id: citaId }, ctx);
-    expect(primera.ok).toBe(true);
+describe('confirmación en dos tiempos (R4)', () => {
+  it('la primera llamada a cancelar NO cancela: devuelve detalles y un token', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const primera = await run('cancelar_cita', { cita_id: id });
     expect(primera.confirmationToken).toBeTruthy();
-    expect((primera.data as { requiere_confirmacion: boolean }).requiere_confirmacion).toBe(true);
-
-    const vigentes = await runTool('consultar_mis_citas', {}, ctx);
-    expect(vigentes.data).toHaveLength(1); // sigue viva
+    expect(primera.data).toMatchObject({ requiere_confirmacion: true });
+    expect(((await run('consultar_mis_citas', {})).data as unknown[])).toHaveLength(1);
   });
 
   it('la segunda llamada con el token sí cancela', async () => {
-    const creada = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana',
-    }, ctx);
-    const citaId = (creada.data as { id: string }).id;
-
-    const primera = await runTool('cancelar_cita', { cita_id: citaId }, ctx);
-    const segunda = await runTool('cancelar_cita',
-      { cita_id: citaId, confirmation_token: primera.confirmationToken }, ctx);
-
-    expect(segunda.ok).toBe(true);
-    const vigentes = await runTool('consultar_mis_citas', {}, ctx);
-    expect(vigentes.data).toHaveLength(0);
+    const id = ((await agendar()).data as { id: string }).id;
+    const { confirmationToken } = await run('cancelar_cita', { cita_id: id });
+    expect((await run('cancelar_cita', { cita_id: id, confirmation_token: confirmationToken })).ok).toBe(true);
+    expect(((await run('consultar_mis_citas', {})).data as unknown[])).toHaveLength(0);
   });
 
   it('rechaza un token inventado', async () => {
-    const creada = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana',
-    }, ctx);
-    const citaId = (creada.data as { id: string }).id;
-    const res = await runTool('cancelar_cita',
-      { cita_id: citaId, confirmation_token: 'inventado' }, ctx);
+    const id = ((await agendar()).data as { id: string }).id;
+    expect((await run('cancelar_cita', { cita_id: id, confirmation_token: 'inventado' })).ok).toBe(false);
+  });
+
+  it('el token de cancelar no sirve para reprogramar', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const { confirmationToken } = await run('cancelar_cita', { cita_id: id });
+    const res = await run('reprogramar_cita', { cita_id: id, nuevo_inicio: '2026-09-10T11:00:00-05:00',
+                                                confirmation_token: confirmationToken });
     expect(res.ok).toBe(false);
   });
 
-  it('no cancela la cita de otro contacto ni siquiera con token válido', async () => {
-    const creada = await runTool('agendar_cita', {
-      servicio_id: serviceId, recurso_id: resourceId,
-      inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana',
-    }, ctx);
-    const citaId = (creada.data as { id: string }).id;
-    const primera = await runTool('cancelar_cita', { cita_id: citaId }, ctx);
+  it('no cancela la cita de otro contacto ni con un token válido', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const { confirmationToken } = await run('cancelar_cita', { cita_id: id });
+    const intruso = await seedContact(tenantId, '573009990000');
+    expect((await run('cancelar_cita', { cita_id: id, confirmation_token: confirmationToken }, intruso)).ok).toBe(false);
+  });
 
-    const intruso = { ...ctx, contactId: await seedContact(ctx.tenantId, '573009990000') };
-    const res = await runTool('cancelar_cita',
-      { cita_id: citaId, confirmation_token: primera.confirmationToken }, intruso);
+  it('reprogramar avisa antes de pedir confirmación si el horario nuevo no sirve', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const res = await run('reprogramar_cita', { cita_id: id, nuevo_inicio: '2026-09-13T10:00:00-05:00' }); // domingo
     expect(res.ok).toBe(false);
+    expect(res.confirmationToken).toBeUndefined();
+  });
+
+  it('reprogramar con el token mueve la cita', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const args = { cita_id: id, nuevo_inicio: '2026-09-10T11:00:00-05:00' };
+    const { confirmationToken } = await run('reprogramar_cita', args);
+    const res = await run('reprogramar_cita', { ...args, confirmation_token: confirmationToken });
+    expect(res.data).toMatchObject({ inicio: '2026-09-10T11:00:00-05:00' });
   });
 });
 ```
 
-> El último test es la prueba de la regla R3 y vale por sí solo: aunque un atacante
-> —o un modelo confundido— consiga un token válido, la propiedad se verifica contra
-> el `contactId` que inyecta el runtime.
+- [ ] **Step 3: Correr y verlo fallar**
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+Run: `pnpm test apps/api/test/scheduling/tools.test.ts`
+Expected: FAIL — no existe `tools/registry`.
 
-Run: `pnpm vitest run apps/api/test/scheduling/tools`
-Expected: FAIL — no existe el registro.
+- [ ] **Step 4: Etiquetas legibles**
 
-- [ ] **Step 3: Implementar**
+`apps/api/src/scheduling/format.ts`:
+```ts
+import { DateTime } from 'luxon';
 
-```bash
-pnpm --filter @citara/api add zod
+/** "jueves 10 de septiembre, 09:00" en la zona del negocio: lo que lee el cliente. */
+export function labelFor(date: Date, timezone: string): string {
+  return DateTime.fromJSDate(date).setZone(timezone).setLocale('es').toFormat("cccc d 'de' LLLL, HH:mm");
+}
+
+/** ISO-8601 con el offset del negocio, sin milisegundos: lo que reciben las herramientas. */
+export function isoIn(date: Date, timezone: string): string {
+  return DateTime.fromJSDate(date).setZone(timezone).toISO({ suppressMilliseconds: true })!;
+}
 ```
 
-`apps/api/src/scheduling/tools/index.ts`:
+- [ ] **Step 5: El registro**
+
+`apps/api/src/scheduling/tools/registry.ts`:
 ```ts
-import { z } from 'zod';
-import { createHmac } from 'node:crypto';
+import { Injectable } from '@nestjs/common';
+import type { EntityManager } from 'typeorm';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { DateTime } from 'luxon';
-import type { AvailabilityService } from '../availability.service';
-import type { BookingService } from '../booking.service';
-import { SlotTakenError, SchedulingError } from '../scheduling.errors';
+import { z } from 'zod';
+// Imports de VALOR: ToolRegistry es @Injectable() y Nest los resuelve por tipo.
+import { AvailabilityService } from '../availability.service';
+import { BookingService } from '../booking.service';
+import { SchedulingError, SlotTakenError } from '../scheduling.errors';
+import { isoIn, labelFor } from '../format';
 
 export interface ToolContext {
+  /** La transacción del turno: RLS fijado y la conversación bloqueada. */
+  m: EntityManager;
   tenantId: string;
   contactId: string;
   conversationId: string;
   now: Date;
 }
 
-export interface ToolResult {
-  ok: boolean;
-  data?: unknown;
-  error?: string;
-  confirmationToken?: string;
-}
+export interface ToolResult { ok: boolean; data?: unknown; error?: string; confirmationToken?: string }
 
 export interface ToolDefinition {
   name: string;
+  /** Se le entrega al modelo en la fase del agente. */
   description: string;
-  schema: z.ZodTypeAny;
+  schema: z.ZodObject<z.ZodRawShape>;
   destructive: boolean;
-  run(args: unknown, ctx: ToolContext): Promise<ToolResult>;
+  run(args: any, ctx: ToolContext): Promise<ToolResult>;
 }
 
-/** ISO-8601 que EXIGE offset: nunca se adivina la zona de una fecha suelta. */
-const isoConOffset = z.string().refine(
-  (v) => /[+-]\d{2}:\d{2}$|Z$/.test(v) && DateTime.fromISO(v, { setZone: true }).isValid,
-  'La fecha debe incluir offset de zona (p. ej. 2026-09-10T10:00:00-05:00)',
-);
-
-/** Token derivado de la cita y el contacto: no se guarda estado para validarlo. */
-function confirmationToken(citaId: string, contactId: string): string {
-  return createHmac('sha256', process.env.DB_ENCRYPTION_KEY!)
-    .update(`${citaId}:${contactId}`).digest('hex').slice(0, 32);
-}
-
-let availability: AvailabilityService;
-let booking: BookingService;
-
-/** Se llama una vez al arrancar la app (y en los tests). */
-export function configureTools(a: AvailabilityService, b: BookingService): void {
-  availability = a; booking = b;
-}
-
-export const TOOLS: Record<string, ToolDefinition> = {
-  consultar_servicios: {
-    name: 'consultar_servicios',
-    description: 'Lista los servicios que ofrece el negocio, con duración y precio.',
-    schema: z.object({}),
-    destructive: false,
-    async run(_args, ctx) {
-      const rows = await availability.listServices(ctx.tenantId);
-      return { ok: true, data: rows };
-    },
-  },
-
-  consultar_disponibilidad: {
-    name: 'consultar_disponibilidad',
-    description: 'Devuelve las franjas libres para un servicio en un rango de fechas.',
-    schema: z.object({
-      servicio_id: z.string().uuid(),
-      recurso_id: z.string().uuid().optional(),
-      desde: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-      hasta: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-    }),
-    destructive: false,
-    async run(args, ctx) {
-      const a = args as { servicio_id: string; recurso_id?: string; desde: string; hasta: string };
-      if (a.hasta < a.desde) return { ok: false, error: 'El rango de fechas está invertido' };
-
-      const tz = await availability.timezoneOf(ctx.tenantId);
-      const from = DateTime.fromISO(a.desde, { zone: tz }).startOf('day').toJSDate();
-      const to = DateTime.fromISO(a.hasta, { zone: tz }).endOf('day').toJSDate();
-
-      const slots = await availability.slotsFor(
-        ctx.tenantId, a.servicio_id, a.recurso_id ?? null, from, to, ctx.now);
-
-      return {
-        ok: true,
-        data: slots.map((s) => ({
-          inicio: DateTime.fromJSDate(s.start).setZone(tz).toISO({ suppressMilliseconds: true }),
-          fin: DateTime.fromJSDate(s.end).setZone(tz).toISO({ suppressMilliseconds: true }),
-        })),
-      };
-    },
-  },
-
-  consultar_mis_citas: {
-    name: 'consultar_mis_citas',
-    description: 'Lista las próximas citas confirmadas de quien escribe.',
-    schema: z.object({}),
-    destructive: false,
-    async run(_args, ctx) {
-      const citas = await booking.listForContact(ctx.tenantId, ctx.contactId, ctx.now);
-      return { ok: true, data: citas.map((c) => ({ id: c.id, inicio: c.startsAt.toISOString() })) };
-    },
-  },
-
-  agendar_cita: {
-    name: 'agendar_cita',
-    description: 'Reserva una cita en una franja disponible.',
-    schema: z.object({
-      servicio_id: z.string().uuid(),
-      recurso_id: z.string().uuid(),
-      inicio: isoConOffset,
-      nombre: z.string().min(1).max(255),
-      notas: z.string().max(1000).optional(),
-    }),
-    destructive: false,
-    async run(args, ctx) {
-      const a = args as { servicio_id: string; recurso_id: string;
-                          inicio: string; nombre: string; notas?: string };
-      const cita = await booking.book(ctx.tenantId, {
-        serviceId: a.servicio_id, resourceId: a.recurso_id,
-        contactId: ctx.contactId, conversationId: ctx.conversationId,
-        startsAt: new Date(a.inicio), customerName: a.nombre, notes: a.notas, now: ctx.now,
-      });
-      return { ok: true, data: { id: cita.id, inicio: cita.startsAt.toISOString(),
-                                 estado: cita.status } };
-    },
-  },
-
-  cancelar_cita: {
-    name: 'cancelar_cita',
-    description: 'Cancela una cita. Requiere confirmación explícita del usuario.',
-    schema: z.object({
-      cita_id: z.string().uuid(),
-      confirmation_token: z.string().optional(),
-      motivo: z.string().max(500).optional(),
-    }),
-    destructive: true,
-    async run(args, ctx) {
-      const a = args as { cita_id: string; confirmation_token?: string };
-      const esperado = confirmationToken(a.cita_id, ctx.contactId);
-
-      if (!a.confirmation_token) {
-        // REGLA R4: la primera llamada NO ejecuta.
-        const citas = await booking.listForContact(ctx.tenantId, ctx.contactId, ctx.now);
-        const cita = citas.find((c) => c.id === a.cita_id);
-        if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
-        return {
-          ok: true,
-          confirmationToken: esperado,
-          data: { requiere_confirmacion: true, inicio: cita.startsAt.toISOString() },
-        };
-      }
-
-      if (a.confirmation_token !== esperado) {
-        return { ok: false, error: 'Token de confirmación inválido' };
-      }
-      await booking.cancel(ctx.tenantId, a.cita_id, ctx.contactId);
-      return { ok: true, data: { cancelada: true } };
-    },
-  },
-
-  reprogramar_cita: {
-    name: 'reprogramar_cita',
-    description: 'Mueve una cita a otro horario. Requiere confirmación explícita.',
-    schema: z.object({
-      cita_id: z.string().uuid(),
-      nuevo_inicio: isoConOffset,
-      confirmation_token: z.string().optional(),
-    }),
-    destructive: true,
-    async run(args, ctx) {
-      const a = args as { cita_id: string; nuevo_inicio: string; confirmation_token?: string };
-      const esperado = confirmationToken(a.cita_id, ctx.contactId);
-
-      if (!a.confirmation_token) {
-        return { ok: true, confirmationToken: esperado,
-                 data: { requiere_confirmacion: true, nuevo_inicio: a.nuevo_inicio } };
-      }
-      if (a.confirmation_token !== esperado) {
-        return { ok: false, error: 'Token de confirmación inválido' };
-      }
-      const cita = await booking.reschedule(
-        ctx.tenantId, a.cita_id, ctx.contactId, new Date(a.nuevo_inicio), ctx.now);
-      return { ok: true, data: { id: cita.id, inicio: cita.startsAt.toISOString() } };
-    },
-  },
-};
+/** ISO-8601 que EXIGE offset (R2): nunca se adivina la zona de una fecha suelta. */
+const isoWithOffset = z.string().refine(
+  (v) => /([+-]\d{2}:\d{2}|Z)$/.test(v) && DateTime.fromISO(v, { setZone: true }).isValid,
+  'La fecha debe incluir offset de zona, p. ej. 2026-09-10T10:00:00-05:00');
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha AAAA-MM-DD');
 
 /**
- * Ejecuta una herramienta: valida argumentos, corre y normaliza errores.
- * NUNCA lanza: un error de dominio vuelve como { ok: false, error } para que el
- * llamador (menú o modelo) pueda explicarlo al usuario.
+ * Token de confirmación (R4) ligado a la herramienta, la cita, quien pregunta
+ * y lo que se va a aplicar: el de cancelar no sirve para reprogramar, ni el de
+ * un horario para otro. Llave derivada (no la de cifrado tal cual) y sin estado
+ * que guardar.
  */
-export async function runTool(
-  name: string, args: unknown, ctx: ToolContext,
-): Promise<ToolResult> {
-  const tool = TOOLS[name];
-  if (!tool) return { ok: false, error: `Herramienta desconocida: ${name}` };
+function tokenFor(parts: string[]): string {
+  const key = createHmac('sha256', process.env.DB_ENCRYPTION_KEY!).update('citara/tool-confirmation').digest();
+  return createHmac('sha256', key).update(parts.join('|')).digest('hex').slice(0, 32);
+}
+function sameToken(given: string | undefined, expected: string): boolean {
+  if (!given || given.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+}
 
-  const parsed = tool.schema.safeParse(args ?? {});
-  if (!parsed.success) {
-    return { ok: false, error: parsed.error.issues.map((i) => i.message).join('; ') };
+@Injectable()
+export class ToolRegistry {
+  readonly tools: Record<string, ToolDefinition>;
+
+  constructor(
+    private readonly availability: AvailabilityService,
+    private readonly booking: BookingService,
+  ) {
+    this.tools = Object.fromEntries(this.definitions().map((t) => [t.name, t]));
   }
 
-  try {
-    return await tool.run(parsed.data, ctx);
-  } catch (err) {
-    if (err instanceof SlotTakenError) {
-      return { ok: false, error: 'Esa franja ya está ocupada. Ofrece otro horario.' };
+  /**
+   * Valida, ejecuta y normaliza. Un error de dominio vuelve como
+   * `{ ok: false, error }` para que el menú (o el modelo) lo explique; cualquier
+   * otro error es un fallo del sistema y se propaga: el turno se revierte y se
+   * reintenta.
+   */
+  async run(name: string, args: unknown, ctx: ToolContext): Promise<ToolResult> {
+    const tool = this.tools[name];
+    if (!tool) return { ok: false, error: `Herramienta desconocida: ${name}` };
+    const parsed = tool.schema.safeParse(args ?? {});
+    if (!parsed.success) return { ok: false, error: parsed.error.issues.map((i) => i.message).join('; ') };
+    try {
+      return await tool.run(parsed.data, ctx);
+    } catch (err) {
+      if (err instanceof SlotTakenError) return { ok: false, error: 'Esa franja ya está ocupada. Ofrece otro horario.' };
+      if (err instanceof SchedulingError) return { ok: false, error: err.message };
+      throw err;
     }
-    if (err instanceof SchedulingError) return { ok: false, error: err.message };
-    throw err;
+  }
+
+  private definitions(): ToolDefinition[] {
+    const { availability, booking } = this;
+    return [
+      {
+        name: 'consultar_servicios',
+        description: 'Lista los servicios que ofrece el negocio, con duración y precio.',
+        schema: z.object({}),
+        destructive: false,
+        async run(_args, ctx) {
+          return { ok: true, data: await availability.listServices(ctx.m) };
+        },
+      },
+      {
+        name: 'consultar_disponibilidad',
+        description: 'Franjas libres para un servicio. Sin fechas, los próximos 7 días.',
+        schema: z.object({
+          servicio_id: z.string().uuid(),
+          recurso_id: z.string().uuid().optional(),
+          desde: day.optional(),
+          hasta: day.optional(),
+          limite: z.coerce.number().int().min(1).max(50).default(20),
+        }),
+        destructive: false,
+        async run(a, ctx) {
+          const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          const desde = a.desde ? DateTime.fromISO(a.desde, { zone: timezone })
+                                : DateTime.fromJSDate(ctx.now).setZone(timezone);
+          const hasta = a.hasta ? DateTime.fromISO(a.hasta, { zone: timezone }) : desde.plus({ days: 6 });
+          if (hasta < desde.startOf('day')) return { ok: false, error: 'El rango de fechas está invertido' };
+
+          const slots = await availability.slotsFor(ctx.m, ctx.tenantId, {
+            serviceId: a.servicio_id, resourceId: a.recurso_id ?? null,
+            from: desde.startOf('day').toJSDate(), to: hasta.endOf('day').toJSDate(), now: ctx.now });
+          return {
+            ok: true,
+            data: slots.slice(0, a.limite).map((x) => ({
+              inicio: isoIn(x.start, timezone), fin: isoIn(x.end, timezone),
+              recurso_id: x.resourceId, recurso: x.resourceName, etiqueta: labelFor(x.start, timezone),
+            })),
+          };
+        },
+      },
+      {
+        name: 'consultar_mis_citas',
+        description: 'Lista las próximas citas confirmadas de quien escribe.',
+        schema: z.object({}),
+        destructive: false,
+        async run(_args, ctx) {
+          const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          const citas = await booking.listForContact(ctx.m, ctx.contactId, ctx.now);
+          return {
+            ok: true,
+            data: citas.map((c) => ({ id: c.id, inicio: isoIn(c.startsAt, timezone), servicio: c.serviceName,
+                                      recurso: c.resourceName, etiqueta: labelFor(c.startsAt, timezone) })),
+          };
+        },
+      },
+      {
+        name: 'agendar_cita',
+        description: 'Reserva una cita en una franja disponible.',
+        schema: z.object({
+          servicio_id: z.string().uuid(),
+          recurso_id: z.string().uuid(),
+          inicio: isoWithOffset,
+          nombre: z.string().trim().min(1).max(255),
+          notas: z.string().max(1000).optional(),
+        }),
+        destructive: false,
+        async run(a, ctx) {
+          const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          const cita = await booking.book(ctx.m, ctx.tenantId, {
+            serviceId: a.servicio_id, resourceId: a.recurso_id, contactId: ctx.contactId,
+            conversationId: ctx.conversationId, startsAt: new Date(a.inicio),
+            customerName: a.nombre, notes: a.notas ?? null, now: ctx.now });
+          return { ok: true, data: { id: cita.id, inicio: isoIn(cita.startsAt, timezone), estado: cita.status,
+                                     etiqueta: labelFor(cita.startsAt, timezone) } };
+        },
+      },
+      {
+        name: 'cancelar_cita',
+        description: 'Cancela una cita. Requiere confirmación explícita del usuario.',
+        schema: z.object({
+          cita_id: z.string().uuid(),
+          confirmation_token: z.string().optional(),
+          motivo: z.string().max(500).optional(),
+        }),
+        destructive: true,
+        async run(a, ctx) {
+          const expected = tokenFor(['cancelar_cita', a.cita_id, ctx.contactId]);
+          const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
+          if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
+          if (a.confirmation_token === undefined) {
+            const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+            return { ok: true, confirmationToken: expected,
+                     data: { requiere_confirmacion: true, etiqueta: labelFor(cita.startsAt, timezone) } };
+          }
+          if (!sameToken(a.confirmation_token, expected)) return { ok: false, error: 'Token de confirmación inválido' };
+          await booking.cancel(ctx.m, a.cita_id, ctx.contactId);
+          return { ok: true, data: { cancelada: true } };
+        },
+      },
+      {
+        name: 'reprogramar_cita',
+        description: 'Mueve una cita a otro horario. Requiere confirmación explícita del usuario.',
+        schema: z.object({
+          cita_id: z.string().uuid(),
+          nuevo_inicio: isoWithOffset,
+          confirmation_token: z.string().optional(),
+        }),
+        destructive: true,
+        async run(a, ctx) {
+          const nuevo = new Date(a.nuevo_inicio);
+          const expected = tokenFor(['reprogramar_cita', a.cita_id, ctx.contactId, nuevo.toISOString()]);
+          const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
+          if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
+          const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          if (a.confirmation_token === undefined) {
+            // Se verifica ANTES de pedir confirmación: confirmar un horario que no
+            // sirve haría que el usuario diga "sí" para recibir un error.
+            const verdict = nuevo.getTime() === cita.startsAt.getTime() ? 'ok'
+              : await availability.check(ctx.m, ctx.tenantId,
+                  { serviceId: cita.serviceId, resourceId: cita.resourceId, start: nuevo, now: ctx.now });
+            if (verdict !== 'ok' && verdict !== 'taken') return { ok: false, error: 'Ese horario no está disponible' };
+            if (verdict === 'taken') return { ok: false, error: 'Esa franja ya está ocupada. Ofrece otro horario.' };
+            return { ok: true, confirmationToken: expected,
+                     data: { requiere_confirmacion: true, etiqueta: labelFor(nuevo, timezone) } };
+          }
+          if (!sameToken(a.confirmation_token, expected)) return { ok: false, error: 'Token de confirmación inválido' };
+          const movida = await booking.reschedule(ctx.m, ctx.tenantId, a.cita_id, ctx.contactId, nuevo, ctx.now);
+          return { ok: true, data: { id: movida.id, inicio: isoIn(movida.startsAt, timezone),
+                                     etiqueta: labelFor(movida.startsAt, timezone) } };
+        },
+      },
+    ];
   }
 }
 ```
 
-Añadir a `AvailabilityService` los métodos `listServices(tenantId)` y `timezoneOf(tenantId)`:
-```ts
-async listServices(tenantId: string) {
-  return runInTenant(this.ds, tenantId, (m) =>
-    m.query(`SELECT id, name AS nombre, duration_min AS duracion_min,
-                    price_cents AS precio_centavos
-               FROM services WHERE active ORDER BY name`));
-}
+- [ ] **Step 6: Registrar y ampliar el helper**
 
-async timezoneOf(tenantId: string): Promise<string> {
-  const [t] = await runInTenant(this.ds, tenantId, (m) =>
-    m.query(`SELECT timezone FROM tenants WHERE id = $1`, [tenantId]));
-  if (!t) throw new NotFoundError('negocio');
-  return t.timezone;
+En `app.module.ts`, importar `ToolRegistry` y añadirlo a `providers` después de `BookingService`. En `helpers.ts`, `buildScheduling` pasa a:
+```ts
+import { ToolRegistry } from '../src/scheduling/tools/registry';
+```
+```ts
+export function buildScheduling() {
+  const availability = new AvailabilityService();
+  const booking = new BookingService(availability);
+  const tools = new ToolRegistry(availability, booking);
+  return { availability, booking, tools };
 }
 ```
 
-Helpers de test:
-```ts
-export async function seedConversation(tenantId: string, contactId: string): Promise<string> {
-  const ds = await adminDs();
-  const [ch] = await ds.query(`SELECT id FROM whatsapp_channels WHERE tenant_id = $1`, [tenantId]);
-  const [c] = await ds.query(
-    `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
-     VALUES ($1,$2,$3, now()) RETURNING id`, [tenantId, contactId, ch.id]);
-  return c.id;
-}
+- [ ] **Step 7: Correr los tests**
 
-/** Cablea el registro de herramientas contra la BD de pruebas. */
-export async function buildToolRegistry(): Promise<void> {
-  const ds = createDataSource(process.env.DATABASE_URL!);
-  if (!ds.isInitialized) await ds.initialize();
-  const availability = new AvailabilityService(ds);
-  configureTools(availability, new BookingService(ds, availability));
-}
-```
+Run: `pnpm test apps/api/test/scheduling && pnpm typecheck`
+Expected: PASS.
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
-
-Run: `pnpm vitest run apps/api/test/scheduling/tools`
-Expected: PASS, 15 tests.
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(scheduling): exponer las operaciones de agenda como herramientas validadas con zod"
+git add apps/api/package.json pnpm-lock.yaml apps/api/src/scheduling apps/api/src/app.module.ts apps/api/test/helpers.ts apps/api/test/scheduling/tools.test.ts
+git commit -m "feat(scheduling): exponer la agenda como herramientas validadas con confirmación en dos tiempos"
 ```
 
 ---
 
-### Task 7: Paso `tool` en el motor y agendamiento por menús
+### Task 7: Pasos `tool` y `pick`, y el flujo de agenda por menús
 
 **Files:**
-- Modify: `apps/api/src/flow-engine/executor.ts`, `flow-runner.service.ts`
-- Test: `apps/api/test/harness/agendar-por-menus.e2e.test.ts`
+- Create: `apps/api/src/clock.ts`, `apps/api/src/flow-engine/flows/agenda.ts`
+- Modify: `packages/shared/src/flow.ts`, `apps/api/src/flow-engine/executor.ts`, `apps/api/src/flow-engine/flow-runner.service.ts`, `apps/api/src/queues/inbound.processor.ts` (`persist` devuelve `contactId`), `apps/api/src/app.module.ts`
+- Modify: `apps/api/test/harness/conversation-harness.ts`, `apps/api/test/flow-engine/flow-runner.test.ts` (constructor de `FlowRunner`)
+- Test: `apps/api/test/flow-engine/tool-pick.test.ts`, `apps/api/test/harness/agendar-por-menus.e2e.test.ts`
 
 **Interfaces:**
-- Consumes: `runTool`, `advance` (Fase 1), `ConversationHarness`.
-- Produces: tipo de paso
+- Consumes: `ToolRegistry` (Task 6).
+- Produces:
 ```ts
-{ type: 'tool'; tool: string; args: Record<string, string>;
-  save_list?: string;        // guarda el resultado como lista elegible
-  render?: string;           // plantilla por elemento, con {{campos}}
-  on_success: string; on_error: string }
+// @citara/shared, FlowStep gana:
+| { type: 'tool'; tool: string; args: Record<string, string>; save_list?: string; render?: string;
+    on_success: string; on_empty?: string; on_error: string }
+| { type: 'pick'; text: string; from: string; var: string; next: string }
+// executor.ts
+export interface ExecResult { state: SessionState; outbound: OutboundContent[];
+  pending?: { tool: string; args: Record<string, string>; stepKey: string } }
+// clock.ts
+export interface Clock { now(): Date }
+export const CLOCK = Symbol('CLOCK');
+export const systemClock: Clock;
+// FlowRunner: constructor(ds, inbound, outboundQueue, tools: ToolRegistry, clock: Clock)
+// InboundProcessor.persist → { conversationId, messageId, contactId, duplicate }
+// flows/agenda.ts
+export const AGENDA_FLOW: FlowDefinition;
 ```
-y `{ type: 'pick'; text: string; from: string; var: string; next: string }` para elegir de una lista guardada por número.
+Semántica de `pick`: guarda en `vars[var]` el `id` (o si no tiene, el `inicio`) del elemento elegido, y cada campo como `vars[var + '_' + campo]`. Semántica de `tool` con `save_list`: guarda la lista cruda en `vars['__' + save_list]` y la versión numerada (`1. ...`, con `render`) en `vars[save_list]`; lista vacía → `on_empty ?? on_success`. Un error de la herramienta queda en `vars.__tool_error`. **El reloj inyectable gobierna solo las decisiones de agenda**; la regla de control sigue con la hora real, porque se compara contra `now()` de Postgres.
 
-**Por qué `advance` deja de ser pura aquí:** una herramienta consulta la base. La
-solución es que `advance` siga siendo pura y **devuelva una intención** —
-`{ pending: { tool, args } }` — que `FlowRunner` ejecuta y vuelve a alimentar. El
-motor no adquiere dependencias; el runner las tiene desde la Fase 1.
+- [ ] **Step 1: Escribir los tests del ejecutor que fallan**
 
-- [ ] **Step 1: Escribir el test que falla**
+`apps/api/test/flow-engine/tool-pick.test.ts`:
+```ts
+import { describe, it, expect } from 'vitest';
+import type { FlowDefinition } from '@citara/shared';
+import { advance } from '../../src/flow-engine/executor';
+
+const flow: FlowDefinition = {
+  key: 't', entry: 'cargar',
+  steps: {
+    cargar: { type: 'tool', tool: 'consultar_disponibilidad', args: { servicio_id: '{{servicio}}' },
+              save_list: 'franjas', on_success: 'elegir', on_error: 'fin' },
+    elegir: { type: 'pick', text: 'Elige:\n{{franjas}}', from: 'franjas', var: 'franja', next: 'fin' },
+    fin: { type: 'end', text: 'Elegiste {{franja_etiqueta}}' },
+  },
+};
+const lista = JSON.stringify([
+  { inicio: '2026-09-10T09:00:00-05:00', recurso_id: 'r1', etiqueta: 'jueves 09:00' },
+  { inicio: '2026-09-10T09:15:00-05:00', recurso_id: 'r2', etiqueta: 'jueves 09:15' },
+]);
+const enPick = { stepKey: 'elegir', status: 'active' as const,
+                 vars: { __franjas: lista, franjas: '1. jueves 09:00\n2. jueves 09:15' } };
+
+describe('advance — tool y pick', () => {
+  it('un paso tool no ejecuta nada: declara la herramienta con sus argumentos interpolados', () => {
+    const r = advance(flow, { stepKey: 'cargar', vars: { servicio: 's1' }, status: 'active' }, null);
+    expect(r.pending).toEqual({ tool: 'consultar_disponibilidad', args: { servicio_id: 's1' }, stepKey: 'cargar' });
+    expect(r.outbound).toEqual([]);
+  });
+
+  it('pick sin input muestra la lista', () => {
+    expect(advance(flow, enPick, null).outbound).toEqual([{ kind: 'text', body: 'Elige:\n1. jueves 09:00\n2. jueves 09:15' }]);
+  });
+
+  it('pick guarda el elegido y cada uno de sus campos', () => {
+    const r = advance(flow, enPick, '2');
+    expect(r.state.vars).toMatchObject({ franja: '2026-09-10T09:15:00-05:00', franja_recurso_id: 'r2' });
+    expect(r.outbound).toEqual([{ kind: 'text', body: 'Elegiste jueves 09:15' }]);
+  });
+
+  it('pick con un número fuera de la lista, o con texto, repite la pregunta', () => {
+    for (const input of ['3', '0', 'el de las nueve']) {
+      const r = advance(flow, enPick, input);
+      expect(r.state.stepKey).toBe('elegir');
+      expect(r.outbound[0]).toMatchObject({ body: expect.stringContaining('Elige:') });
+    }
+  });
+});
+```
+
+- [ ] **Step 2: Escribir el e2e que falla**
 
 `apps/api/test/harness/agendar-por-menus.e2e.test.ts`:
 ```ts
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
+import type { FlowDefinition } from '@citara/shared';
 import { ConversationHarness } from './conversation-harness';
-import { resetDb, seedChannel, seedCatalog, seedHours, seedFlow,
-         adminQuery, closeHelpers } from '../helpers';
+import { AGENDA_FLOW } from '../../src/flow-engine/flows/agenda';
+import { resetDb, seedChannel, seedCatalog, seedHours, seedFlow, seedContact, adminQuery, closeHelpers } from '../helpers';
 
-const flow = {
-  key: 'agenda', entry: 'saludo',
-  steps: {
-    saludo: { type: 'message', text: '¡Hola! Agendemos tu cita.', next: 'cargar_servicios' },
-    cargar_servicios: {
-      type: 'tool', tool: 'consultar_servicios', args: {},
-      save_list: 'servicios', render: '{{nombre}} ({{duracion_min}} min)',
-      on_success: 'elegir_servicio', on_error: 'error',
-    },
-    elegir_servicio: {
-      type: 'pick', text: '¿Qué servicio necesitas?\n{{servicios}}',
-      from: 'servicios', var: 'servicio_id', next: 'cargar_franjas',
-    },
-    cargar_franjas: {
-      type: 'tool', tool: 'consultar_disponibilidad',
-      args: { servicio_id: '{{servicio_id}}', desde: '2026-09-10', hasta: '2026-09-10' },
-      save_list: 'franjas', render: '{{inicio}}',
-      on_success: 'elegir_franja', on_error: 'error',
-    },
-    elegir_franja: {
-      type: 'pick', text: 'Horarios disponibles:\n{{franjas}}',
-      from: 'franjas', var: 'inicio', next: 'pide_nombre',
-    },
-    pide_nombre: { type: 'capture', text: '¿A nombre de quién?', var: 'nombre',
-                   validate: 'text', next: 'reservar' },
-    reservar: {
-      type: 'tool', tool: 'agendar_cita',
-      args: { servicio_id: '{{servicio_id}}', recurso_id: '{{recurso_id}}',
-              inicio: '{{inicio}}', nombre: '{{nombre}}' },
-      on_success: 'listo', on_error: 'ocupado',
-    },
-    listo: { type: 'end', text: '¡Listo, {{nombre}}! Te esperamos.' },
-    ocupado: { type: 'end', text: 'Ese horario se acaba de ocupar. Escríbenos de nuevo.' },
-    error: { type: 'end', text: 'Tuvimos un problema. Intenta más tarde.' },
-  },
+// Lunes 7 de septiembre, 22:00 en Bogotá: la primera franja es el martes 09:00 (14:00Z).
+const AHORA = new Date('2026-09-08T03:00:00Z');
+let h: ConversationHarness, tenantId: string, channelId: string, serviceId: string, resourceId: string;
+
+async function start(flow: FlowDefinition = AGENDA_FLOW) {
+  await seedFlow(tenantId, flow);
+  h = await ConversationHarness.create({ tenantId, channelId, from: '573001112233', now: AHORA });
+}
+const hastaElNombre = async () => {
+  await h.say('Hola');
+  await h.tap('agendar');
+  await h.say('1');            // servicio
+  await h.say('1');            // primera franja
 };
-
-let h: ConversationHarness, tenantId: string, resourceId: string;
 
 beforeEach(async () => {
   await resetDb();
-  let channelId: string;
   ({ tenantId, channelId } = await seedChannel());
-  ({ resourceId } = await seedCatalog(tenantId));
+  ({ serviceId, resourceId } = await seedCatalog(tenantId));
   await seedHours(tenantId);
-  await seedFlow(tenantId, flow);
-  h = await ConversationHarness.create({
-    tenantId, channelId, from: '573001112233',
-    now: new Date('2026-09-08T12:00:00Z'),
-    vars: { recurso_id: resourceId },
-  });
 });
 afterAll(async () => { await ConversationHarness.teardown(); await closeHelpers(); });
 
 describe('agendar una cita solo con menús', () => {
-  it('recorre servicios → franjas → nombre → cita creada', async () => {
-    const uno = await h.say('Hola');
-    expect(uno[1].body).toContain('Corte de cabello (30 min)');
+  it('recorre menú → servicio → franja → nombre → cita creada', async () => {
+    await start();
+    const servicios = await h.say('Hola').then(() => h.tap('agendar'));
+    expect(servicios.at(-1)).toMatchObject({ body: expect.stringContaining('1. Corte de cabello (30 min)') });
 
-    const dos = await h.say('1');
-    expect(dos[0].body).toContain('2026-09-10T09:00:00-05:00');
+    const franjas = await h.say('1');
+    expect(franjas[0]).toMatchObject({ body: expect.stringContaining('09:00 con María') });
 
-    await h.say('1');                       // primera franja
+    await h.say('1');
     const fin = await h.say('Ana');
-    expect(fin[0]).toEqual({ kind: 'text', body: '¡Listo, Ana! Te esperamos.' });
+    expect(fin[0]).toMatchObject({ body: expect.stringMatching(/^¡Listo, Ana! Tu cita quedó para el martes .* con María\.$/) });
 
-    const citas = await adminQuery(
-      `SELECT starts_at, customer_name, status FROM appointments WHERE tenant_id = $1`,
-      [tenantId]);
+    const citas = await adminQuery(`SELECT starts_at, customer_name, status, conversation_id FROM appointments`);
     expect(citas).toHaveLength(1);
-    expect(citas[0].customer_name).toBe('Ana');
-    expect(citas[0].status).toBe('confirmed');
-    expect(new Date(citas[0].starts_at).toISOString()).toBe('2026-09-10T14:00:00.000Z');
+    expect(new Date(citas[0].starts_at).toISOString()).toBe('2026-09-08T14:00:00.000Z');
+    expect([citas[0].customer_name, citas[0].status]).toEqual(['Ana', 'confirmed']);
+    expect(citas[0].conversation_id).toBeTruthy();
   });
 
-  it('si la franja se ocupa entre la elección y la reserva, sale por on_error', async () => {
-    await h.say('Hola'); await h.say('1'); await h.say('1');
-
-    // Alguien más reserva justo esa franja antes de que el usuario dé su nombre.
-    const contacto = await adminQuery(
-      `INSERT INTO contacts (tenant_id, wa_id, name) VALUES ($1,'573000000000','Otro') RETURNING id`,
-      [tenantId]);
-    const servicio = await adminQuery(`SELECT id FROM services WHERE tenant_id = $1`, [tenantId]);
+  it('si la franja se ocupa entre la elección y la reserva, lo dice sin romper el turno', async () => {
+    await start();
+    await hastaElNombre();
+    const otro = await seedContact(tenantId, '573000000000');
     await adminQuery(
-      `INSERT INTO appointments
-         (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at)
-       VALUES ($1,$2,$3,$4,'2026-09-10T14:00:00Z','2026-09-10T14:30:00Z')`,
-      [tenantId, resourceId, servicio[0].id, contacto[0].id]);
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at)
+       VALUES ($1, $2, $3, $4, '2026-09-08T14:00:00Z', '2026-09-08T14:30:00Z')`,
+      [tenantId, resourceId, serviceId, otro]);
 
     const fin = await h.say('Ana');
-    expect(fin[0].body).toContain('se acaba de ocupar');
+    expect(fin[0]).toMatchObject({ body: expect.stringContaining('se acaba de ocupar') });
+  });
+
+  it('si el turno falla después de agendar, la cita no queda creada', async () => {
+    await start({ ...AGENDA_FLOW, steps: { ...AGENDA_FLOW.steps,
+      reservar: { ...(AGENDA_FLOW.steps.reservar as any), on_success: 'paso_que_no_existe' } } });
+    await hastaElNombre();
+
+    await expect(h.say('Ana')).rejects.toThrow(/Paso inexistente/);
+    const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM appointments`);
+    expect(n).toBe(0);
   });
 
   it('elegir un número fuera de la lista repite la pregunta', async () => {
-    await h.say('Hola');
+    await start();
+    await h.say('Hola'); await h.tap('agendar');
     const res = await h.say('99');
-    expect(res[0].body).toContain('¿Qué servicio necesitas?');
+    expect(res[0]).toMatchObject({ body: expect.stringContaining('¿Qué servicio necesitas?') });
+  });
+
+  it('sin horarios libres lo dice en vez de mostrar una lista vacía', async () => {
+    await adminQuery(`DELETE FROM business_hours`);
+    await start();
+    await h.say('Hola'); await h.tap('agendar');
+    const res = await h.say('1');
+    expect(res[0]).toMatchObject({ body: expect.stringContaining('No encontré horarios libres') });
+  });
+
+  it('mis citas lista las próximas', async () => {
+    await start();
+    await hastaElNombre();
+    await h.say('Ana');
+    await h.say('Hola');
+    const res = await h.tap('mis_citas');
+    expect(res[0]).toMatchObject({ body: expect.stringContaining('Corte de cabello') });
   });
 });
 ```
 
-> El segundo test es la carrera del spec vista desde el usuario: la restricción de
-> la base de datos se convierte en un mensaje comprensible, no en un error 500.
+- [ ] **Step 3: Correr y verlos fallar**
 
-- [ ] **Step 2: Correr el test y verificar que falla**
+Run: `pnpm test apps/api/test/flow-engine/tool-pick.test.ts apps/api/test/harness/agendar-por-menus.e2e.test.ts`
+Expected: FAIL — `advance` no conoce `tool` ni `pick`; no existe `flows/agenda`.
 
-Run: `pnpm vitest run apps/api/test/harness/agendar-por-menus`
-Expected: FAIL — el motor no conoce `tool` ni `pick`.
+- [ ] **Step 4: Tipos de paso**
 
-- [ ] **Step 3: Implementar**
+En `packages/shared/src/flow.ts`, añadir a la unión `FlowStep` (antes del `;` final):
+```ts
+  | { type: 'tool'; tool: string; args: Record<string, string>; save_list?: string; render?: string;
+      on_success: string; on_empty?: string; on_error: string }
+  | { type: 'pick'; text: string; from: string; var: string; next: string }
+```
 
-En `apps/api/src/flow-engine/executor.ts`, ampliar el resultado:
+- [ ] **Step 5: El ejecutor**
+
+En `apps/api/src/flow-engine/executor.ts`, ampliar `ExecResult`:
 ```ts
 export interface ExecResult {
   state: SessionState;
   outbound: OutboundContent[];
-  /** Intención de invocar una herramienta. El motor NO la ejecuta. */
+  /** Intención de invocar una herramienta. El ejecutor sigue siendo PURO: no la ejecuta. */
   pending?: { tool: string; args: Record<string, string>; stepKey: string };
 }
 ```
-
-Y dentro del bucle de `advance`:
+e insertar antes del bloque `if (step.type === 'handoff')`:
 ```ts
-if (step.type === 'tool') {
-  // El motor sigue siendo puro: solo declara qué hay que ejecutar.
-  const args = Object.fromEntries(
-    Object.entries(step.args).map(([k, v]) => [k, interpolate(v, current.vars)]),
-  );
-  return { state: current, outbound, pending: { tool: step.tool, args, stepKey: current.stepKey } };
-}
+    if (step.type === 'tool') {
+      const args = Object.fromEntries(
+        Object.entries(step.args).map(([k, v]) => [k, interpolate(v, current.vars)]));
+      return { state: current, outbound, pending: { tool: step.tool, args, stepKey: current.stepKey } };
+    }
 
-if (step.type === 'pick') {
-  const raw = current.vars[`__${step.from}`];
-  const options: Record<string, string>[] = raw ? JSON.parse(raw) : [];
-
-  if (input === null) {
-    outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
-    return { state: current, outbound };
-  }
-
-  const index = /^\d+$/.test(input.trim()) ? Number(input.trim()) - 1 : -1;
-  if (index < 0 || index >= options.length) {
-    outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
-    return { state: current, outbound };
-  }
-
-  // Guarda el campo canónico del elegido: 'id' si existe, si no 'inicio'.
-  const chosen = options[index];
-  current = {
-    ...current,
-    vars: { ...current.vars, [step.var]: chosen.id ?? chosen.inicio ?? '' },
-    stepKey: step.next,
-  };
-  input = null;
-  continue;
-}
+    if (step.type === 'pick') {
+      const options: Record<string, unknown>[] = JSON.parse(current.vars[`__${step.from}`] ?? '[]');
+      const index = input !== null && /^\d+$/.test(input.trim()) ? Number(input.trim()) - 1 : -1;
+      if (index < 0 || index >= options.length) {
+        // Sin input (primera vez) o fuera de la lista: mostrar o repetir la pregunta.
+        outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
+        return { state: current, outbound };
+      }
+      const chosen = options[index];
+      const fields = Object.fromEntries(
+        Object.entries(chosen).map(([k, v]) => [`${step.var}_${k}`, String(v)]));
+      current = {
+        ...current,
+        vars: { ...current.vars, ...fields, [step.var]: String(chosen.id ?? chosen.inicio ?? '') },
+        stepKey: step.next,
+      };
+      input = null;
+      continue;
+    }
 ```
 
-En `FlowRunner.handle`, envolver la ejecución en un bucle que resuelva las
-herramientas pendientes:
+- [ ] **Step 6: El reloj y el flujo de agenda**
+
+`apps/api/src/clock.ts`:
 ```ts
-const MAX_TOOL_HOPS = 5;
-
-let result = advance(flow, state, input);
-
-for (let hop = 0; result.pending && hop < MAX_TOOL_HOPS; hop++) {
-  const { tool, args, stepKey } = result.pending;
-  const step = flow.steps[stepKey] as { on_success: string; on_error: string;
-                                        save_list?: string; render?: string };
-
-  const toolResult = await runTool(tool, args, {
-    tenantId: job.tenantId, contactId, conversationId, now: new Date(),
-  });
-
-  const vars = { ...result.state.vars };
-  if (toolResult.ok && step.save_list && Array.isArray(toolResult.data)) {
-    const items = toolResult.data as Record<string, string>[];
-    // La lista cruda va en __clave (para 'pick'); la versión legible en clave.
-    vars[`__${step.save_list}`] = JSON.stringify(items);
-    vars[step.save_list] = items
-      .map((it, i) => `${i + 1}. ${interpolate(step.render ?? '{{id}}', it)}`)
-      .join('\n');
-  }
-  if (!toolResult.ok && toolResult.error) vars.__tool_error = toolResult.error;
-
-  const nextKey = toolResult.ok ? step.on_success : step.on_error;
-  const nextState = { ...result.state, vars, stepKey: nextKey };
-  const nextResult = advance(flow, nextState, null);
-
-  result = { ...nextResult, outbound: [...result.outbound, ...nextResult.outbound] };
-}
-
-if (result.pending) {
-  throw new Error(`Cadena de herramientas demasiado larga en el flujo '${flow.key}'`);
-}
+/**
+ * Hora para las decisiones de AGENDA (qué franjas ofrecer, si una cita está a
+ * tiempo). Inyectable para que los tests fijen el día. La regla de control no
+ * lo usa: compara contra now() de Postgres y debe ir con la hora real.
+ */
+export interface Clock { now(): Date }
+export const CLOCK = Symbol('CLOCK');
+export const systemClock: Clock = { now: () => new Date() };
 ```
 
-`ConversationHarness.create` acepta ahora `now` y `vars` iniciales, que se
-inyectan en la sesión al crearla.
+`apps/api/src/flow-engine/flows/agenda.ts`:
+```ts
+import type { FlowDefinition } from '@citara/shared';
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+/** El flujo de menús que se entrega a cada negocio (`tenant:apply` con `flow: agenda`). */
+export const AGENDA_FLOW: FlowDefinition = {
+  key: 'agenda',
+  entry: 'saludo',
+  steps: {
+    saludo: { type: 'message', text: '¡Hola! Soy el asistente de citas 👋', next: 'menu' },
+    menu: {
+      type: 'choice', kind: 'interactive_buttons', text: '¿Qué necesitas?',
+      buttons: [
+        { id: 'agendar', title: 'Agendar cita', next: 'cargar_servicios' },
+        { id: 'mis_citas', title: 'Mis citas', next: 'cargar_citas' },
+        { id: 'asesor', title: 'Hablar con alguien', next: 'humano' },
+      ],
+    },
+    cargar_servicios: {
+      type: 'tool', tool: 'consultar_servicios', args: {},
+      save_list: 'servicios', render: '{{nombre}} ({{duracion_min}} min)',
+      on_success: 'elegir_servicio', on_empty: 'sin_servicios', on_error: 'error',
+    },
+    elegir_servicio: {
+      type: 'pick', text: '¿Qué servicio necesitas? Responde con el número.\n{{servicios}}',
+      from: 'servicios', var: 'servicio', next: 'cargar_franjas',
+    },
+    cargar_franjas: {
+      type: 'tool', tool: 'consultar_disponibilidad', args: { servicio_id: '{{servicio}}', limite: '9' },
+      save_list: 'franjas', render: '{{etiqueta}} con {{recurso}}',
+      on_success: 'elegir_franja', on_empty: 'sin_franjas', on_error: 'error',
+    },
+    elegir_franja: {
+      type: 'pick', text: 'Estos son los próximos horarios. Responde con el número.\n{{franjas}}',
+      from: 'franjas', var: 'franja', next: 'pide_nombre',
+    },
+    pide_nombre: { type: 'capture', text: '¿A nombre de quién agendo la cita?', var: 'nombre', validate: 'text', next: 'reservar' },
+    reservar: {
+      type: 'tool', tool: 'agendar_cita',
+      args: { servicio_id: '{{servicio}}', recurso_id: '{{franja_recurso_id}}', inicio: '{{franja_inicio}}', nombre: '{{nombre}}' },
+      on_success: 'confirmada', on_error: 'ocupada',
+    },
+    confirmada: { type: 'end', text: '¡Listo, {{nombre}}! Tu cita quedó para el {{franja_etiqueta}} con {{franja_recurso}}.' },
+    ocupada: { type: 'end', text: 'Ese horario se acaba de ocupar. Escríbenos de nuevo y te muestro otros.' },
+    cargar_citas: {
+      type: 'tool', tool: 'consultar_mis_citas', args: {},
+      save_list: 'citas', render: '{{etiqueta}} — {{servicio}} con {{recurso}}',
+      on_success: 'mostrar_citas', on_empty: 'sin_citas', on_error: 'error',
+    },
+    mostrar_citas: { type: 'end', text: 'Tus próximas citas:\n{{citas}}' },
+    sin_citas: { type: 'end', text: 'No tienes citas próximas.' },
+    sin_servicios: { type: 'end', text: 'Por ahora no hay servicios para agendar.' },
+    sin_franjas: { type: 'end', text: 'No encontré horarios libres en los próximos días. Escríbenos y te ayudamos.' },
+    humano: { type: 'handoff', text: 'Te comunico con alguien del equipo.' },
+    error: { type: 'end', text: 'Tuvimos un problema. Intenta de nuevo más tarde.' },
+  },
+};
+```
 
-Run: `pnpm vitest run apps/api/test`
-Expected: PASS, toda la suite de las fases 1 y 2.
+- [ ] **Step 7: `persist` devuelve el contacto**
 
-- [ ] **Step 5: Commit**
+En `apps/api/src/queues/inbound.processor.ts`:
+- el tipo de retorno de `persist` pasa a `Promise<{ conversationId: string; messageId: string; contactId: string; duplicate: boolean }>`;
+- la consulta del duplicado temprano pasa a
+```ts
+    const [seen] = await m.query(
+      `SELECT msg.id, msg.conversation_id, c.contact_id
+         FROM messages msg JOIN conversations c ON c.id = msg.conversation_id
+        WHERE msg.wamid = $1`, [message.wamid]);
+    if (seen) return { conversationId: seen.conversation_id, messageId: seen.id, contactId: seen.contact_id, duplicate: true };
+```
+- los dos `return` restantes ganan `contactId: contact.id`.
+
+- [ ] **Step 8: `FlowRunner` ejecuta las herramientas en la transacción del turno**
+
+En `apps/api/src/flow-engine/flow-runner.service.ts`:
+- imports:
+```ts
+import type { FlowStep } from '@citara/shared';
+import { ToolRegistry } from '../scheduling/tools/registry';
+import { CLOCK, type Clock } from '../clock';
+import { interpolate } from './executor';
+```
+- constructor:
+```ts
+  constructor(
+    private readonly ds: DataSource,
+    private readonly inbound: InboundProcessor,
+    @Inject(OutboundQueue) private readonly outboundQueue: OutboundEnqueuer,
+    private readonly tools: ToolRegistry,
+    @Inject(CLOCK) private readonly clock: Clock,
+  ) {}
+```
+- la llamada `this.advanceFlow(m, job, inbound.conversationId, inbound.messageId)` pasa a `this.advanceFlow(m, job, inbound)`, y la firma a
+```ts
+  private async advanceFlow(
+    m: EntityManager, job: InboundJob,
+    inbound: { conversationId: string; messageId: string; contactId: string },
+  ): Promise<{ outbound: OutboundContent[]; enteredHandoff: boolean }> {
+    const { conversationId, messageId: inboundId } = inbound;
+```
+- la línea `const result = advance(flow, state, input);` se reemplaza por:
+```ts
+    let result = advance(flow, state, input);
+    // Las herramientas corren aquí, en la transacción del turno: si algo falla
+    // después de agendar, el rollback se lleva también la cita.
+    for (let hop = 0; result.pending; hop++) {
+      if (hop >= MAX_TOOL_HOPS) throw new Error(`Cadena de herramientas demasiado larga en el flujo '${flow.key}'`);
+      const { tool, args, stepKey } = result.pending;
+      const step = flow.steps[stepKey] as Extract<FlowStep, { type: 'tool' }>;
+      const out = await this.tools.run(tool, args, {
+        m, tenantId: job.tenantId, contactId: inbound.contactId, conversationId, now: this.clock.now() });
+
+      const vars = { ...result.state.vars };
+      let next = out.ok ? step.on_success : step.on_error;
+      if (!out.ok) vars.__tool_error = out.error ?? '';
+      if (out.ok && step.save_list && Array.isArray(out.data)) {
+        const items = out.data as Record<string, unknown>[];
+        vars[`__${step.save_list}`] = JSON.stringify(items);
+        vars[step.save_list] = items
+          .map((it, i) => `${i + 1}. ${interpolate(step.render ?? '{{id}}',
+            Object.fromEntries(Object.entries(it).map(([k, v]) => [k, String(v)])))}`)
+          .join('\n');
+        if (items.length === 0) next = step.on_empty ?? step.on_success;
+      }
+      const after = advance(flow, { ...result.state, vars, stepKey: next }, null);
+      result = { ...after, outbound: [...result.outbound, ...after.outbound] };
+    }
+```
+  y, junto a los demás imports del archivo, la constante `const MAX_TOOL_HOPS = 5;`.
+
+En `apps/api/src/app.module.ts`, importar `CLOCK, systemClock` y añadir a `providers`:
+```ts
+    // Hora para las decisiones de agenda; los tests la fijan.
+    { provide: CLOCK, useValue: systemClock },
+```
+
+- [ ] **Step 9: El arnés y los tests que construyen `FlowRunner` a mano**
+
+En `apps/api/test/harness/conversation-harness.ts`, `create` acepta un `now` opcional y cablea las herramientas:
+```ts
+import { buildScheduling } from '../helpers';
+import { systemClock, type Clock } from '../../src/clock';
+```
+```ts
+  static async create(ctx: { tenantId: string; channelId: string; from: string; now?: Date }) {
+    if (!ds) { ds = createDataSource(process.env.DATABASE_URL!); await ds.initialize(); }
+    const clock: Clock = ctx.now ? { now: () => ctx.now! } : systemClock;
+    const runner = new FlowRunner(ds, new InboundProcessor(ds), new FakeOutboundQueue(),
+                                  buildScheduling().tools, clock);
+    return new ConversationHarness(runner, ctx);
+  }
+```
+En `apps/api/test/flow-engine/flow-runner.test.ts`, la construcción pasa a
+`runner = new FlowRunner(ds, new InboundProcessor(ds), queue, buildScheduling().tools, systemClock);` (importando `buildScheduling` de `../helpers` y `systemClock` de `../../src/clock`).
+
+- [ ] **Step 10: Correr los tests**
+
+Run: `pnpm typecheck && pnpm test`
+Expected: todo en verde, incluidos los e2e del motor de la Fase 1 y el pipeline.
+
+- [ ] **Step 11: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(flow-engine): invocar herramientas de agenda desde pasos deterministas del flujo"
+git add packages/shared/src/flow.ts apps/api/src/clock.ts apps/api/src/flow-engine apps/api/src/queues/inbound.processor.ts apps/api/src/app.module.ts apps/api/test/harness apps/api/test/flow-engine
+git commit -m "feat(flow-engine): agendar por menús invocando las herramientas dentro del turno"
 ```
 
 ---
 
-### Task 8: Recordatorios programados
+### Task 8: Plantillas en el contrato de salida
 
 **Files:**
-- Create: migración `1725400600000-CreateReminders.ts`
-- Create: `apps/api/src/scheduling/reminders.service.ts`, `apps/api/src/queues/reminders.processor.ts`
-- Test: `apps/api/test/scheduling/reminders.test.ts`
+- Modify: `packages/shared/src/outbound-message.ts`, `apps/api/src/conversations/session-window.ts`, `apps/api/src/whatsapp/sender.ts`, `apps/api/src/flow-engine/flow-runner.service.ts`
+- Create: `apps/api/src/conversations/message-type.ts`
+- Test: `apps/api/test/whatsapp/sender.test.ts`, `apps/api/test/conversations/session-window.test.ts`
 
 **Interfaces:**
-- Consumes: `BookingService`, `OutboundQueue`, `canSendFreeform` (Fase 1).
-- Produces: `RemindersService.scheduleFor(appointment)`, `RemindersService.due(now): Promise<Reminder[]>`, y el contenido de salida `{ kind: 'template'; name: string; language: string; params: string[] }`.
+- Produces: `OutboundContent` gana `{ kind: 'template'; name: string; language: string; params: string[] }`; `requiresOpenWindow(template) === false`; `messageTypeOf(content): 'text' | 'interactive' | 'template'`; `MetaSender` arma el cuerpo de plantilla.
 
-**Trabajo externo que arranca aquí:** enviar a aprobación de Meta las plantillas
-`recordatorio_cita_24h` y `recordatorio_cita_2h`. La aprobación tarda de horas a días,
-así que se radica al empezar la tarea, no al terminarla.
+- [ ] **Step 1: Escribir los tests que fallan**
 
-- [ ] **Step 1: Escribir el test que falla**
+En `apps/api/test/whatsapp/sender.test.ts`, dentro del `describe` principal:
+```ts
+  it('arma una plantilla con sus parámetros de cuerpo', async () => {
+    await sender.send(channel, '573001112233', {
+      kind: 'template', name: 'recordatorio_cita_24h', language: 'es', params: ['Ana', 'jueves 10:00', 'Corte'] });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(JSON.parse(init.body)).toEqual({
+      messaging_product: 'whatsapp', recipient_type: 'individual', to: '573001112233',
+      type: 'template',
+      template: { name: 'recordatorio_cita_24h', language: { code: 'es' },
+        components: [{ type: 'body', parameters: [
+          { type: 'text', text: 'Ana' }, { type: 'text', text: 'jueves 10:00' }, { type: 'text', text: 'Corte' }] }] },
+    });
+  });
+```
+En `apps/api/test/conversations/session-window.test.ts`, dentro de `describe('requiresOpenWindow', ...)`:
+```ts
+  it('una plantilla puede salir fuera de la ventana: para eso existen', () => {
+    expect(requiresOpenWindow({ kind: 'template', name: 'x', language: 'es', params: [] })).toBe(false);
+  });
+```
+
+- [ ] **Step 2: Correr y verlos fallar**
+
+Run: `pnpm typecheck; pnpm test apps/api/test/whatsapp/sender.test.ts apps/api/test/conversations`
+Expected: el typecheck falla en `requiresOpenWindow` (el `switch` exhaustivo no cubre `template`: es la trampa que se dejó a propósito) y los tests fallan.
+
+- [ ] **Step 3: Implementar**
+
+`packages/shared/src/outbound-message.ts`, añadir a la unión:
+```ts
+  | { kind: 'template'; name: string; language: string; params: string[] }
+```
+`apps/api/src/conversations/session-window.ts`, en el `switch`:
+```ts
+    case 'template':
+      // Las plantillas aprobadas por Meta son justo lo que puede salir fuera de las 24 h.
+      return false;
+```
+`apps/api/src/conversations/message-type.ts`:
+```ts
+import type { OutboundContent } from '@citara/shared';
+
+/** `messages.type` con el vocabulario de Meta, igual que el entrante. */
+export function messageTypeOf(content: OutboundContent): 'text' | 'interactive' | 'template' {
+  if (content.kind === 'text') return 'text';
+  if (content.kind === 'template') return 'template';
+  return 'interactive';
+}
+```
+`apps/api/src/whatsapp/sender.ts`, en `buildBody`, después del caso `text`:
+```ts
+    if (content.kind === 'template') {
+      return {
+        ...base,
+        type: 'template',
+        template: {
+          name: content.name,
+          language: { code: content.language },
+          components: content.params.length
+            ? [{ type: 'body', parameters: content.params.map((text) => ({ type: 'text', text })) }]
+            : [],
+        },
+      };
+    }
+```
+`apps/api/src/flow-engine/flow-runner.service.ts`: importar `messageTypeOf` y, en el INSERT de salientes, reemplazar `const type = content.kind === 'text' ? 'text' : 'interactive';` por `const type = messageTypeOf(content);` y el parámetro `content.body` por `'body' in content ? content.body : null`.
+
+- [ ] **Step 4: Correr los tests**
+
+Run: `pnpm typecheck && pnpm test`
+Expected: todo en verde.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/shared/src/outbound-message.ts apps/api/src/conversations apps/api/src/whatsapp/sender.ts apps/api/src/flow-engine/flow-runner.service.ts apps/api/test/whatsapp/sender.test.ts apps/api/test/conversations/session-window.test.ts
+git commit -m "feat(whatsapp): enviar plantillas aprobadas, las únicas que pueden salir fuera de la ventana"
+```
+
+---
+
+### Task 9: Recordatorios por el outbox
+
+**Trabajo externo que arranca aquí:** enviar a aprobación de Meta las plantillas `recordatorio_cita_24h` y `recordatorio_cita_2h` (categoría UTILITY, idioma `es`), cada una con tres parámetros de cuerpo en este orden: nombre del cliente, fecha y hora, servicio. La aprobación tarda de horas a días: se radica al empezar la tarea.
+
+**Files:**
+- Create: migraciones `1725400600000-CreateReminders.ts`, `1725400700000-AddReminderOriginToMessages.ts`
+- Create: `apps/api/src/scheduling/reminders.service.ts`, `apps/api/src/queues/reminders.queue.ts`
+- Modify: `apps/api/src/queues/outbound.queue.ts` (`OutboundJob` por turno o por mensaje), `apps/api/src/queues/outbound.processor.ts`, `apps/api/src/scheduling/booking.service.ts`, `apps/api/src/queues/workers.ts`, `apps/api/src/app.module.ts`, `apps/api/test/helpers.ts`, `packages/db/test/rls-inventory.test.ts`
+- Test: `apps/api/test/scheduling/reminders.test.ts`, `apps/api/test/queues/outbound.processor.test.ts`
+
+**Interfaces:**
+- Consumes: `BookingService` (Task 5), plantillas (Task 8), outbox (Fase 1).
+- Produces:
+```ts
+// outbound.queue.ts
+interface OutboundTarget { tenantId: string; channelId: string; conversationId: string; to: string }
+export interface TurnOutboundJob extends OutboundTarget { turnId: string }
+export interface MessageOutboundJob extends OutboundTarget { messageId: string }
+export type OutboundJob = TurnOutboundJob | MessageOutboundJob;
+OutboundQueue.add(job: OutboundJob, opts?: { delay?: number })
+// reminders.service.ts
+export const REMINDER_TEMPLATES: { '24h': 'recordatorio_cita_24h'; '2h': 'recordatorio_cita_2h' };
+class RemindersService {
+  constructor(ds: DataSource)
+  scheduleFor(m, tenantId, appointmentId: string, startsAt: Date, now: Date): Promise<void>;
+  cancelFor(m, appointmentId: string): Promise<void>;
+  sweep(now: Date): Promise<{ job: MessageOutboundJob; delay: number }[]>;
+}
+// BookingService: constructor(availability, reminders: RemindersService)
+// reminders.queue.ts
+export const REMINDERS_QUEUE = 'reminders';
+class RemindersQueue { schedule(): Promise<unknown> } // barrido cada 60 s
+// startWorkers(ctx, { concurrency?, scheduleReminders? = true })
+```
+Estados de `reminders.status`: `pending` → `queued` (con `message_id`) o `cancelled`. El estado de entrega vive en el mensaje.
+
+- [ ] **Step 1: Escribir los tests que fallan**
 
 `apps/api/test/scheduling/reminders.test.ts`:
 ```ts
-import { describe, it, expect, beforeEach, afterAll } from 'vitest';
-import { DataSource } from 'typeorm';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { DataSource, type EntityManager } from 'typeorm';
 import { createDataSource } from '@citara/db';
+import { runInTenant } from '../../src/tenancy/tenant-context';
 import { RemindersService } from '../../src/scheduling/reminders.service';
-import { BookingService } from '../../src/scheduling/booking.service';
-import { AvailabilityService } from '../../src/scheduling/availability.service';
-import { resetDb, seedChannel, seedCatalog, seedHours, seedContact,
-         adminQuery, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, adminQuery,
+         closeHelpers, buildScheduling } from '../helpers';
 
-let ds: DataSource, reminders: RemindersService, booking: BookingService;
-let tenantId: string, serviceId: string, resourceId: string, contactId: string;
+let app: DataSource;
+let s: ReturnType<typeof buildScheduling>;
+let tenantId: string, channelId: string, serviceId: string, resourceId: string, contactId: string;
 
 const AHORA = new Date('2026-09-08T12:00:00Z');
 const CITA = new Date('2026-09-10T15:00:00Z');
+const inTenant = <T>(fn: (m: EntityManager) => Promise<T>) => runInTenant(app, tenantId, fn);
+const agendar = (startsAt = CITA) => inTenant((m) => s.booking.book(m, tenantId,
+  { serviceId, resourceId, contactId, startsAt, customerName: 'Ana', now: AHORA }));
+const reminders = (appointmentId?: string) => adminQuery(
+  `SELECT kind, send_at, status, message_id FROM reminders
+    ${appointmentId ? 'WHERE appointment_id = $1' : ''} ORDER BY send_at`, appointmentId ? [appointmentId] : []);
 
+beforeAll(async () => { app = createDataSource(process.env.DATABASE_URL!); await app.initialize(); });
+afterAll(async () => { await app.destroy(); await closeHelpers(); });
 beforeEach(async () => {
   await resetDb();
-  ({ tenantId } = await seedChannel());
+  ({ tenantId, channelId } = await seedChannel());
   ({ serviceId, resourceId } = await seedCatalog(tenantId));
   await seedHours(tenantId);
   contactId = await seedContact(tenantId);
-  if (!ds) { ds = createDataSource(process.env.DATABASE_URL!); await ds.initialize(); }
-  const availability = new AvailabilityService(ds);
-  booking = new BookingService(ds, availability);
-  reminders = new RemindersService(ds);
+  s = buildScheduling(app);
 });
-afterAll(async () => { await ds.destroy(); await closeHelpers(); });
 
-const agendar = () => booking.book(tenantId, {
-  serviceId, resourceId, contactId, startsAt: CITA, customerName: 'Ana', now: AHORA });
-
-describe('RemindersService', () => {
-  it('programa dos recordatorios al crear una cita', async () => {
+describe('programación', () => {
+  it('agendar programa los recordatorios de 24 h y 2 h', async () => {
     const cita = await agendar();
-    await reminders.scheduleFor(tenantId, cita.id);
-
-    const rows = await adminQuery(
-      `SELECT kind, send_at FROM reminders WHERE appointment_id = $1 ORDER BY send_at`,
-      [cita.id]);
-    expect(rows.map((r) => r.kind)).toEqual(['24h', '2h']);
+    const rows = await reminders(cita.id);
+    expect(rows.map((r: { kind: string }) => r.kind)).toEqual(['24h', '2h']);
     expect(new Date(rows[0].send_at).toISOString()).toBe('2026-09-09T15:00:00.000Z');
     expect(new Date(rows[1].send_at).toISOString()).toBe('2026-09-10T13:00:00.000Z');
   });
 
   it('no programa un recordatorio cuyo momento ya pasó', async () => {
-    const cita = await booking.book(tenantId, {
-      serviceId, resourceId, contactId, customerName: 'Ana',
-      startsAt: new Date('2026-09-08T15:00:00Z'), // en 3 horas
-      now: AHORA });
-    await reminders.scheduleFor(tenantId, cita.id);
-
-    const rows = await adminQuery(
-      `SELECT kind FROM reminders WHERE appointment_id = $1`, [cita.id]);
-    expect(rows.map((r) => r.kind)).toEqual(['2h']); // el de 24h ya no aplica
+    const cita = await agendar(new Date('2026-09-08T15:00:00Z')); // en 3 horas
+    expect((await reminders(cita.id)).map((r: { kind: string }) => r.kind)).toEqual(['2h']);
   });
 
-  it('due() devuelve solo los vencidos y pendientes', async () => {
+  it('cancelar la cita cancela sus recordatorios', async () => {
     const cita = await agendar();
-    await reminders.scheduleFor(tenantId, cita.id);
-
-    expect(await reminders.due(new Date('2026-09-09T14:00:00Z'))).toHaveLength(0);
-    expect(await reminders.due(new Date('2026-09-09T15:30:00Z'))).toHaveLength(1);
+    await inTenant((m) => s.booking.cancel(m, cita.id, contactId));
+    expect((await reminders(cita.id)).every((r: { status: string }) => r.status === 'cancelled')).toBe(true);
   });
 
-  it('cancelar la cita cancela sus recordatorios pendientes', async () => {
+  it('reprogramar cancela los de la hora vieja y programa los de la nueva', async () => {
     const cita = await agendar();
-    await reminders.scheduleFor(tenantId, cita.id);
-    await booking.cancel(tenantId, cita.id, contactId);
-    await reminders.syncWithAppointment(tenantId, cita.id);
+    const nueva = await inTenant((m) => s.booking.reschedule(
+      m, tenantId, cita.id, contactId, new Date('2026-09-11T15:00:00Z'), AHORA));
+    expect((await reminders(cita.id)).map((r: { status: string }) => r.status)).toEqual(['cancelled', 'cancelled']);
+    expect((await reminders(nueva.id)).map((r: { status: string }) => r.status)).toEqual(['pending', 'pending']);
+  });
+});
 
-    const rows = await adminQuery(
-      `SELECT status FROM reminders WHERE appointment_id = $1`, [cita.id]);
-    expect(rows.every((r) => r.status === 'cancelled')).toBe(true);
+describe('barrido', () => {
+  it('deja un mensaje plantilla pendiente en la conversación y marca el recordatorio', async () => {
+    const cita = await agendar();
+    const jobs = await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+
+    expect(jobs).toHaveLength(1);
+    const [msg] = await adminQuery(`SELECT origin, type, status, payload, conversation_id FROM messages`);
+    expect(msg).toMatchObject({ origin: 'reminder', type: 'template', status: 'pending' });
+    expect(msg.payload).toMatchObject({ kind: 'template', name: 'recordatorio_cita_24h', language: 'es' });
+    expect(msg.payload.params[0]).toBe('Ana');
+    expect(jobs[0].job).toMatchObject({ tenantId, channelId, conversationId: msg.conversation_id, to: '573001112233' });
+    const [r] = await reminders(cita.id);
+    expect(r.status).toBe('queued');
   });
 
-  it('marca el recordatorio como enviado y no lo repite', async () => {
-    const cita = await agendar();
-    await reminders.scheduleFor(tenantId, cita.id);
-    const [pendiente] = await reminders.due(new Date('2026-09-09T15:30:00Z'));
-
-    await reminders.markSent(tenantId, pendiente.id);
-    expect(await reminders.due(new Date('2026-09-09T15:30:00Z'))).toHaveLength(0);
+  it('un segundo barrido no duplica', async () => {
+    await agendar();
+    await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    expect(await s.reminders.sweep(new Date('2026-09-09T15:02:00Z'))).toEqual([]);
   });
 
-  it('el recordatorio se envía SIEMPRE como plantilla, nunca como texto libre', async () => {
-    const cita = await agendar();
-    await reminders.scheduleFor(tenantId, cita.id);
-    const [pendiente] = await reminders.due(new Date('2026-09-09T15:30:00Z'));
+  it('vuelve a encolar un recordatorio que quedó sin enviar', async () => {
+    // El barrido guardó el mensaje pero el encolado posterior falló.
+    await agendar();
+    await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    await adminQuery(`UPDATE messages SET created_at = now() - interval '10 minutes'`);
+    const again = await s.reminders.sweep(new Date('2026-09-09T15:02:00Z'));
+    expect(again).toHaveLength(1);
+  });
 
-    const content = reminders.buildContent(pendiente);
-    expect(content.kind).toBe('template');
-    expect(content.name).toBe('recordatorio_cita_24h');
+  it('reparte los envíos de un canal a no más de 10 por segundo', async () => {
+    // 25 citas de 30 min: jueves 10, viernes 11 y lunes 14 (el 12 es sábado, sin horario).
+    for (let i = 0; i < 25; i++) {
+      const otro = await seedContact(tenantId, `5730000000${String(i).padStart(2, '0')}`);
+      const day = [10, 11, 14][Math.floor(i / 9)], slot = i % 9;
+      await inTenant((m) => s.booking.book(m, tenantId, { serviceId, resourceId, contactId: otro,
+        startsAt: new Date(Date.UTC(2026, 8, day, 14 + slot)), customerName: `C${i}`, now: AHORA }));
+    }
+    const jobs = await s.reminders.sweep(new Date('2026-09-15T00:00:00Z')); // todo vencido
+    const delays = jobs.map((j) => j.delay);
+    expect(delays.filter((d) => d === 0)).toHaveLength(10);
+    expect(Math.max(...delays)).toBeGreaterThanOrEqual(4000); // 50 recordatorios → 5 segundos
   });
 });
 ```
-
-> El último test protege la regla de la ventana de 24 h: un recordatorio, por
-> definición, se envía cuando la conversación lleva horas o días inactiva. Enviarlo
-> como texto libre siempre falla en Meta.
-
-- [ ] **Step 2: Correr el test y verificar que falla**
-
-Run: `pnpm vitest run apps/api/test/scheduling/reminders`
-Expected: FAIL — no existe `RemindersService`.
-
-- [ ] **Step 3: Implementar**
-
-Migración `1725400600000-CreateReminders.ts`:
+En `apps/api/test/queues/outbound.processor.test.ts`, antes del test del canal inexistente:
 ```ts
-await q.query(`
-  CREATE TABLE reminders (
-    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    appointment_id uuid NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
-    kind           varchar(16) NOT NULL CHECK (kind IN ('24h','2h')),
-    send_at        timestamptz NOT NULL,
-    status         varchar(16) NOT NULL DEFAULT 'pending'
-                     CHECK (status IN ('pending','sent','cancelled','failed')),
-    sent_at        timestamptz,
-    UNIQUE (appointment_id, kind)
-  )
-`);
-await q.query(`
-  CREATE INDEX reminders_due ON reminders (send_at) WHERE status = 'pending'
-`);
-for (const sql of tenantRlsSql('reminders')) await q.query(sql);
+  it('un recordatorio sale fuera de la ventana y aunque el dueño esté atendiendo', async () => {
+    const job = await seedTurn([HOLA], `now() - interval '3 days'`);
+    const [row] = await adminQuery(`SELECT id FROM messages WHERE direction = 'out'`);
+    await adminQuery(`UPDATE messages SET origin = 'reminder', type = 'template',
+      payload = '{"kind":"template","name":"recordatorio_cita_24h","language":"es","params":[]}' WHERE id = $1`, [row.id]);
+    await humanTookOver('phone');
+
+    await processor.process({ tenantId: job.tenantId, channelId: job.channelId,
+                              conversationId: job.conversationId, to: job.to, messageId: row.id });
+
+    expect(sender.send.mock.calls[0][2]).toMatchObject({ kind: 'template' });
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent']);
+  });
 ```
+
+- [ ] **Step 2: Correr y verlos fallar**
+
+Run: `pnpm test apps/api/test/scheduling/reminders.test.ts apps/api/test/queues/outbound.processor.test.ts`
+Expected: FAIL — no existe `RemindersService` ni la tabla; el processor no acepta `messageId`.
+
+- [ ] **Step 3: Migraciones**
+
+`packages/db/src/migrations/1725400600000-CreateReminders.ts`:
+```ts
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+import { tenantRlsSql } from '../rls.ts';
+
+/**
+ * Recordatorios de cita. Al vencer, el barrido los convierte en un mensaje
+ * plantilla `pending` (outbox) y guarda su `message_id`: el estado de entrega
+ * vive en el mensaje, no aquí.
+ */
+export class CreateReminders1725400600000 implements MigrationInterface {
+  public async up(q: QueryRunner): Promise<void> {
+    await q.query(`
+      CREATE TABLE reminders (
+        id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id      uuid NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+        appointment_id uuid NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+        kind           varchar(8) NOT NULL CHECK (kind IN ('24h', '2h')),
+        send_at        timestamptz NOT NULL,
+        status         varchar(16) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'queued', 'cancelled')),
+        message_id     uuid REFERENCES messages(id) ON DELETE SET NULL,
+        created_at     timestamptz NOT NULL DEFAULT now(),
+        UNIQUE (appointment_id, kind)
+      )
+    `);
+    await q.query(`CREATE INDEX reminders_due ON reminders (send_at) WHERE status = 'pending'`);
+    for (const sql of tenantRlsSql('reminders')) await q.query(sql);
+  }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`DROP TABLE reminders`);
+  }
+}
+```
+
+`packages/db/src/migrations/1725400700000-AddReminderOriginToMessages.ts`:
+```ts
+import type { MigrationInterface, QueryRunner } from 'typeorm';
+
+/**
+ * `origin='reminder'`: lo envía el sistema por agenda, no como respuesta de un
+ * turno. Por eso no queda `superseded` cuando el dueño está atendiendo (spec §6.3).
+ */
+export class AddReminderOriginToMessages1725400700000 implements MigrationInterface {
+  public async up(q: QueryRunner): Promise<void> {
+    await q.query(`
+      ALTER TABLE messages DROP CONSTRAINT messages_origin_check,
+        ADD CONSTRAINT messages_origin_check
+          CHECK (origin IN ('customer', 'bot', 'phone', 'operator', 'history', 'reminder'))
+    `);
+  }
+
+  public async down(q: QueryRunner): Promise<void> {
+    await q.query(`
+      ALTER TABLE messages DROP CONSTRAINT messages_origin_check,
+        ADD CONSTRAINT messages_origin_check
+          CHECK (origin IN ('customer', 'bot', 'phone', 'operator', 'history'))
+    `);
+  }
+}
+```
+En `PRESUPUESTO`: `reminders: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],`. En `resetDb`, añadir `reminders` al `TRUNCATE` (al principio de la lista). En `packages/db/src/entities/message.entity.ts`, el tipo de `origin` gana `| 'reminder'`.
+
+- [ ] **Step 4: Jobs por turno o por mensaje**
+
+En `apps/api/src/queues/outbound.queue.ts`, reemplazar la interfaz `OutboundJob` por:
+```ts
+interface OutboundTarget {
+  tenantId: string;
+  channelId: string;
+  conversationId: string;
+  to: string;
+}
+
+/** Las respuestas de un turno: las filas con reply_to_id = turnId, en orden de seq. */
+export interface TurnOutboundJob extends OutboundTarget { turnId: string }
+
+/** Un envío suelto (un recordatorio): la fila con id = messageId. */
+export interface MessageOutboundJob extends OutboundTarget { messageId: string }
+
+export type OutboundJob = TurnOutboundJob | MessageOutboundJob;
+
+export const outboundJobId = (job: OutboundJob) => ('turnId' in job ? job.turnId : job.messageId);
+```
+y `add` pasa a:
+```ts
+  add(job: OutboundJob, opts: { delay?: number } = {}) {
+    // jobId = el uuid del turno o del mensaje (BullMQ rechaza ids con `:`).
+    return this.queue.add('send-turn', job, { jobId: outboundJobId(job), delay: opts.delay });
+  }
+```
+En `apps/api/src/queues/outbound.processor.ts`:
+- `const { tenantId, channelId, turnId, to } = job;` pasa a `const { tenantId, channelId, to } = job;` y, justo después,
+```ts
+    // Qué filas son de este job: las de un turno, o un mensaje suelto.
+    const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
+```
+- en la consulta de filas, `WHERE reply_to_id = $1 AND direction = 'out'` pasa a `` WHERE ${column} = $1 AND direction = 'out' `` y el parámetro `turnId` pasa a `key`;
+- `failPending(tenantId, turnId)` y `closePending(tenantId, turnId, ...)` reciben `job` en lugar de `turnId`, y su SQL usa la misma selección:
+```ts
+  private closePending(job: OutboundJob, to: 'failed' | 'window_closed') {
+    const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
+    return runInTenant(this.ds, job.tenantId, (m) => m.query(
+      `UPDATE messages SET status = $2 WHERE ${column} = $1 AND status = 'pending'`, [key, to]));
+  }
+```
+  (`failPending(job)` llama a `closePending(job, 'failed')`; `failTurn(job)` llama a `failPending(job)`).
+
+- [ ] **Step 5: El servicio de recordatorios**
 
 `apps/api/src/scheduling/reminders.service.ts`:
 ```ts
 import { Injectable } from '@nestjs/common';
-import type { DataSource } from 'typeorm';
+// Import de VALOR: servicio Nest con DataSource por constructor.
+import { DataSource } from 'typeorm';
+import type { EntityManager } from 'typeorm';
+import type { OutboundContent } from '@citara/shared';
 import { runInTenant } from '../tenancy/tenant-context';
+import type { MessageOutboundJob } from '../queues/outbound.queue';
+import { labelFor } from './format';
 
-const OFFSETS: { kind: '24h' | '2h'; minutesBefore: number; template: string }[] = [
-  { kind: '24h', minutesBefore: 24 * 60, template: 'recordatorio_cita_24h' },
-  { kind: '2h',  minutesBefore: 2 * 60,  template: 'recordatorio_cita_2h' },
-];
-
-export interface Reminder {
-  id: string; tenantId: string; appointmentId: string;
-  kind: '24h' | '2h'; sendAt: Date; waId: string; customerName: string; startsAt: Date;
-}
-
-export interface TemplateContent {
-  kind: 'template'; name: string; language: string; params: string[];
-}
+/** Deben estar APROBADAS en Meta con tres parámetros: nombre, fecha y hora, servicio. */
+export const REMINDER_TEMPLATES = { '24h': 'recordatorio_cita_24h', '2h': 'recordatorio_cita_2h' } as const;
+const OFFSETS = [{ kind: '24h', minutes: 24 * 60 }, { kind: '2h', minutes: 2 * 60 }] as const;
+/** Por debajo del tope de 20 mensajes por segundo de un número en coexistencia. */
+const PER_CHANNEL_PER_SECOND = 10;
+/** Un recordatorio pendiente más viejo que esto se considera huérfano del encolado. */
+const ORPHAN_AFTER = `2 minutes`;
 
 @Injectable()
 export class RemindersService {
   constructor(private readonly ds: DataSource) {}
 
-  async scheduleFor(tenantId: string, appointmentId: string, now = new Date()): Promise<void> {
-    await runInTenant(this.ds, tenantId, async (m) => {
-      const [cita] = await m.query(
-        `SELECT starts_at FROM appointments WHERE id = $1`, [appointmentId]);
-      if (!cita) return;
+  async scheduleFor(m: EntityManager, tenantId: string, appointmentId: string, startsAt: Date, now: Date) {
+    for (const o of OFFSETS) {
+      const sendAt = new Date(startsAt.getTime() - o.minutes * 60_000);
+      if (sendAt <= now) continue; // ya pasó: no se programa
+      await m.query(
+        `INSERT INTO reminders (tenant_id, appointment_id, kind, send_at) VALUES ($1, $2, $3, $4)
+         ON CONFLICT (appointment_id, kind) DO NOTHING`, [tenantId, appointmentId, o.kind, sendAt]);
+    }
+  }
 
-      for (const o of OFFSETS) {
-        const sendAt = new Date(new Date(cita.starts_at).getTime() - o.minutesBefore * 60_000);
-        // Un recordatorio cuyo momento ya pasó no se programa: se descarta.
-        if (sendAt <= now) continue;
-
-        await m.query(
-          `INSERT INTO reminders (tenant_id, appointment_id, kind, send_at)
-           VALUES ($1,$2,$3,$4) ON CONFLICT (appointment_id, kind) DO NOTHING`,
-          [tenantId, appointmentId, o.kind, sendAt],
-        );
-      }
-    });
+  async cancelFor(m: EntityManager, appointmentId: string) {
+    await m.query(
+      `UPDATE reminders SET status = 'cancelled' WHERE appointment_id = $1 AND status = 'pending'`, [appointmentId]);
   }
 
   /**
-   * Recordatorios vencidos y pendientes de todos los negocios.
+   * Convierte los recordatorios vencidos de todos los negocios en mensajes
+   * plantilla `pending` (outbox) y devuelve los jobs a encolar, con su retraso.
    *
-   * OJO — la razón de que esto itere tenants en vez de hacer un solo SELECT:
-   * `reminders` tiene RLS, así que una consulta sin `app.tenant_id` devuelve
-   * CERO filas (falla cerrado, decisión D2 del spec). Un barrido global exigiría
-   * una conexión privilegiada, y abrir esa puerta para una tarea de fondo es
-   * exactamente cómo se filtran datos entre clientes. A este volumen, una
-   * consulta por negocio cada minuto no cuesta nada.
+   * Itera negocios en vez de un SELECT global porque `reminders` tiene RLS: sin
+   * `app.tenant_id` devuelve cero filas (D2). Un barrido global exigiría una
+   * conexión privilegiada, que es justo como se filtran datos entre clientes.
    */
-  async due(now: Date): Promise<Reminder[]> {
-    // La lista de negocios activos es la única lectura sin contexto: `tenants`
-    // es la tabla raíz y no lleva RLS.
-    const tenants = await this.ds.query(
-      `SELECT id FROM tenants WHERE status = 'active'`);
+  async sweep(now: Date): Promise<{ job: MessageOutboundJob; delay: number }[]> {
+    // `tenants` es la raíz y no lleva RLS: es la única lectura sin contexto.
+    const tenants: { id: string; timezone: string }[] =
+      await this.ds.query(`SELECT id, timezone FROM tenants WHERE status = 'active'`);
 
-    const out: Reminder[] = [];
+    const jobs: MessageOutboundJob[] = [];
     for (const t of tenants) {
-      const rows = await runInTenant(this.ds, t.id, (m) =>
-        m.query(
-          `SELECT r.id, r.tenant_id, r.appointment_id, r.kind, r.send_at,
-                  c.wa_id, a.customer_name, a.starts_at
-             FROM reminders r
-             JOIN appointments a ON a.id = r.appointment_id
-             JOIN contacts c ON c.id = a.contact_id
-            WHERE r.status = 'pending' AND r.send_at <= $1 AND a.status = 'confirmed'
-            ORDER BY r.send_at
-            LIMIT 500`,
-          [now]));
-
-      for (const r of rows) {
-        out.push({
-          id: r.id, tenantId: r.tenant_id, appointmentId: r.appointment_id,
-          kind: r.kind, sendAt: r.send_at, waId: r.wa_id,
-          customerName: r.customer_name, startsAt: r.starts_at,
-        });
-      }
+      jobs.push(...await runInTenant(this.ds, t.id, (m) => this.sweepTenant(m, t.id, t.timezone, now)));
     }
-    return out.sort((a, b) => a.sendAt.getTime() - b.sendAt.getTime());
+
+    // Reparto por canal: un lote grande no puede salir de golpe.
+    const perChannel = new Map<string, number>();
+    return jobs.map((job) => {
+      const i = perChannel.get(job.channelId) ?? 0;
+      perChannel.set(job.channelId, i + 1);
+      return { job, delay: Math.floor(i / PER_CHANNEL_PER_SECOND) * 1000 };
+    });
   }
 
-  /** Los recordatorios SIEMPRE son plantilla: van fuera de la ventana de 24 h. */
-  buildContent(reminder: Reminder): TemplateContent {
-    const template = OFFSETS.find((o) => o.kind === reminder.kind)!.template;
-    return {
-      kind: 'template', name: template, language: 'es',
-      params: [reminder.customerName, reminder.startsAt.toISOString()],
-    };
+  private async sweepTenant(m: EntityManager, tenantId: string, timezone: string, now: Date) {
+    const jobs: MessageOutboundJob[] = [];
+    // SKIP LOCKED: dos workers barriendo a la vez no toman el mismo recordatorio.
+    const due = await m.query(
+      `SELECT r.id, r.kind, a.starts_at, a.status AS appointment_status, a.conversation_id,
+              a.customer_name, a.contact_id, k.wa_id, k.name AS contact_name, s.name AS service_name
+         FROM reminders r
+         JOIN appointments a ON a.id = r.appointment_id
+         JOIN contacts k ON k.id = a.contact_id
+         JOIN services s ON s.id = a.service_id
+        WHERE r.status = 'pending' AND r.send_at <= $1
+        ORDER BY r.send_at
+        LIMIT 500
+        FOR UPDATE OF r SKIP LOCKED`, [now]);
+
+    for (const row of due) {
+      if (row.appointment_status !== 'confirmed') {
+        await m.query(`UPDATE reminders SET status = 'cancelled' WHERE id = $1`, [row.id]);
+        continue;
+      }
+      const conv = await this.conversationFor(m, tenantId, row.conversation_id, row.contact_id);
+      if (!conv) continue; // sin canal activo: queda pendiente para el próximo barrido
+
+      const content: OutboundContent = {
+        kind: 'template',
+        name: REMINDER_TEMPLATES[row.kind as '24h' | '2h'],
+        language: 'es',
+        params: [row.customer_name || row.contact_name || 'cliente', labelFor(row.starts_at, timezone), row.service_name],
+      };
+      const [msg] = await m.query(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, payload, status)
+         VALUES ($1, $2, 'out', 'reminder', 'template', $3, 'pending') RETURNING id`,
+        [tenantId, conv.id, JSON.stringify(content)]);
+      await m.query(`UPDATE reminders SET status = 'queued', message_id = $2 WHERE id = $1`, [row.id, msg.id]);
+      jobs.push({ tenantId, channelId: conv.channelId, conversationId: conv.id, to: row.wa_id, messageId: msg.id });
+    }
+
+    // Outbox: un recordatorio guardado cuyo encolado falló se vuelve a encolar.
+    const orphans = await m.query(
+      `SELECT msg.id, msg.conversation_id, c.channel_id, k.wa_id
+         FROM messages msg
+         JOIN conversations c ON c.id = msg.conversation_id
+         JOIN contacts k ON k.id = c.contact_id
+        WHERE msg.origin = 'reminder' AND msg.status = 'pending'
+          AND msg.created_at < now() - interval '${ORPHAN_AFTER}'`);
+    for (const o of orphans) {
+      jobs.push({ tenantId, channelId: o.channel_id, conversationId: o.conversation_id, to: o.wa_id, messageId: o.id });
+    }
+    return jobs;
   }
 
-  /** Recibe el tenant porque la escritura también pasa por el contexto de RLS. */
-  async markSent(tenantId: string, reminderId: string): Promise<void> {
-    await runInTenant(this.ds, tenantId, (m) =>
-      m.query(`UPDATE reminders SET status = 'sent', sent_at = now() WHERE id = $1`,
-              [reminderId]));
-  }
+  /** La conversación de la cita si sigue abierta; si no, la abierta del contacto; si no, una nueva. */
+  private async conversationFor(m: EntityManager, tenantId: string, conversationId: string | null, contactId: string) {
+    const [current] = await m.query(
+      `SELECT id, channel_id FROM conversations
+        WHERE status = 'open' AND (id = $1 OR contact_id = $2)
+        ORDER BY (id = $1) DESC, updated_at DESC LIMIT 1`, [conversationId, contactId]);
+    if (current) return { id: current.id as string, channelId: current.channel_id as string };
 
-  async syncWithAppointment(tenantId: string, appointmentId: string): Promise<void> {
-    await runInTenant(this.ds, tenantId, (m) =>
-      m.query(
-        `UPDATE reminders r SET status = 'cancelled'
-           FROM appointments a
-          WHERE r.appointment_id = a.id AND a.id = $1
-            AND a.status <> 'confirmed' AND r.status = 'pending'`,
-        [appointmentId]));
+    // whatsapp_channels no lleva RLS: se filtra por tenant explícitamente.
+    const [channel] = await m.query(
+      `SELECT id FROM whatsapp_channels WHERE tenant_id = $1 AND status = 'active' ORDER BY created_at LIMIT 1`,
+      [tenantId]);
+    if (!channel) return null;
+    const [created] = await m.query(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id) VALUES ($1, $2, $3)
+       ON CONFLICT (tenant_id, contact_id, channel_id) WHERE status <> 'closed' DO UPDATE SET updated_at = now()
+       RETURNING id`, [tenantId, contactId, channel.id]);
+    return { id: created.id as string, channelId: channel.id as string };
   }
 }
 ```
 
-`apps/api/src/queues/reminders.processor.ts`: un job repetible cada minuto que
-llama `due(new Date())`, encola cada envío en `OutboundQueue` con
-`buildContent(reminder)` y llama `markSent(reminder.tenantId, reminder.id)` al
-confirmarse el envío. `MetaSender` gana el
-caso `kind === 'template'` en `buildBody`.
+- [ ] **Step 6: Las reservas programan y cancelan recordatorios**
 
-- [ ] **Step 4: Correr el test y verificar que pasa**
+En `apps/api/src/scheduling/booking.service.ts`:
+- importar `import { RemindersService } from './reminders.service';` (valor) y el constructor pasa a
+  `constructor(private readonly availability: AvailabilityService, private readonly reminders: RemindersService) {}`;
+- en `book`, después de `RELEASE SAVEPOINT reservar_cita`:
+```ts
+      const cita = toAppointment(row);
+      await this.reminders.scheduleFor(m, tenantId, cita.id, cita.startsAt, input.now);
+      return cita;
+```
+  (en lugar de `return toAppointment(row);`);
+- en `cancel`, antes del `return`: `await this.reminders.cancelFor(m, appointmentId);`.
 
-Run: `pnpm vitest run apps/api/test/scheduling/reminders`
-Expected: PASS, 6 tests.
+En `apps/api/test/helpers.ts`, `buildScheduling` recibe la `DataSource` de la app:
+```ts
+import type { DataSource } from 'typeorm';
+import { RemindersService } from '../src/scheduling/reminders.service';
+```
+```ts
+export function buildScheduling(ds?: DataSource) {
+  const availability = new AvailabilityService();
+  // El barrido necesita la DataSource; programar y cancelar usan el EntityManager del llamador.
+  const reminders = new RemindersService(ds as DataSource);
+  const booking = new BookingService(availability, reminders);
+  const tools = new ToolRegistry(availability, booking);
+  return { availability, reminders, booking, tools };
+}
+```
+En `app.module.ts`, importar y registrar `RemindersService` antes de `BookingService`.
+
+- [ ] **Step 7: La cola de recordatorios y su worker**
+
+`apps/api/src/queues/reminders.queue.ts`:
+```ts
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Queue } from 'bullmq';
+
+export const REMINDERS_QUEUE = 'reminders';
+
+/** Un barrido por minuto. El scheduler vive en Redis y `upsert` es idempotente. */
+@Injectable()
+export class RemindersQueue implements OnModuleDestroy {
+  private readonly queue = new Queue(REMINDERS_QUEUE, {
+    connection: { url: process.env.REDIS_URL },
+    defaultJobOptions: { removeOnComplete: 100, removeOnFail: 100 },
+  });
+
+  constructor() {
+    this.queue.on('error', (err) => console.error(`[reminders] error de la cola: ${err.message}`));
+  }
+
+  schedule() {
+    return this.queue.upsertJobScheduler('reminders-sweep', { every: 60_000 }, { name: 'sweep' });
+  }
+
+  async onModuleDestroy() { await this.queue.close(); }
+}
+```
+Registrar `RemindersQueue` en `app.module.ts`. En `apps/api/src/queues/workers.ts`:
+- la firma pasa a `opts: { concurrency?: number; scheduleReminders?: boolean } = {}`;
+- imports de `RemindersService`, `RemindersQueue`, `REMINDERS_QUEUE` y `OutboundQueue`;
+- antes del `return`:
+```ts
+  const reminders = ctx.get(RemindersService);
+  const outboundQueue = ctx.get(OutboundQueue);
+  // Concurrencia 1: un barrido a la vez. Si el encolado falla, el siguiente
+  // barrido re-encola los huérfanos (outbox).
+  const remindersWorker = new Worker(REMINDERS_QUEUE, async () => {
+    for (const { job, delay } of await reminders.sweep(new Date())) await outboundQueue.add(job, { delay });
+  }, { connection, concurrency: 1 });
+  remindersWorker.on('failed', (job, err) => console.error(`[reminders] job ${job?.id} falló: ${err.message}`));
+  remindersWorker.on('error', (err) => console.error(`[reminders] error del worker: ${err.message}`));
+  if (opts.scheduleReminders !== false) {
+    void ctx.get(RemindersQueue).schedule()
+      .catch((err: Error) => console.error(`[reminders] no se pudo programar el barrido: ${err.message}`));
+  }
+```
+- `close` cierra también `remindersWorker`.
+
+En `apps/api/test/pipeline/pipeline.e2e.test.ts`, `startWorkers(app, { concurrency: 10 })` pasa a `startWorkers(app, { concurrency: 10, scheduleReminders: false })`, y la lista de colas a limpiar gana `REMINDERS_QUEUE`.
+
+- [ ] **Step 8: Correr los tests y el worker compilado**
+
+Run: `pnpm typecheck && pnpm test`
+Expected: todo en verde.
+
+Run: `pnpm build && pnpm db:migrate && (node apps/worker/dist/src/main.js > /tmp/citara-worker.log 2>&1 & pid=$!; sleep 6; kill -TERM $pid; sleep 2; cat /tmp/citara-worker.log)`
+Expected: `AppModule dependencies initialized`, sin `UnknownElementException` ni errores de `[reminders]`.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add packages/db apps/api/src/scheduling apps/api/src/queues apps/api/src/app.module.ts apps/api/test/helpers.ts apps/api/test/scheduling/reminders.test.ts apps/api/test/queues/outbound.processor.test.ts apps/api/test/pipeline/pipeline.e2e.test.ts
+git commit -m "feat(scheduling): enviar recordatorios de cita por el outbox con plantillas aprobadas"
+```
+
+---
+
+### Task 10: `tenant:apply` — la configuración del negocio como archivo
+
+**Files:**
+- Create: `apps/api/src/cli/tenant-config.ts`, `apps/api/src/cli/tenant-apply.ts`, `docs/ejemplos/negocio.yaml`
+- Modify: `apps/api/src/cli/provision.ts` (extraer `setDefaultFlow`), `package.json` (script)
+- Test: `apps/api/test/cli/tenant-config.test.ts`
+
+**Interfaces:**
+- Consumes: tablas de las Tasks 1-3, `AGENDA_FLOW` (Task 7).
+- Produces: `setDefaultFlow(m: EntityManager, tenantId: string, flow: FlowDefinition, version: string): Promise<string>` (en `provision.ts`); `tenantConfigSchema` (Zod); `applyTenantConfig(admin: DataSource, raw: unknown): Promise<{ tenantId: string; services: number; resources: number; hours: number; timeOff: number; flow: string | null }>`; script `pnpm tenant:apply <archivo.yaml>`.
+
+Semántica: **declarativa e idempotente**. Servicios y recursos se identifican por `key`; los que ya no están en el archivo se **desactivan** (nunca se borran: las citas los referencian). Horarios, ausencias y la relación recurso-servicio se reemplazan por lo del archivo. Todo en una transacción: un archivo inválido no deja el negocio a medias.
+
+- [ ] **Step 1: Instalar `yaml`**
+
+```bash
+pnpm --filter @citara/api add yaml@^2
+```
+
+- [ ] **Step 2: Escribir el test que falla**
+
+`apps/api/test/cli/tenant-config.test.ts`:
+```ts
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { DataSource } from 'typeorm';
+import { createDataSource } from '@citara/db';
+import { applyTenantConfig } from '../../src/cli/tenant-config';
+import { resetDb, seedChannel, seedContact, adminQuery, closeHelpers } from '../helpers';
+
+let admin: DataSource;
+let tenantId: string;
+
+const config = (over: Record<string, unknown> = {}) => ({
+  tenant: 'salon',
+  timezone: 'America/Bogota',
+  booking: { min_lead_minutes: 120, horizon_days: 30, slot_granularity_minutes: 30 },
+  services: [
+    { key: 'corte', name: 'Corte de cabello', duration_min: 30, buffer_min: 10, price_cents: 3500000 },
+    { key: 'tinte', name: 'Tinte', duration_min: 90 },
+  ],
+  resources: [
+    { key: 'maria', name: 'María', services: ['corte', 'tinte'] },
+    { key: 'pedro', name: 'Pedro', services: ['corte'],
+      hours: [{ days: ['sat'], start: '09:00', end: '13:00' }] },
+  ],
+  hours: [{ days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '09:00', end: '18:00' }],
+  time_off: [{ from: '2026-12-24T00:00:00-05:00', to: '2026-12-26T00:00:00-05:00', reason: 'Navidad' }],
+  flow: 'agenda',
+  ...over,
+});
+
+beforeAll(async () => { admin = createDataSource(process.env.DATABASE_ADMIN_URL!); await admin.initialize(); });
+afterAll(async () => { await admin.destroy(); await closeHelpers(); });
+beforeEach(async () => { await resetDb(); ({ tenantId } = await seedChannel()); });
+
+describe('applyTenantConfig', () => {
+  it('carga catálogo, horarios, ausencias, reglas y flujo', async () => {
+    const r = await applyTenantConfig(admin, config());
+    expect(r).toMatchObject({ tenantId, services: 2, resources: 2, hours: 6, timeOff: 1, flow: 'agenda' });
+
+    const [t] = await adminQuery(`SELECT min_lead_minutes, horizon_days, slot_granularity_minutes FROM tenants`);
+    expect(t).toEqual({ min_lead_minutes: 120, horizon_days: 30, slot_granularity_minutes: 30 });
+    const pedro = await adminQuery(
+      `SELECT bh.weekday FROM business_hours bh JOIN resources r ON r.id = bh.resource_id WHERE r.key = 'pedro'`);
+    expect(pedro).toEqual([{ weekday: 6 }]);
+    const [f] = await adminQuery(`SELECT key FROM flows WHERE is_active AND is_default`);
+    expect(f.key).toBe('agenda');
+  });
+
+  it('aplicarlo dos veces deja exactamente lo mismo', async () => {
+    await applyTenantConfig(admin, config());
+    const before = await adminQuery(`SELECT id, key FROM services ORDER BY key`);
+    await applyTenantConfig(admin, config());
+    expect(await adminQuery(`SELECT id, key FROM services ORDER BY key`)).toEqual(before);
+    const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM business_hours`);
+    expect(n).toBe(6);
+  });
+
+  it('quitar un servicio con citas lo desactiva sin borrar las citas', async () => {
+    await applyTenantConfig(admin, config());
+    const [tinte] = await adminQuery(`SELECT id FROM services WHERE key = 'tinte'`);
+    const [maria] = await adminQuery(`SELECT id FROM resources WHERE key = 'maria'`);
+    const contactId = await seedContact(tenantId);
+    await adminQuery(
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at)
+       VALUES ($1, $2, $3, $4, '2026-11-10T15:00:00Z', '2026-11-10T16:30:00Z')`,
+      [tenantId, maria.id, tinte.id, contactId]);
+
+    const cfg = config();
+    await applyTenantConfig(admin, { ...cfg,
+      services: (cfg.services as unknown[]).slice(0, 1),
+      resources: [{ key: 'maria', name: 'María', services: ['corte'] }] });
+
+    const [s] = await adminQuery(`SELECT active FROM services WHERE key = 'tinte'`);
+    expect(s.active).toBe(false);
+    const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM appointments`);
+    expect(n).toBe(1);
+  });
+
+  it('un recurso que presta un servicio que no existe falla nombrándolo, sin tocar nada', async () => {
+    await expect(applyTenantConfig(admin, config({
+      resources: [{ key: 'maria', name: 'María', services: ['masaje'] }] }))).rejects.toThrow(/masaje/);
+    const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM services`);
+    expect(n).toBe(0);
+  });
+
+  it('rechaza un horario que termina antes de empezar y una zona horaria inválida', async () => {
+    await expect(applyTenantConfig(admin, config({ hours: [{ days: ['mon'], start: '18:00', end: '09:00' }] })))
+      .rejects.toThrow(/end/);
+    await expect(applyTenantConfig(admin, config({ timezone: 'America/Bogata' }))).rejects.toThrow(/zona/);
+  });
+
+  it('falla si el negocio no existe', async () => {
+    await expect(applyTenantConfig(admin, config({ tenant: 'no-existe' }))).rejects.toThrow(/no-existe/);
+  });
+});
+```
+
+- [ ] **Step 3: Correr y verlo fallar**
+
+Run: `pnpm test apps/api/test/cli/tenant-config.test.ts`
+Expected: FAIL — no existe `tenant-config`.
+
+- [ ] **Step 4: Extraer `setDefaultFlow`**
+
+En `apps/api/src/cli/provision.ts`, mover el bloque de flujo de `provisionDevTenant` a una función exportada y llamarla desde allí con `FLOW_VERSION`:
+```ts
+/**
+ * Deja `flow` como el flujo activo por defecto del negocio. Un solo flujo por
+ * defecto por tenant (índice flows_one_default): se apagan los demás antes.
+ */
+export async function setDefaultFlow(
+  m: EntityManager, tenantId: string, flow: FlowDefinition, version: string,
+): Promise<string> {
+  await m.query(
+    `UPDATE flows SET is_default = false WHERE tenant_id = $1 AND NOT (key = $2 AND version = $3)`,
+    [tenantId, flow.key, version]);
+  const [row] = await m.query(
+    `INSERT INTO flows (tenant_id, key, version, definition, is_active, is_default)
+     VALUES ($1, $2, $3, $4, true, true)
+     ON CONFLICT (tenant_id, key, version) DO UPDATE
+       SET definition = EXCLUDED.definition, is_active = true, is_default = true
+     RETURNING id`, [tenantId, flow.key, version, JSON.stringify(flow)]);
+  return row.id;
+}
+```
+(`import type { DataSource, EntityManager } from 'typeorm';`). En `provisionDevTenant`, el bloque reemplazado queda como `const flowId = await setDefaultFlow(m, tenant.id, input.flow, FLOW_VERSION);` y el `return` usa `flowId`. Correr `pnpm test apps/api/test/cli/provision.test.ts`: debe seguir en verde.
+
+- [ ] **Step 5: El esquema y la aplicación**
+
+`apps/api/src/cli/tenant-config.ts`:
+```ts
+import { z } from 'zod';
+import { DateTime } from 'luxon';
+import type { DataSource } from 'typeorm';
+import type { FlowDefinition } from '@citara/shared';
+import { AGENDA_FLOW } from '../flow-engine/flows/agenda';
+import { setDefaultFlow } from './provision';
+
+const DAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 } as const;
+const key = z.string().regex(/^[a-z0-9_-]{1,64}$/, 'clave: minúsculas, números, - y _');
+const hhmm = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'hora HH:MM');
+const iso = z.string().refine((v) => DateTime.fromISO(v, { setZone: true }).isValid && /([+-]\d{2}:\d{2}|Z)$/.test(v),
+  'fecha ISO-8601 con offset');
+const hoursBlock = z.object({
+  days: z.array(z.enum(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'])).min(1),
+  start: hhmm,
+  end: hhmm,
+}).refine((b) => b.end > b.start, { message: 'end debe ser posterior a start' });
+const flowSchema = z.object({ key: z.string(), entry: z.string(), steps: z.record(z.unknown()) })
+  .refine((f) => f.entry in f.steps, { message: 'el paso de entrada del flujo no existe' });
+
+export const tenantConfigSchema = z.object({
+  tenant: z.string().min(1),
+  name: z.string().min(1).optional(),
+  timezone: z.string().refine((tz) => DateTime.local().setZone(tz).isValid, 'zona horaria IANA inválida').optional(),
+  human_takeover_hours: z.number().int().min(1).max(168).optional(),
+  booking: z.object({
+    min_lead_minutes: z.number().int().min(0).optional(),
+    horizon_days: z.number().int().min(1).max(365).optional(),
+    slot_granularity_minutes: z.number().int()
+      .refine((n) => [5, 10, 15, 20, 30, 60].includes(n), 'granularidad: 5, 10, 15, 20, 30 o 60').optional(),
+  }).optional(),
+  services: z.array(z.object({
+    key, name: z.string().min(1),
+    duration_min: z.number().int().positive(),
+    buffer_min: z.number().int().min(0).default(0),
+    price_cents: z.number().int().min(0).optional(),
+  })).min(1),
+  resources: z.array(z.object({
+    key, name: z.string().min(1),
+    services: z.array(key).min(1),
+    hours: z.array(hoursBlock).optional(),
+  })).min(1),
+  hours: z.array(hoursBlock).min(1),
+  time_off: z.array(z.object({ from: iso, to: iso, reason: z.string().optional(), resource: key.optional() }))
+    .default([]),
+  flow: z.union([z.literal('agenda'), flowSchema]).optional(),
+}).superRefine((c, ctx) => {
+  const services = new Set(c.services.map((s) => s.key));
+  const resources = new Set(c.resources.map((r) => r.key));
+  if (services.size !== c.services.length) ctx.addIssue({ code: 'custom', message: 'claves de servicio repetidas' });
+  if (resources.size !== c.resources.length) ctx.addIssue({ code: 'custom', message: 'claves de recurso repetidas' });
+  for (const r of c.resources) for (const s of r.services) {
+    if (!services.has(s)) ctx.addIssue({ code: 'custom', message: `el recurso '${r.key}' presta '${s}', que no es un servicio` });
+  }
+  for (const t of c.time_off) {
+    if (t.resource && !resources.has(t.resource)) ctx.addIssue({ code: 'custom', message: `ausencia de un recurso inexistente: '${t.resource}'` });
+    if (new Date(t.to) <= new Date(t.from)) ctx.addIssue({ code: 'custom', message: 'una ausencia termina antes de empezar' });
+  }
+});
+
+export type TenantConfig = z.infer<typeof tenantConfigSchema>;
+
+/** Aplica la configuración en UNA transacción, con la conexión admin. */
+export async function applyTenantConfig(admin: DataSource, raw: unknown) {
+  const parsed = tenantConfigSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues.map((i) => `${i.path.join('.') || '(raíz)'}: ${i.message}`).join('\n'));
+  }
+  const c = parsed.data;
+
+  return admin.transaction(async (m) => {
+    const [tenant] = await m.query(`SELECT id FROM tenants WHERE slug = $1`, [c.tenant]);
+    if (!tenant) throw new Error(`No existe el negocio '${c.tenant}'. Créalo primero (dev:provision o el alta).`);
+    const tenantId: string = tenant.id;
+
+    await m.query(
+      `UPDATE tenants SET
+         name = COALESCE($2, name), timezone = COALESCE($3, timezone),
+         human_takeover_hours = COALESCE($4, human_takeover_hours),
+         min_lead_minutes = COALESCE($5, min_lead_minutes), horizon_days = COALESCE($6, horizon_days),
+         slot_granularity_minutes = COALESCE($7, slot_granularity_minutes)
+       WHERE id = $1`,
+      [tenantId, c.name ?? null, c.timezone ?? null, c.human_takeover_hours ?? null,
+       c.booking?.min_lead_minutes ?? null, c.booking?.horizon_days ?? null, c.booking?.slot_granularity_minutes ?? null]);
+
+    const serviceIds = new Map<string, string>();
+    for (const s of c.services) {
+      const [row] = await m.query(
+        `INSERT INTO services (tenant_id, key, name, duration_min, buffer_min, price_cents)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (tenant_id, key) DO UPDATE
+           SET name = EXCLUDED.name, duration_min = EXCLUDED.duration_min, buffer_min = EXCLUDED.buffer_min,
+               price_cents = EXCLUDED.price_cents, active = true
+         RETURNING id`, [tenantId, s.key, s.name, s.duration_min, s.buffer_min, s.price_cents ?? null]);
+      serviceIds.set(s.key, row.id);
+    }
+    // Lo que ya no está se desactiva, nunca se borra: las citas lo referencian.
+    await m.query(`UPDATE services SET active = false WHERE tenant_id = $1 AND NOT (key = ANY($2))`,
+                  [tenantId, [...serviceIds.keys()]]);
+
+    const resourceIds = new Map<string, string>();
+    for (const r of c.resources) {
+      const [row] = await m.query(
+        `INSERT INTO resources (tenant_id, key, name) VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id, key) DO UPDATE SET name = EXCLUDED.name, active = true
+         RETURNING id`, [tenantId, r.key, r.name]);
+      resourceIds.set(r.key, row.id);
+    }
+    await m.query(`UPDATE resources SET active = false WHERE tenant_id = $1 AND NOT (key = ANY($2))`,
+                  [tenantId, [...resourceIds.keys()]]);
+
+    await m.query(`DELETE FROM resource_services WHERE tenant_id = $1`, [tenantId]);
+    for (const r of c.resources) for (const s of r.services) {
+      await m.query(`INSERT INTO resource_services (tenant_id, resource_id, service_id) VALUES ($1, $2, $3)`,
+                    [tenantId, resourceIds.get(r.key), serviceIds.get(s)]);
+    }
+
+    await m.query(`DELETE FROM business_hours WHERE tenant_id = $1`, [tenantId]);
+    let hours = 0;
+    const insertHours = async (blocks: z.infer<typeof hoursBlock>[], resourceId: string | null) => {
+      for (const b of blocks) for (const d of b.days) {
+        await m.query(
+          `INSERT INTO business_hours (tenant_id, resource_id, weekday, start_time, end_time) VALUES ($1, $2, $3, $4, $5)`,
+          [tenantId, resourceId, DAYS[d], b.start, b.end]);
+        hours++;
+      }
+    };
+    await insertHours(c.hours, null);
+    for (const r of c.resources) if (r.hours) await insertHours(r.hours, resourceIds.get(r.key)!);
+
+    await m.query(`DELETE FROM time_off WHERE tenant_id = $1`, [tenantId]);
+    for (const t of c.time_off) {
+      await m.query(
+        `INSERT INTO time_off (tenant_id, resource_id, starts_at, ends_at, reason) VALUES ($1, $2, $3, $4, $5)`,
+        [tenantId, t.resource ? resourceIds.get(t.resource) : null, t.from, t.to, t.reason ?? null]);
+    }
+
+    let flow: string | null = null;
+    if (c.flow) {
+      const definition = (c.flow === 'agenda' ? AGENDA_FLOW : c.flow) as FlowDefinition;
+      await setDefaultFlow(m, tenantId, definition, 'current');
+      flow = definition.key;
+    }
+
+    return { tenantId, services: c.services.length, resources: c.resources.length,
+             hours, timeOff: c.time_off.length, flow };
+  });
+}
+```
+
+- [ ] **Step 6: La CLI, el script y el ejemplo**
+
+`apps/api/src/cli/tenant-apply.ts`:
+```ts
+// Aplica un archivo YAML de configuración de negocio: `pnpm tenant:apply ruta.yaml`.
+import 'reflect-metadata';
+import { config } from 'dotenv';
+config();
+
+import { readFile } from 'node:fs/promises';
+import { parse } from 'yaml';
+import { createDataSource } from '@citara/db';
+import { applyTenantConfig } from './tenant-config';
+
+async function main() {
+  const file = process.argv[2];
+  if (!file) throw new Error('Uso: pnpm tenant:apply <archivo.yaml>');
+  const url = process.env.DATABASE_ADMIN_URL;
+  if (!url) throw new Error('DATABASE_ADMIN_URL no está definida');
+
+  const ds = createDataSource(url);
+  await ds.initialize();
+  try {
+    const r = await applyTenantConfig(ds, parse(await readFile(file, 'utf8')));
+    console.log(`Negocio ${r.tenantId}: ${r.services} servicios, ${r.resources} recursos, ` +
+                `${r.hours} bloques de horario, ${r.timeOff} ausencias, flujo ${r.flow ?? 'sin cambios'}`);
+  } finally {
+    await ds.destroy();
+  }
+}
+
+main().catch((err) => { console.error(err.message); process.exit(1); });
+```
+En `package.json`, después de `dev:provision`:
+```json
+    "tenant:apply": "node apps/api/dist/src/cli/tenant-apply.js",
+```
+`docs/ejemplos/negocio.yaml`:
+```yaml
+# Configuración de un negocio. Aplicar con: pnpm build && pnpm tenant:apply docs/ejemplos/negocio.yaml
+# Es declarativa: lo que no está en el archivo se desactiva (servicios, recursos) o se
+# reemplaza (horarios, ausencias). Se puede aplicar las veces que haga falta.
+tenant: demo                  # slug del negocio (dev:provision crea 'demo')
+name: Salón Demo
+timezone: America/Bogota
+human_takeover_hours: 12      # cuánto se calla el bot cuando el dueño contesta desde su celular
+booking:
+  min_lead_minutes: 60        # anticipación mínima
+  horizon_days: 60            # hasta cuántos días adelante se agenda
+  slot_granularity_minutes: 15
+services:
+  - { key: corte, name: Corte de cabello, duration_min: 30, buffer_min: 10, price_cents: 3500000 }
+  - { key: tinte, name: Tinte, duration_min: 90, buffer_min: 15 }
+resources:
+  - { key: maria, name: María, services: [corte, tinte] }
+  - key: pedro
+    name: Pedro
+    services: [corte]
+    hours:                    # horario propio: reemplaza al del negocio para Pedro
+      - { days: [tue, wed, thu, fri, sat], start: '10:00', end: '19:00' }
+hours:
+  - { days: [mon, tue, wed, thu, fri], start: '09:00', end: '18:00' }
+  - { days: [sat], start: '09:00', end: '13:00' }
+time_off:
+  - { from: '2026-12-24T00:00:00-05:00', to: '2026-12-26T00:00:00-05:00', reason: Navidad }
+flow: agenda                  # el flujo de menús incorporado
+```
+
+- [ ] **Step 7: Correr los tests y la CLI compilada**
+
+Run: `pnpm typecheck && pnpm test apps/api/test/cli`
+Expected: PASS.
+
+Run: `pnpm build && META_WABA_ID=111 META_PHONE_NUMBER_ID=222 META_ACCESS_TOKEN=EAAG-falso pnpm -s dev:provision && pnpm -s tenant:apply docs/ejemplos/negocio.yaml`
+Expected: `Negocio <uuid>: 2 servicios, 2 recursos, 11 bloques de horario, 1 ausencias, flujo agenda` (6 del negocio y 5 propios de Pedro).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add apps/api/package.json pnpm-lock.yaml apps/api/src/cli package.json docs/ejemplos/negocio.yaml apps/api/test/cli/tenant-config.test.ts
+git commit -m "feat(cli): aplicar la configuración de un negocio desde un archivo yaml idempotente"
+```
+
+---
+
+### Task 11: Agendar de punta a punta y el runbook
+
+**Files:**
+- Modify: `apps/api/test/pipeline/pipeline.e2e.test.ts`
+- Modify: `docs/desarrollo-local.md`
+
+**Interfaces:**
+- Consumes: todo lo anterior, a través del webhook real, Redis y `startWorkers`.
+
+- [ ] **Step 1: Escribir el e2e**
+
+En `apps/api/test/pipeline/pipeline.e2e.test.ts`:
+- el `fakeSender` registra también las plantillas: `sent.push({ to, body: 'body' in content ? content.body : \`[plantilla ${content.name}]\` });`;
+- el módulo de pruebas fija el reloj de agenda: `.overrideProvider(CLOCK).useValue({ now: () => AGENDA_NOW })`, con `const AGENDA_NOW = new Date('2026-09-08T03:00:00Z');` (lunes 22:00 en Bogotá) e imports de `CLOCK`, `AGENDA_FLOW`, `RemindersService`, `OutboundQueue`, `seedCatalog`, `seedHours`;
+- añadir un `describe` al final:
+```ts
+describe('pipeline real de agenda', () => {
+  it('un cliente agenda por WhatsApp y recibe el recordatorio por plantilla', async () => {
+    const [t] = await adminQuery(`SELECT id FROM tenants`);
+    await seedCatalog(t.id);
+    await seedHours(t.id);
+    await adminQuery(`UPDATE flows SET is_default = false`);
+    await seedFlow(t.id, AGENDA_FLOW);
+
+    let n = 0;
+    for (const text of ['Hola', 'agendar', '1', '1', 'Ana']) {
+      await post(webhook(`wamid.AG${n++}`, text));
+      await quiesce();
+    }
+    expect(sent.at(-1)!.body).toMatch(/^¡Listo, Ana! Tu cita quedó para el martes/);
+    const [cita] = await adminQuery(`SELECT starts_at FROM appointments`);
+    expect(new Date(cita.starts_at).toISOString()).toBe('2026-09-08T14:00:00.000Z');
+
+    // El recordatorio de 2 h (12:00Z). El de 24 h ya había pasado al agendar.
+    const queue = app.get(OutboundQueue);
+    for (const { job, delay } of await app.get(RemindersService).sweep(new Date('2026-09-08T12:01:00Z'))) {
+      await queue.add(job, { delay });
+    }
+    await quiesce();
+    expect(sent.at(-1)!.body).toBe('[plantilla recordatorio_cita_2h]');
+  });
+});
+```
+
+- [ ] **Step 2: Correrlo**
+
+Run: `pnpm test apps/api/test/pipeline`
+Expected: PASS. Si falla, el defecto está en el cableado (un provider sin registrar, el reloj, la cola) y se corrige ahí, no en el test.
+
+- [ ] **Step 3: El runbook**
+
+En `docs/desarrollo-local.md`, después de la sección "2. Compilar, migrar y dar de alta el negocio", añadir:
+```markdown
+### Cargar la agenda del negocio
+
+Servicios, recursos, horarios, ausencias, reglas de reserva y flujo viven en un archivo YAML
+por negocio (ver `docs/ejemplos/negocio.yaml`). Es declarativo e idempotente: se aplica las
+veces que haga falta, y lo que se quita del archivo se desactiva o se reemplaza.
+
+```bash
+pnpm tenant:apply docs/ejemplos/negocio.yaml
+```
+
+Con `flow: agenda` el negocio queda con el flujo de menús: agendar, ver mis citas y hablar
+con alguien.
+
+### Recordatorios
+
+El worker barre cada minuto los recordatorios vencidos (24 h y 2 h antes de cada cita) y los
+envía como plantilla. Antes de operar hay que **enviar a aprobación de Meta** las plantillas
+`recordatorio_cita_24h` y `recordatorio_cita_2h` (categoría UTILITY, idioma `es`), con tres
+parámetros de cuerpo en este orden: nombre del cliente, fecha y hora, servicio. Sin plantilla
+aprobada, Meta rechaza el envío y el mensaje queda `failed`.
+```
+En la tabla de "Estados de un mensaje saliente", añadir debajo: "Los recordatorios
+(`origin='reminder'`) salen aunque el dueño esté atendiendo: no quedan `superseded`."
+
+- [ ] **Step 4: Correr todo**
+
+Run: `pnpm typecheck && pnpm test`
+Expected: todo en verde.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add -A
-git commit -m "feat(scheduling): programar recordatorios de cita y enviarlos siempre por plantilla"
+git add apps/api/test/pipeline/pipeline.e2e.test.ts docs/desarrollo-local.md
+git commit -m "test(pipeline): agendar por whatsapp y recibir el recordatorio de punta a punta"
 ```
 
 ---
 
 ## Criterios de salida de la Fase 2
 
-- [ ] `pnpm test` en verde, incluido el test de concurrencia de la Task 3.
-- [ ] Un usuario agenda una cita real por WhatsApp usando solo menús.
-- [ ] Dos usuarios pidiendo la misma franja: uno la obtiene, el otro recibe un mensaje
-      claro con alternativas. Nunca dos citas superpuestas.
-- [ ] Las franjas ofrecidas respetan horario, ausencias, buffer y anticipación mínima.
+- [ ] `pnpm test` y `pnpm typecheck` en verde, incluido el test de concurrencia de la Task 3.
+- [ ] Un cliente agenda una cita real por WhatsApp usando solo menús (con el número de prueba de Meta).
+- [ ] Dos clientes piden la misma franja: uno la obtiene y el otro recibe "se acaba de ocupar". Nunca dos citas superpuestas.
+- [ ] Las franjas ofrecidas respetan horario, ausencias, buffer, anticipación mínima y horizonte, y "cualquier recurso" no oculta huecos.
+- [ ] `tenant:apply` carga un negocio completo desde YAML sin tocar SQL.
+- [ ] Los recordatorios salen por plantilla, a su hora, y una cita cancelada o movida no deja recordatorios viejos.
 - [ ] Las plantillas de recordatorio están **enviadas a aprobación** de Meta.
 - [ ] Cero llamadas a un LLM y cero dependencias de Google en toda la fase.
 
-**Punto de corte con valor:** al terminar esta fase el producto ya es útil para un
-negocio real. Todo lo que sigue lo hace mejor, no lo hace posible.
+**Punto de corte con valor:** con esta fase y el alta asistida (Fase 3), un negocio real agenda por WhatsApp sin IA.
+
+## Lo que esta fase deliberadamente NO hace
+
+- Cancelar o reprogramar desde los menús: las herramientas existen (con confirmación en dos tiempos) y las usará el agente; el flujo de menús ofrece agendar, ver citas y hablar con alguien.
+- Google Calendar (fase 4) e IA (fase 5).
+- Garantizar el buffer bajo una carrera: la restricción de exclusión cubre el solapamiento; el buffer se aplica al ofrecer y al validar.

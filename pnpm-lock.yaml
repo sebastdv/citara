@@ -56,6 +56,9 @@ importers:
       libsodium-wrappers:
         specifier: ^0.8.4
         version: 0.8.4
+      luxon:
+        specifier: ^3.7.2
+        version: 3.7.2
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2
@@ -65,6 +68,12 @@ importers:
       typeorm:
         specifier: ^0.3.20
         version: 0.3.31(ioredis@5.11.1)(pg@8.23.0)
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
       '@nestjs/testing':
         specifier: ^11.2.3
@@ -75,6 +84,9 @@ importers:
       '@types/libsodium-wrappers':
         specifier: ^0.8.2
         version: 0.8.2
+      '@types/luxon':
+        specifier: ^3.7.6
+        version: 3.7.6
       '@types/supertest':
         specifier: ^7.2.1
         version: 7.2.1
@@ -653,6 +665,9 @@ packages:
   '@types/libsodium-wrappers@0.8.2':
     resolution: {integrity: sha512-+2IDfSULPUskSjIYfZl9suIUsIE5PXwoKZiE/j0MZWd+M9nEGvJDsk/ztMZKNhL1lBL+1CaypW0dQSjqPW2dMg==}
     deprecated: This is a stub types definition. libsodium-wrappers provides its own type definitions, so you do not need this installed.
+
+  '@types/luxon@3.7.6':
+    resolution: {integrity: sha512-6KSjliQAXK8ZLgFQO4B7iE4Rpf/B3rItzCFuXezBY/XIAGxOdLd7vRNK9/StRPwiS/yJsVbB7HKpW46B8tcEuQ==}
 
   '@types/methods@1.1.4':
     resolution: {integrity: sha512-ymXWVrDiCxTBE3+RIrrP533E70eA+9qu7zdWoHuOmGujkYtzf4HQF96b8nwHLqhuf4ykX61IGRIB38CC6/sImQ==}
@@ -1772,6 +1787,11 @@ packages:
     resolution: {integrity: sha512-0pfFzegeDWJHJIAmTLRP2DwHjdF5s7jo9tuztdQxAhINCdvS+3nGINqPd00AphqJR/0LhANUS6/+7SCb98YOfA==}
     engines: {node: '>=10'}
 
+  yaml@2.9.1:
+    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+    engines: {node: '>= 14.6'}
+    hasBin: true
+
   yargs-parser@21.1.1:
     resolution: {integrity: sha512-tVpsJW7DdjecAiFpbIB1e3qxIQsE6NoPc5/eTdrbbIC4h0LVsWhnoa3g+m2HclBIujHzsxZ4VJVA+GUuc2/LBw==}
     engines: {node: '>=12'}
@@ -1779,6 +1799,9 @@ packages:
   yargs@17.7.3:
     resolution: {integrity: sha512-GZtjxm/J/4TSxuL3FNYjCmLktBTnIw/rVmKSIyKeYAZpmJB2ig9VauCC5xsa82GNKVKDAqpOn3KVzNt0zmrU0g==}
     engines: {node: '>=12'}
+
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
 
@@ -2145,6 +2168,8 @@ snapshots:
   '@types/libsodium-wrappers@0.8.2':
     dependencies:
       libsodium-wrappers: 0.8.4
+
+  '@types/luxon@3.7.6': {}
 
   '@types/methods@1.1.4': {}
 
@@ -3288,6 +3313,8 @@ snapshots:
 
   y18n@5.0.8: {}
 
+  yaml@2.9.1: {}
+
   yargs-parser@21.1.1: {}
 
   yargs@17.7.3:
@@ -3299,3 +3326,5 @@ snapshots:
       string-width: 4.2.3
       y18n: 5.0.8
       yargs-parser: 21.1.1
+
+  zod@3.25.76: {}

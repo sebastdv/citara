@@ -17,16 +17,18 @@ export class ChannelResolver {
   ) {}
 
   /**
-   * Resuelve el canal por phone_number_id. Devuelve null si no existe.
-   * NO existe un tenant por defecto: enviar con credenciales ajenas es peor
-   * que no enviar. El accessToken vuelve descifrado; quien lo reciba no debe
-   * registrarlo jamás en logs.
+   * Resuelve el canal por phone_number_id. Devuelve null si no existe o está
+   * inactivo. Un canal `disconnected` SÍ se resuelve: lo que llegue se guarda
+   * (FlowRunner no responde); `resolveById`, que usa el envío, sigue exigiendo
+   * `active`. NO existe un tenant por defecto: enviar con credenciales ajenas
+   * es peor que no enviar. El accessToken vuelve descifrado; quien lo reciba no
+   * debe registrarlo jamás en logs.
    */
   async resolveByPhoneNumberId(phoneNumberId: string): Promise<ResolvedChannel | null> {
     const [row] = await this.ds.query(
       `SELECT id, tenant_id, waba_id, phone_number_id, access_token_encrypted
          FROM whatsapp_channels
-        WHERE phone_number_id = $1 AND status = 'active'`,
+        WHERE phone_number_id = $1 AND status IN ('active', 'disconnected')`,
       [phoneNumberId],
     );
     return row ? this.mapRow(row) : null;

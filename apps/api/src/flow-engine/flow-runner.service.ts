@@ -8,8 +8,19 @@ import { Inject, Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import type { EntityManager } from 'typeorm';
 import type { OutboundContent, FlowDefinition, SessionState } from '@citara/shared';
-import { advance } from './executor';
+import type { FlowStep } from '@citara/shared';
+import { advance, interpolate } from './executor';
+import { ToolRegistry } from '../scheduling/tools/registry';
+import { CLOCK, type Clock } from '../clock';
+import { messageTypeOf } from '../conversations/message-type';
+
+const MAX_TOOL_HOPS = 5;
+/** Una sesión quieta más que esto se da por abandonada. */
+const SESSION_TTL_HOURS = 2;
 import { runInTenant } from '../tenancy/tenant-context';
+import {
+  giveControlToHuman, humanControlExpired, humanInControl, readControl, returnControlToBot,
+} from '../conversations/control';
 import { InboundProcessor } from '../queues/inbound.processor';
 import type { InboundJob } from '../queues/inbound.queue';
 import { OutboundQueue } from '../queues/outbound.queue';
@@ -35,6 +46,8 @@ export class FlowRunner {
     // Nest no puede resolver la dependencia por tipo inferido — hay que
     // darle el token (la clase concreta registrada en AppModule).
     @Inject(OutboundQueue) private readonly outboundQueue: OutboundEnqueuer,
+    private readonly tools: ToolRegistry,
+    @Inject(CLOCK) private readonly clock: Clock,
   ) {}
 
   async handle(job: InboundJob): Promise<OutboundContent[]> {
@@ -63,7 +76,29 @@ export class FlowRunner {
         return { ...inbound, outbound: [] as OutboundContent[], pending: n > 0 };
       }
 
-      const outbound = await this.advanceFlow(m, job, inbound.conversationId, inbound.messageId);
+      // Regla de control (spec §6.2), ya con la conversación bloqueada por el
+      // upsert de `persist`: antes de avanzar, ¿quién habla?
+      const control = await readControl(m, inbound.conversationId);
+      const now = new Date();
+      if (control.channelStatus === 'disconnected' || humanInControl(control, now)) {
+        // El entrante ya quedó guardado; el bot no responde.
+        return { ...inbound, outbound: [] as OutboundContent[], pending: false };
+      }
+      if (humanControlExpired(control, now)) {
+        await returnControlToBot(m, {
+          tenantId: job.tenantId, conversationId: inbound.conversationId,
+          cause: 'expired', actor: 'system',
+        });
+      }
+
+      const { outbound, enteredHandoff } =
+        await this.advanceFlow(m, job, inbound);
+      if (enteredHandoff) {
+        await giveControlToHuman(m, {
+          tenantId: job.tenantId, conversationId: inbound.conversationId,
+          from: now, reason: 'flow_handoff', actor: 'flow',
+        });
+      }
       return { ...inbound, outbound, pending: outbound.length > 0 };
     });
 
@@ -84,13 +119,15 @@ export class FlowRunner {
   }
 
   private async advanceFlow(
-    m: EntityManager, job: InboundJob, conversationId: string, inboundId: string,
-  ): Promise<OutboundContent[]> {
+    m: EntityManager, job: InboundJob,
+    inbound: { conversationId: string; messageId: string; contactId: string },
+  ): Promise<{ outbound: OutboundContent[]; enteredHandoff: boolean }> {
+    const { conversationId, messageId: inboundId } = inbound;
     const [flowRow] = await m.query(
       `SELECT id, definition FROM flows
         WHERE is_active AND is_default LIMIT 1`,
     );
-    if (!flowRow) return [];
+    if (!flowRow) return { outbound: [], enteredHandoff: false };
     const flow = flowRow.definition as FlowDefinition;
 
     // `status <> 'ended'`, no `status = 'active'`: una sesión en traspaso a
@@ -100,12 +137,30 @@ export class FlowRunner {
     // saludo. Solo 'ended' significa "esta conversación ya cerró".
     //
     // ORDER BY updated_at (no `id`, que es un UUID sin orden temporal).
-    const [sessionRow] = await m.query(
-      `SELECT id, step_key, vars, status FROM conversation_sessions
+    let [sessionRow] = await m.query(
+      `SELECT id, step_key, vars, status,
+              updated_at < now() - make_interval(hours => $2) AS stale
+         FROM conversation_sessions
         WHERE conversation_id = $1 AND status <> 'ended'
         ORDER BY updated_at DESC LIMIT 1`,
-      [conversationId],
+      [conversationId, SESSION_TTL_HOURS],
     );
+
+    // Aquí ya se sabe que manda el bot. Una sesión es un residuo, y se cierra
+    // para empezar de nuevo, si:
+    // - quedó en 'handoff' (el control ya volvió), y silenciaría al bot;
+    // - lleva más de SESSION_TTL_HOURS sin moverse: quien vuelve horas después
+    //   no debe caer en la pregunta donde quedó ni ver horarios ya pasados;
+    // - su paso ya no existe en el flujo (tenant:apply lo cambió): si no, cada
+    //   mensaje de ese contacto fallaría para siempre.
+    const residue = sessionRow &&
+      (sessionRow.status === 'handoff' || sessionRow.stale || !(sessionRow.step_key in flow.steps));
+    if (residue) {
+      await m.query(
+        `UPDATE conversation_sessions SET status = 'ended', updated_at = now() WHERE id = $1`,
+        [sessionRow.id]);
+      sessionRow = undefined;
+    }
 
     const state: SessionState | null = sessionRow
       ? { stepKey: sessionRow.step_key, vars: sessionRow.vars, status: sessionRow.status }
@@ -113,7 +168,31 @@ export class FlowRunner {
 
     // Sesión nueva → sin input, para que el flujo emita su paso de entrada.
     const input = state ? job.message.text : null;
-    const result = advance(flow, state, input);
+    let result = advance(flow, state, input);
+    // Las herramientas corren aquí, en la transacción del turno: si algo falla
+    // después de agendar, el rollback se lleva también la cita.
+    for (let hop = 0; result.pending; hop++) {
+      if (hop >= MAX_TOOL_HOPS) throw new Error(`Cadena de herramientas demasiado larga en el flujo '${flow.key}'`);
+      const { tool, args, stepKey } = result.pending;
+      const step = flow.steps[stepKey] as Extract<FlowStep, { type: 'tool' }>;
+      const out = await this.tools.run(tool, args, {
+        m, tenantId: job.tenantId, contactId: inbound.contactId, conversationId, now: this.clock.now() });
+
+      const vars = { ...result.state.vars };
+      let next = out.ok ? step.on_success : step.on_error;
+      if (!out.ok) vars.__tool_error = out.error ?? '';
+      if (out.ok && step.save_list && Array.isArray(out.data)) {
+        const items = out.data as Record<string, unknown>[];
+        vars[`__${step.save_list}`] = JSON.stringify(items);
+        vars[step.save_list] = items
+          .map((it, i) => `${i + 1}. ${interpolate(step.render ?? '{{id}}',
+            Object.fromEntries(Object.entries(it).map(([k, v]) => [k, String(v)])))}`)
+          .join('\n');
+        if (items.length === 0) next = step.on_empty ?? step.on_success;
+      }
+      const after = advance(flow, { ...result.state, vars, stepKey: next }, null);
+      result = { ...after, outbound: [...result.outbound, ...after.outbound] };
+    }
 
     if (sessionRow) {
       await m.query(
@@ -136,16 +215,19 @@ export class FlowRunner {
       // `type` con el MISMO vocabulario que el entrante (el de Meta): botones
       // y lista son las dos formas de un mensaje interactivo. El `kind` fino
       // viaja en `payload`, que además es lo que el envío manda tal cual.
-      const type = content.kind === 'text' ? 'text' : 'interactive';
+      const type = messageTypeOf(content);
       await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, type, body, payload,
+        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload,
                                status, reply_to_id, seq)
-         VALUES ($1, $2, 'out', $3, $4, $5, 'pending', $6, $7)`,
-        [job.tenantId, conversationId, type, content.body, JSON.stringify(content),
+         VALUES ($1, $2, 'out', 'bot', $3, $4, $5, 'pending', $6, $7)`,
+        [job.tenantId, conversationId, type, 'body' in content ? content.body : null, JSON.stringify(content),
          inboundId, seq],
       );
     }
 
-    return result.outbound;
+    return {
+      outbound: result.outbound,
+      enteredHandoff: result.state.status === 'handoff' && state?.status !== 'handoff',
+    };
   }
 }

@@ -54,4 +54,17 @@ describe('ChannelResolver', () => {
   it('devuelve null para un phone_number_id desconocido — NUNCA cae a un default', async () => {
     expect(await resolver.resolveByPhoneNumberId('999999')).toBeNull();
   });
+
+  it('resuelve un canal desconectado para la entrada, pero no para enviar', async () => {
+    // Lo que llegue a un número desconectado se guarda (y no se responde);
+    // enviar con un canal desconectado no tiene sentido.
+    await admin.query(`UPDATE whatsapp_channels SET status = 'disconnected'`);
+    try {
+      const inbound = await resolver.resolveByPhoneNumberId('106540');
+      expect(inbound?.tenantId).toBe(tenantId);
+      expect(await resolver.resolveById(inbound!.channelId)).toBeNull();
+    } finally {
+      await admin.query(`UPDATE whatsapp_channels SET status = 'active'`);
+    }
+  });
 });

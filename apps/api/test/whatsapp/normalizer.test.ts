@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { normalizeWebhook } from '../../src/whatsapp/normalizer';
+import {
+  accountUpdatePayload, contactsPayload, echoPayload, historyDeclinedPayload,
+  historyPayload, statusPayload,
+} from './fixtures/coexistence';
 
 const envelope = (value: unknown) => ({
   object: 'whatsapp_business_account',
@@ -91,7 +95,7 @@ describe('normalizeWebhook', () => {
   });
 
   it('devuelve listas vacías ante un payload irreconocible', () => {
-    expect(normalizeWebhook({ hola: 'mundo' })).toEqual({ messages: [], statuses: [] });
+    expect(normalizeWebhook({ hola: 'mundo' })).toEqual({ messages: [], statuses: [], echoes: [], history: [], contacts: [], accountUpdates: [] });
   });
 });
 
@@ -121,7 +125,88 @@ describe('normalizeWebhook no lanza nunca', () => {
   for (const [nombre, payload] of malformados) {
     it(`devuelve listas vacías cuando ${nombre}`, () => {
       expect(() => normalizeWebhook(payload)).not.toThrow();
-      expect(normalizeWebhook(payload)).toEqual({ messages: [], statuses: [] });
+      expect(normalizeWebhook(payload)).toEqual({ messages: [], statuses: [], echoes: [], history: [], contacts: [], accountUpdates: [] });
+    });
+  }
+});
+
+describe('normalizeWebhook — coexistencia', () => {
+  it('normaliza un eco del celular del negocio', () => {
+    const at = new Date('2026-10-06T15:00:00Z');
+    const n = normalizeWebhook(echoPayload({ wamid: 'wamid.E1', to: '573001112233', text: 'Ya voy', at }));
+
+    expect(n.messages).toEqual([]);
+    expect(n.echoes).toEqual([expect.objectContaining({
+      wamid: 'wamid.E1', phoneNumberId: '106540', wabaId: '102290',
+      to: '573001112233', type: 'text', text: 'Ya voy', timestamp: at,
+    })]);
+  });
+
+  it('quita el + del destinatario del eco para que caiga en el mismo contacto', () => {
+    const n = normalizeWebhook(echoPayload({ wamid: 'wamid.E2', to: '+573001112233' }));
+    expect(n.echoes[0].to).toBe('573001112233');
+  });
+
+  it('un eco sin timestamp se toma como recién llegado, no como de 1970', () => {
+    const p = echoPayload({ wamid: 'wamid.ET', to: '573001112233' }) as any;
+    delete p.entry[0].changes[0].value.message_echoes[0].timestamp;
+    const before = Date.now();
+    const at = normalizeWebhook(p).echoes[0].timestamp.getTime();
+    expect(at).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it('normaliza un chunk de historial con sus hilos y fase', () => {
+    const at = new Date('2026-10-05T10:00:00Z');
+    const n = normalizeWebhook(historyPayload({
+      customer: '573001112233', phase: 1, progress: 40,
+      lines: [{ wamid: 'wamid.H1', fromCustomer: true, text: 'Hola', at }],
+    }));
+
+    expect(n.history).toHaveLength(1);
+    expect(n.history[0]).toMatchObject({ phoneNumberId: '106540', phase: 1, progress: 40, declined: false });
+    expect(n.history[0].threads[0].waId).toBe('573001112233');
+    expect(n.history[0].threads[0].messages[0]).toMatchObject(
+      { wamid: 'wamid.H1', from: '573001112233', text: 'Hola', timestamp: at });
+  });
+
+  it('reconoce que el negocio no compartió el historial', () => {
+    const n = normalizeWebhook(historyDeclinedPayload());
+    expect(n.history).toEqual([expect.objectContaining({ declined: true, threads: [] })]);
+  });
+
+  it('normaliza los contactos agregados y quitados', () => {
+    const add = normalizeWebhook(contactsPayload({ phone: '573001112233', name: 'Ana Pérez', action: 'add' }));
+    const del = normalizeWebhook(contactsPayload({ phone: '573001112233', name: 'Ana Pérez', action: 'remove' }));
+    expect(add.contacts).toEqual([expect.objectContaining(
+      { waId: '573001112233', name: 'Ana Pérez', action: 'add', phoneNumberId: '106540' })]);
+    expect(del.contacts[0].action).toBe('remove');
+  });
+
+  it('normaliza un aviso de la cuenta', () => {
+    expect(normalizeWebhook(accountUpdatePayload('PARTNER_REMOVED')).accountUpdates)
+      .toEqual([{ wabaId: '102290', event: 'PARTNER_REMOVED', phoneNumber: '15550001' }]);
+  });
+
+  it('los estados llevan el número por el que salieron', () => {
+    const n = normalizeWebhook(statusPayload('wamid.OUT', 'delivered'));
+    expect(n.statuses[0]).toMatchObject({ wamid: 'wamid.OUT', status: 'delivered', phoneNumberId: '106540' });
+  });
+
+  it('ignora los campos a los que no estamos suscritos', () => {
+    const n = normalizeWebhook({ entry: [{ id: '1', changes: [{ field: 'message_template_status_update',
+      value: { event: 'APPROVED' } }] }] });
+    expect(Object.values(n).every((list) => list.length === 0)).toBe(true);
+  });
+
+  const malformados: [string, unknown][] = [
+    ['message_echoes no es arreglo', { entry: [{ id: '1', changes: [{ field: 'smb_message_echoes', value: { message_echoes: 'x' } }] }] }],
+    ['history trae threads como objeto', { entry: [{ id: '1', changes: [{ field: 'history', value: { history: [{ threads: {} }] } }] }] }],
+    ['state_sync es null', { entry: [{ id: '1', changes: [{ field: 'smb_app_state_sync', value: { state_sync: null } }] }] }],
+    ['account_update sin event', { entry: [{ id: '1', changes: [{ field: 'account_update', value: {} }] }] }],
+  ];
+  for (const [nombre, payload] of malformados) {
+    it(`no lanza cuando ${nombre}`, () => {
+      expect(() => normalizeWebhook(payload)).not.toThrow();
     });
   }
 });

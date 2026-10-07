@@ -18,6 +18,12 @@ export class Message {
   @Column({ type: 'varchar' })
   direction!: 'in' | 'out';
 
+  @Column({ type: 'varchar' })
+  origin!: 'customer' | 'bot' | 'phone' | 'operator' | 'history' | 'reminder';
+
+  @Column({ name: 'occurred_at', type: 'timestamptz' })
+  occurredAt!: Date;
+
   @Column()
   type!: string;
 

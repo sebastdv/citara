@@ -11,6 +11,7 @@ import { ChannelResolver } from '../tenancy/channel-resolver.service';
 import { MetaSender, MetaSendError } from '../whatsapp/sender';
 import { runInTenant } from '../tenancy/tenant-context';
 import { canSendFreeform, requiresOpenWindow } from '../conversations/session-window';
+import { botRepliesSuperseded, type ControlState } from '../conversations/control';
 import type { OutboundJob } from './outbound.queue';
 
 /** Más que el timeout del envío (15 s) con margen: pasado esto, el intento murió. */
@@ -20,7 +21,8 @@ const CLAIM_STALE_SECONDS = 60;
  * Estados de un saliente: `pending` (lo produjo el flujo) → `sending`
  * (reclamado por un envío, con `claimed_at`) → `sent`. Salidas laterales:
  * `window_closed`, `failed` (rechazo permanente, canal inválido o reintentos
- * agotados) y `unconfirmed` (pudo o no llegar a Meta; no se reenvía a ciegas).
+ * agotados), `unconfirmed` (pudo o no llegar a Meta; no se reenvía a ciegas) y
+ * `superseded` (un humano tomó la conversación antes de que saliera).
  *
  * TODA transición es compare-and-set sobre el estado previo: dos ejecuciones
  * del mismo turno (un job atascado que BullMQ re-ejecuta mientras el original
@@ -35,7 +37,9 @@ export class OutboundProcessor {
   ) {}
 
   async process(job: OutboundJob): Promise<{ sent: number }> {
-    const { tenantId, channelId, turnId, to } = job;
+    const { tenantId, channelId, to } = job;
+    // Qué filas son de este job: las de un turno, o un mensaje suelto.
+    const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
 
     // Sin default ni reintentos: un canal que no existe, quedó inactivo o es
     // de otro negocio no se arregla en el siguiente intento.
@@ -46,23 +50,31 @@ export class OutboundProcessor {
         ? `El canal ${channelId} no pertenece al tenant ${tenantId}`
         : null;
     if (invalid || !channel) {
-      await this.failPending(tenantId, turnId);
+      await this.failPending(job);
       throw new UnrecoverableError(invalid ?? 'canal inválido');
     }
 
-    const { rows, lastInboundAt } = await runInTenant(this.ds, tenantId, async (m) => {
-      const rows: { id: string; status: string; in_flight: boolean; payload: OutboundContent }[] =
+    const { rows, control, lastInboundAt } = await runInTenant(this.ds, tenantId, async (m) => {
+      const rows: {
+        id: string; status: string; in_flight: boolean; payload: OutboundContent; origin: string;
+      }[] =
         await m.query(
-          `SELECT id, status, payload,
+          `SELECT id, status, payload, origin,
                   coalesce(claimed_at > now() - make_interval(secs => $2), false) AS in_flight
              FROM messages
-            WHERE reply_to_id = $1 AND direction = 'out' AND status IN ('pending', 'sending')
+            WHERE ${column} = $1 AND direction = 'out' AND status IN ('pending', 'sending')
             ORDER BY seq`,
-          [turnId, CLAIM_STALE_SECONDS],
+          [key, CLAIM_STALE_SECONDS],
         );
       const [conv] = await m.query(
-        `SELECT last_inbound_at FROM conversations WHERE id = $1`, [job.conversationId]);
-      return { rows, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null };
+        `SELECT last_inbound_at, control, human_until, control_reason
+           FROM conversations WHERE id = $1`, [job.conversationId]);
+      const control: ControlState = {
+        control: conv?.control ?? 'bot',
+        humanUntil: conv?.human_until ? new Date(conv.human_until) : null,
+        reason: conv?.control_reason ?? null,
+      };
+      return { rows, control, lastInboundAt: (conv?.last_inbound_at as Date | undefined) ?? null };
     });
 
     let sent = 0;
@@ -73,6 +85,13 @@ export class OutboundProcessor {
         if (row.in_flight) throw new Error(`Envío en curso por otro intento (fila ${row.id})`);
         // Un intento la reclamó y murió: pudo haber llegado a Meta.
         await this.transition(tenantId, row.id, 'sending', 'unconfirmed');
+        continue;
+      }
+
+      // Spec §6.3: si un humano intervino después de que el bot produjera esto,
+      // ya sobra. Se mide AHORA, justo antes de enviar.
+      if (row.origin === 'bot' && botRepliesSuperseded(control, new Date())) {
+        await this.transition(tenantId, row.id, 'pending', 'superseded');
         continue;
       }
 
@@ -91,7 +110,25 @@ export class OutboundProcessor {
         continue;
       }
 
-      if (!(await this.claim(tenantId, row.id))) continue; // otro intento la ganó
+      if (row.origin === 'bot') {
+        // El control se vuelve a medir aquí, dentro del reclamo atómico: el
+        // dueño pudo contestar mientras salía la fila anterior.
+        if (!(await this.claimBotReply(tenantId, row.id))) {
+          // O manda un humano que intervino (→ superseded), u otro intento la
+          // ganó (el CAS desde 'pending' falla y no pasa nada).
+          await this.transition(tenantId, row.id, 'pending', 'superseded');
+          continue;
+        }
+      } else if (row.origin === 'reminder') {
+        // Un recordatorio solo sale si su cita sigue confirmada: pudo
+        // cancelarse o moverse mientras el job esperaba en la cola.
+        if (!(await this.claimReminder(tenantId, row.id))) {
+          await this.transition(tenantId, row.id, 'pending', 'superseded');
+          continue;
+        }
+      } else if (!(await this.claim(tenantId, row.id))) {
+        continue; // otro intento la ganó
+      }
 
       let wamid: string;
       try {
@@ -105,14 +142,14 @@ export class OutboundProcessor {
         if (kind === 'window') {
           // Manda el veredicto de Meta, no nuestro reloj; aplica al turno entero.
           await this.transition(tenantId, row.id, 'sending', 'window_closed');
-          await this.closePending(tenantId, turnId, 'window_closed');
+          await this.closePending(job, 'window_closed');
           return { sent };
         }
         if (kind === 'permanent') {
           // Lo que queda del turno correría la misma suerte (mismo token,
           // misma conversación): se cierra y BullMQ no gasta intentos.
           await this.transition(tenantId, row.id, 'sending', 'failed');
-          await this.failPending(tenantId, turnId);
+          await this.failPending(job);
           throw new UnrecoverableError((err as Error).message);
         }
         // Reintentable: Meta NO lo aceptó, se libera para el siguiente
@@ -131,12 +168,41 @@ export class OutboundProcessor {
 
   /** Al agotar los reintentos: lo que no salió queda como fallido, visible. */
   failTurn(job: OutboundJob) {
-    return this.failPending(job.tenantId, job.turnId);
+    return this.failPending(job);
   }
 
   /** `pending` → `sending` de forma atómica. Solo un intento gana la fila. */
   private async claim(tenantId: string, id: string): Promise<boolean> {
     return this.transition(tenantId, id, 'pending', 'sending');
+  }
+
+  /**
+   * Reclamo de una respuesta del bot: además de seguir en `pending`, exige que
+   * no mande un humano que intervino (spec §6.3). Es la misma regla que
+   * `botRepliesSuperseded`, evaluada por Postgres en el mismo instante del
+   * reclamo; entre el reclamo y el envío queda una ventana inherente.
+   */
+  private async claimBotReply(tenantId: string, id: string): Promise<boolean> {
+    const [, affected] = (await runInTenant(this.ds, tenantId, (m) => m.query(
+      `UPDATE messages SET status = 'sending', claimed_at = now()
+        WHERE id = $1 AND status = 'pending'
+          AND NOT EXISTS (
+                SELECT 1 FROM conversations c
+                 WHERE c.id = messages.conversation_id
+                   AND c.control = 'human' AND c.human_until > now()
+                   AND c.control_reason IS DISTINCT FROM 'flow_handoff')`,
+      [id]))) as [unknown[], number];
+    return affected > 0;
+  }
+
+  private async claimReminder(tenantId: string, id: string): Promise<boolean> {
+    const [, affected] = (await runInTenant(this.ds, tenantId, (m) => m.query(
+      `UPDATE messages SET status = 'sending', claimed_at = now()
+        WHERE id = $1 AND status = 'pending'
+          AND EXISTS (SELECT 1 FROM reminders r JOIN appointments a ON a.id = r.appointment_id
+                       WHERE r.message_id = messages.id AND a.status = 'confirmed')`,
+      [id]))) as [unknown[], number];
+    return affected > 0;
   }
 
   /**
@@ -157,13 +223,13 @@ export class OutboundProcessor {
     return affected > 0;
   }
 
-  private failPending(tenantId: string, turnId: string) {
-    return this.closePending(tenantId, turnId, 'failed');
+  private failPending(job: OutboundJob) {
+    return this.closePending(job, 'failed');
   }
 
-  private closePending(tenantId: string, turnId: string, to: 'failed' | 'window_closed') {
-    return runInTenant(this.ds, tenantId, (m) => m.query(
-      `UPDATE messages SET status = $2 WHERE reply_to_id = $1 AND status = 'pending'`,
-      [turnId, to]));
+  private closePending(job: OutboundJob, to: 'failed' | 'window_closed') {
+    const [column, key] = 'turnId' in job ? ['reply_to_id', job.turnId] : ['id', job.messageId];
+    return runInTenant(this.ds, job.tenantId, (m) => m.query(
+      `UPDATE messages SET status = $2 WHERE ${column} = $1 AND status = 'pending'`, [key, to]));
   }
 }
