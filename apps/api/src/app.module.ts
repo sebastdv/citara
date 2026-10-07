@@ -24,6 +24,7 @@ import { HistoryProcessor } from './coexistence/history.processor';
 import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
 import { AccountUpdateProcessor } from './coexistence/account-update.processor';
 import { MetaOnboardingClient } from './onboarding/meta-onboarding.client';
+import { OnboardingService } from './onboarding/onboarding.service';
 
 @Module({
   controllers: [WhatsappController],
@@ -85,6 +86,7 @@ import { MetaOnboardingClient } from './onboarding/meta-onboarding.client';
       useFactory: () => new MetaOnboardingClient(
         process.env.META_GRAPH_VERSION ?? 'v25.0', process.env.META_APP_ID ?? '', process.env.META_APP_SECRET ?? ''),
     },
+    OnboardingService,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
