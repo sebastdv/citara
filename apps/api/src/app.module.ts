@@ -23,6 +23,7 @@ import { StatusProcessor } from './queues/status.processor';
 import { HistoryProcessor } from './coexistence/history.processor';
 import { ContactsSyncProcessor } from './coexistence/contacts-sync.processor';
 import { AccountUpdateProcessor } from './coexistence/account-update.processor';
+import { MetaOnboardingClient } from './onboarding/meta-onboarding.client';
 
 @Module({
   controllers: [WhatsappController],
@@ -77,6 +78,12 @@ import { AccountUpdateProcessor } from './coexistence/account-update.processor';
       // phone_number_id, que es propiedad de cada canal (ver sender.ts).
       provide: MetaSender,
       useFactory: () => new MetaSender(process.env.META_GRAPH_VERSION!),
+    },
+    {
+      // Credenciales de la app de Meta (no del negocio). Los tests lo reemplazan.
+      provide: MetaOnboardingClient,
+      useFactory: () => new MetaOnboardingClient(
+        process.env.META_GRAPH_VERSION ?? 'v25.0', process.env.META_APP_ID ?? '', process.env.META_APP_SECRET ?? ''),
     },
     OutboundQueue,
     SyncQueue,
