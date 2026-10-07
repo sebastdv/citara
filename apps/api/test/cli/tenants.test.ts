@@ -79,6 +79,20 @@ describe('CLI del operador', () => {
       slug: 'nuevo', status: 'onboarding', mode: 'coexistence', channelStatus: 'active', historySync: 'pending' })]);
   });
 
+  it('la lista dice qué sincronización falló, para reintentarla dentro de las 24 h', async () => {
+    // Meta acepta cada una una sola vez: `historial pending` no distingue
+    // "pedida, esperando a Meta" de "nunca se pudo pedir".
+    const { tenantId } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await connectChannel(tenantId);
+    const meta = { requestSync: vi.fn().mockImplementation(async (_p: string, _t: string, type: string) => {
+      if (type === 'history') throw new Error('Meta respondió 500');
+    }) };
+    await syncTenant(admin, enc, meta as never, 'nuevo');
+
+    const [t] = await listTenants(admin);
+    expect(t.syncs).toEqual({ smb_app_state_sync: 'requested', history: 'failed' });
+  });
+
   it('sync vuelve a pedir la sincronización con el token del canal', async () => {
     const { tenantId } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
     await connectChannel(tenantId);

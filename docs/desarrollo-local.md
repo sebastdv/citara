@@ -140,7 +140,9 @@ Hasta entonces guarda todo lo que llega, sin responder.
 pnpm tenant list
 ```
 
-Estado de cada negocio: canal, historial y **último eco** (la última vez que el dueño escribió
+Estado de cada negocio: canal, historial, resultado de pedir las sincronizaciones
+(`sync contactos ok, historial FALLÓ`: lo que falló se reintenta con `pnpm tenant sync` dentro
+de las 24 h del alta, o se pierde) y **último eco** (la última vez que el dueño escribió
 desde su celular). Si el dueño no abre la app en unos 13 días, Meta corta la coexistencia:
 vigila esa columna.
 

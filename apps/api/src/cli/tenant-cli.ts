@@ -6,7 +6,7 @@ config();
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../crypto/encryption.service';
 import { MetaOnboardingClient } from '../onboarding/meta-onboarding.client';
-import { connectUrl, createTenant, listTenants, newLink, setSuspended, syncTenant } from './tenants';
+import { connectUrl, createTenant, listTenants, newLink, setSuspended, syncTenant, type TenantSummary } from './tenants';
 
 const USAGE = `Uso:
   pnpm tenant create <slug> "<nombre>" [zona]   crea el negocio en alta e imprime el enlace de conexión
@@ -16,6 +16,14 @@ const USAGE = `Uso:
   pnpm tenant sync <slug>                         reintenta la sincronización de historial y contactos`;
 
 const fmt = (d: Date | null) => (d ? new Date(d).toISOString().replace('T', ' ').slice(0, 16) : '—');
+const SYNC_NAMES = { smb_app_state_sync: 'contactos', history: 'historial' } as const;
+/** "sync contactos ok, historial FALLÓ": una falla se reintenta con `pnpm tenant sync` dentro de 24 h. */
+const fmtSyncs = (syncs: TenantSummary['syncs']) => {
+  const parts = (Object.keys(SYNC_NAMES) as (keyof typeof SYNC_NAMES)[])
+    .filter((k) => syncs[k])
+    .map((k) => `${SYNC_NAMES[k]} ${syncs[k] === 'failed' ? 'FALLÓ' : 'ok'}`);
+  return `sync ${parts.length ? parts.join(', ') : '—'}`;
+};
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
@@ -44,7 +52,7 @@ async function main() {
       case 'list':
         for (const t of await listTenants(admin)) {
           console.log([t.slug, t.status, t.phone ?? 'sin número', t.mode ?? '—', t.channelStatus ?? '—',
-                       `historial ${t.historySync ?? '—'}`, `último eco ${fmt(t.lastPhoneEcho)}`,
+                       `historial ${t.historySync ?? '—'}`, fmtSyncs(t.syncs), `último eco ${fmt(t.lastPhoneEcho)}`,
                        `último cliente ${fmt(t.lastCustomer)}`].join(' | '));
         }
         break;
