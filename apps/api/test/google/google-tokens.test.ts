@@ -47,4 +47,16 @@ describe('GoogleTokens', () => {
     google.refreshAccessToken.mockRejectedValue(new GoogleAuthError('renovación del token: invalid_grant'));
     await expect(tokens.withToken(account, async () => 'nunca')).rejects.toBeInstanceOf(GoogleAuthError);
   });
+
+  it('si la cuenta se reconectó con otro refresh token, no reutiliza el access token del anterior', async () => {
+    // Reconectar con otra cuenta de Google conserva el id de la fila: la caché del
+    // worker devolvería el token de la cuenta vieja durante una hora.
+    const { google, tokens, account } = setup();
+    google.refreshAccessToken
+      .mockResolvedValueOnce({ accessToken: 'ya29.cuenta-x', expiresIn: 3599 })
+      .mockResolvedValueOnce({ accessToken: 'ya29.cuenta-y', expiresIn: 3599 });
+    expect(await tokens.accessToken(account)).toBe('ya29.cuenta-x');
+    const reconectada = { id: account.id, refreshTokenEncrypted: enc.encrypt('1//otra-cuenta') };
+    expect(await tokens.accessToken(reconectada)).toBe('ya29.cuenta-y');
+  });
 });

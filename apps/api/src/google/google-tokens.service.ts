@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 // Imports de VALOR: parámetros del constructor de un servicio Nest.
 import { EncryptionService } from '../crypto/encryption.service';
 import { GoogleApiError, GoogleClient } from './google.client';
@@ -14,15 +15,20 @@ const MARGIN_SECONDS = 60;
  */
 @Injectable()
 export class GoogleTokens {
-  private readonly cache = new Map<string, { token: string; expiresAt: number }>();
+  /** Por cuenta; `minted` dice con qué refresh token se obtuvo el access token. */
+  private readonly cache = new Map<string, { token: string; expiresAt: number; minted: string }>();
 
   constructor(private readonly enc: EncryptionService, private readonly google: GoogleClient) {}
 
   async accessToken(account: GoogleAccountRef): Promise<string> {
+    // Reconectar (quizá con otra cuenta de Google) conserva el id de la fila pero
+    // cambia el refresh token: un access token del anterior ya no corresponde.
+    const minted = createHash('sha256').update(account.refreshTokenEncrypted).digest('hex');
     const hit = this.cache.get(account.id);
-    if (hit && hit.expiresAt > Date.now()) return hit.token;
+    if (hit && hit.minted === minted && hit.expiresAt > Date.now()) return hit.token;
     const r = await this.google.refreshAccessToken(this.enc.decrypt(account.refreshTokenEncrypted));
-    this.cache.set(account.id, { token: r.accessToken, expiresAt: Date.now() + (r.expiresIn - MARGIN_SECONDS) * 1000 });
+    this.cache.set(account.id,
+      { token: r.accessToken, expiresAt: Date.now() + (r.expiresIn - MARGIN_SECONDS) * 1000, minted });
     return r.accessToken;
   }
 
