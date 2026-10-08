@@ -33,10 +33,13 @@ import { GoogleBusyService } from './google/google-busy.service';
 import { CalendarQueue } from './queues/calendar.queue';
 import { CalendarPushProcessor } from './google/calendar-push.processor';
 import { CalendarSweep } from './google/calendar-sweep.service';
+import { CalendarPullProcessor } from './google/calendar-pull.processor';
+import { CalendarWatchService } from './google/calendar-watch.service';
+import { GoogleWebhookController } from './google/google-webhook.controller';
 import { ConnectGoogleController } from './google/connect-google.controller';
 
 @Module({
-  controllers: [WhatsappController, ConnectController, ConnectGoogleController],
+  controllers: [WhatsappController, ConnectController, ConnectGoogleController, GoogleWebhookController],
   providers: [
     {
       // DataSource de la APLICACIÓN (DATABASE_URL, rol citara_app) — nunca el
@@ -111,6 +114,8 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     CalendarQueue,
     CalendarPushProcessor,
     CalendarSweep,
+    CalendarPullProcessor,
+    CalendarWatchService,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con

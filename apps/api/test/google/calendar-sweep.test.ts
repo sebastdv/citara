@@ -52,3 +52,25 @@ describe('CalendarSweep: subidas', () => {
     expect(await pushes()).toEqual([]);
   });
 });
+
+describe('CalendarSweep: lecturas y canales', () => {
+  const of = async (name: string) => (await sweep.run(AHORA)).filter((j) => j.name === name);
+
+  it('lee cada 15 minutos aunque no lleguen avisos', async () => {
+    const acc = await seedGoogleAccount(tenantId, resourceId);
+    expect(await of('pull')).toEqual([expect.objectContaining({ data: { tenantId, accountId: acc } })]);
+    await adminQuery(`UPDATE google_accounts SET last_pulled_at = $1`, [new Date(AHORA.getTime() - 5 * 60_000)]);
+    expect(await of('pull')).toEqual([]);
+  });
+
+  it('renueva el canal que vence en menos de dos días, solo con HTTPS', async () => {
+    await seedGoogleAccount(tenantId, resourceId);
+    process.env.PUBLIC_BASE_URL = 'http://localhost:3000';
+    expect(await of('watch')).toEqual([]);
+    process.env.PUBLIC_BASE_URL = 'https://citara.test';
+    expect(await of('watch')).toHaveLength(1);
+    await adminQuery(`UPDATE google_accounts SET watch_expires_at = $1`, [new Date('2026-09-20T00:00:00Z')]);
+    expect(await of('watch')).toEqual([]);
+    process.env.PUBLIC_BASE_URL = 'http://localhost:3000';
+  });
+});
