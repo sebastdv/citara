@@ -39,8 +39,21 @@ export async function runBench(o: { admin: DataSource; app: DataSource; llm: Llm
   return out;
 }
 
+/**
+ * El banco vacía todas las tablas en cada guion: solo corre sobre una base de
+ * banco o de pruebas. Apuntarlo por error a la base real borraría a los clientes.
+ */
+export function assertBenchDatabase(name: string): void {
+  if (!/bench|test/i.test(name)) {
+    throw new Error(`El banco vacía la base en cada guion y '${name}' no es una base de banco ` +
+                    `(usa citara_bench o una base de pruebas).`);
+  }
+}
+
 async function runOne(o: Parameters<typeof runBench>[0], script: BenchScript): Promise<BenchResult> {
   const { admin, app } = o;
+  const [{ db }] = await admin.query(`SELECT current_database() AS db`);
+  assertBenchDatabase(db);
   await admin.query(`TRUNCATE ${TABLES} RESTART IDENTITY CASCADE`);
   const [t] = await admin.query(`INSERT INTO tenants (slug, name, timezone) VALUES ('banco', 'Salón Banco', $1) RETURNING id`, [TZ]);
   const [ch] = await admin.query(

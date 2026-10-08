@@ -7,7 +7,7 @@ import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../../src/crypto/encryption.service';
 import type { LlmMessage, LlmProvider } from '../../src/agent/llm';
 import { agentYamlSchema, configHash } from '../../src/agent/agent-config';
-import { assertBenchPassed, runBench, writeBenchResult } from '../../src/agent/bench/runner';
+import { assertBenchDatabase, assertBenchPassed, runBench, writeBenchResult } from '../../src/agent/bench/runner';
 import { BENCH_SCRIPTS } from '../../src/agent/bench/scripts';
 import { closeHelpers, resetDb } from '../helpers';
 
@@ -57,5 +57,13 @@ describe('banco de regresión', () => {
     expect(() => assertBenchPassed(dir, configHash(agent))).toThrow(/no pasó/);
     writeBenchResult(dir, agent, [{ name: 'x', passed: true, reason: null, usd: 0.1, replies: [] }]);
     expect(() => assertBenchPassed(dir, configHash(agent))).not.toThrow();
+  });
+
+  it('se niega a vaciar una base que no sea de banco o de pruebas', () => {
+    // El banco hace TRUNCATE de todas las tablas: apuntarlo a la base real borraría a los clientes.
+    expect(() => assertBenchDatabase('citara')).toThrow(/citara_bench/);
+    expect(() => assertBenchDatabase('produccion')).toThrow();
+    expect(() => assertBenchDatabase('citara_bench')).not.toThrow();
+    expect(() => assertBenchDatabase('citara_test')).not.toThrow();
   });
 });
