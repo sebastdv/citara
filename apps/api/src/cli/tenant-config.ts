@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import type { DataSource } from 'typeorm';
 import type { FlowDefinition } from '@citara/shared';
 import { AGENDA_FLOW } from '../flow-engine/flows/agenda';
+import { agentYamlSchema, applyAgentConfig } from '../agent/agent-config';
 import { setDefaultFlow } from './provision';
 
 const DAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 } as const;
@@ -44,6 +45,7 @@ export const tenantConfigSchema = z.object({
   time_off: z.array(z.object({ from: iso, to: iso, reason: z.string().optional(), resource: key.optional() }))
     .default([]),
   flow: z.union([z.literal('agenda'), flowSchema]).optional(),
+  agent: agentYamlSchema.optional(),
 }).superRefine((c, ctx) => {
   const services = new Set(c.services.map((s) => s.key));
   const resources = new Set(c.resources.map((r) => r.key));
@@ -145,7 +147,9 @@ export async function applyTenantConfig(admin: DataSource, raw: unknown) {
     // Si al negocio en alta solo le faltaba la agenda, aquí queda activo.
     const [{ status }] = await m.query(`SELECT refresh_tenant_status($1) AS status`, [tenantId]);
 
+    const agent = c.agent ? await applyAgentConfig(m, tenantId, c.agent) : null;
+
     return { tenantId, services: c.services.length, resources: c.resources.length,
-             hours, timeOff: c.time_off.length, flow, status: status as string };
+             hours, timeOff: c.time_off.length, flow, status: status as string, agent };
   });
 }

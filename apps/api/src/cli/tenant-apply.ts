@@ -20,7 +20,8 @@ async function main() {
     const r = await applyTenantConfig(ds, parse(await readFile(file, 'utf8')));
     console.log(`Negocio ${r.tenantId}: ${r.services} servicios, ${r.resources} recursos, ` +
                 `${r.hours} bloques de horario, ${r.timeOff} ausencias, flujo ${r.flow ?? 'sin cambios'}, ` +
-                `estado ${r.status}`);
+                `estado ${r.status}` +
+                (r.agent ? `, agente v${r.agent.version}${r.agent.changed ? ' (nueva)' : ''}` : ''));
   } finally {
     await ds.destroy();
   }
