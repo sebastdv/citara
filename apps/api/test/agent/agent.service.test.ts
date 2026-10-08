@@ -154,4 +154,10 @@ describe('AgentService', () => {
       () => reply([toolUse(`t${i}`, 'consultar_servicios', {})], 'tool_use')));
     expect(await respond(loop, ['x'])).toMatchObject({ degraded: true, action: 'human' });
   });
+
+  it('una respuesta cortada con un tool_use pendiente degrada sin guardar un tool_use huérfano', async () => {
+    const llm = new ScriptedLlm([() => reply([text('Déjame revisar...'), toolUse('t1', 'consultar_servicios', {})], 'max_tokens')]);
+    const r = await respond(llm, ['Hola']);
+    expect(r).toMatchObject({ degraded: true, action: 'human', transcript: [] });
+  });
 });

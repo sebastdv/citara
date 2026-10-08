@@ -66,6 +66,9 @@ export class AgentService {
       const uses = res.content.filter((b): b is ToolUse => b.type === 'tool_use');
       await this.record(i, res, Date.now() - started, uses.map((u) => u.name), res.stop_reason ?? null, null);
       if (res.stop_reason === 'refusal') return this.degrade(i);
+      // Un tool_use sin ejecutar (respuesta cortada por max_tokens u otro motivo) no
+      // se puede guardar: el siguiente turno llevaría un tool_use sin su resultado (400).
+      if (uses.length > 0 && res.stop_reason !== 'tool_use') return this.degrade(i);
       messages.push({ role: 'assistant', content: res.content as MessageParam['content'] });
 
       if (res.stop_reason !== 'tool_use' || uses.length === 0) {
