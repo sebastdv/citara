@@ -38,8 +38,13 @@ interface Session {
 }
 interface Pending { id: string; body: string | null; wamid: string | null; created_at: Date }
 
+/**
+ * Cierra el estado del segmento. `agent_cursor` se conserva: marca hasta dónde
+ * respondió el agente, y es lo que distingue un mensaje ya atendido de uno que
+ * llegó mientras el segmento se cerraba. Un segmento nuevo lo vuelve a fijar.
+ */
 const CLEAR_AGENT = `agent_system = NULL, agent_transcript = NULL, agent_model = NULL, agent_effort = NULL,
-                     agent_config_version = NULL, agent_cursor = NULL`;
+                     agent_config_version = NULL`;
 
 /**
  * El worker de la cola `agent` (spec §3.4). Ninguna llamada al modelo ocurre con
@@ -110,7 +115,11 @@ export class AgentProcessor {
     }
     // La conversación siguió por otro lado (otro turno la movió, la sesión venció).
     let session = read.session;
-    if (!session || !flow || session.step_key !== job.stepKey) return 'nothing';
+    if (!session || !flow) return 'nothing';
+    if (session.step_key !== job.stepKey) {
+      // El segmento se cerró (volvió al menú) mientras este mensaje esperaba su turno.
+      return job.kind === 'agent' ? this.orphan(job, session, gate) : 'nothing';
+    }
 
     if (job.kind === 'interpret') {
       const done = await this.interpret(job, flow, session, gate);
@@ -119,6 +128,25 @@ export class AgentProcessor {
                   agent_model: null, agent_effort: null, agent_config_version: null };
     }
     return this.converse(job, flow, session, gate, now, timezone);
+  }
+
+  /**
+   * Un mensaje derivado al agente que nadie respondió (llegó después del cursor y
+   * no tiene salientes) se atiende como un turno del paso actual, como si llegara ahora.
+   */
+  private async orphan(job: LeasedJob, session: Session, gate: AiAvailability): Promise<'answered' | 'nothing'> {
+    const [row] = await runInTenant(this.ds, job.tenantId, (m) => m.query(
+      `SELECT i.body FROM messages i, conversation_sessions s
+        WHERE i.id = $1 AND s.id = $2
+          AND i.created_at > COALESCE(s.agent_cursor, '-infinity'::timestamptz)
+          AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to_id = i.id)`, [job.inboundId, session.id]));
+    if (!row) return 'nothing';
+    await this.finish(job, job.inboundId, async (m) => {
+      const out = await this.flows.resume(m, this.ctx(job, job.inboundId), { input: row.body ?? '', ai: gate.ok });
+      if (out?.enteredHandoff) await this.toHuman(m, job, 'flow');
+      return out?.ai ?? null;
+    });
+    return 'answered';
   }
 
   private async interpret(job: LeasedJob, flow: FlowDefinition, session: Session, gate: AiAvailability) {
@@ -140,8 +168,8 @@ export class AgentProcessor {
     if (r.action === 'agent' && flow.ai_step && gate.ok) {
       await runInTenant(this.ds, job.tenantId, (m) => m.query(
         `UPDATE conversation_sessions
-            SET step_key = $2, ${CLEAR_AGENT.replace('agent_cursor = NULL',
-              `agent_cursor = (SELECT created_at FROM messages WHERE id = $3) - interval '1 microsecond'`)},
+            SET step_key = $2, ${CLEAR_AGENT},
+                agent_cursor = (SELECT created_at FROM messages WHERE id = $3) - interval '1 microsecond',
                 updated_at = now()
           WHERE id = $1`, [session.id, flow.ai_step, job.inboundId]));
       return 'to_agent' as const;

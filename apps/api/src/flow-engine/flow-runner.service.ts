@@ -295,9 +295,12 @@ export class FlowRunner {
     m: EntityManager, conversationId: string, inboundId: string,
   ): Promise<AiRequest | undefined> {
     const [s] = await m.query(
-      `SELECT s.step_key FROM conversation_sessions s, messages i
+      `SELECT s.step_key, f.definition FROM conversation_sessions s
+         JOIN flows f ON f.id = s.flow_id, messages i
         WHERE s.conversation_id = $1 AND s.status = 'active' AND i.id = $2
           AND s.agent_cursor IS NOT NULL AND s.agent_cursor < i.created_at`, [conversationId, inboundId]);
-    return s ? { kind: 'agent', stepKey: s.step_key } : undefined;
+    // El cursor sobrevive al segmento: solo cuenta si la sesión sigue en un paso del agente.
+    if (!s || (s.definition as FlowDefinition).steps[s.step_key]?.type !== 'ai_turn') return undefined;
+    return { kind: 'agent', stepKey: s.step_key };
   }
 }

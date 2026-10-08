@@ -233,6 +233,23 @@ describe('el agente de punta a punta', () => {
     expect(sent.at(-1)).toBe('Hola, soy el asistente. ¿En qué te ayudo?');
   });
 
+  it('un mensaje que llega mientras el agente cierra su segmento se atiende en el menú, no se pierde', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    opus.push(
+      async () => { await gate; return msg([use('t1', 'volver_al_menu', {})], 'tool_use'); },
+      () => msg([text('Claro, te dejo el menú.')]),
+    );
+    await say('Hola, prefiero el menú');
+    await new Promise((r) => setTimeout(r, 300));
+    await say('¿y cuánto cuesta?');
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await quiesce();
+    // Haiku no está guionado (falla → "nada"): el menú se repite para ese mensaje.
+    expect(sent.filter((t) => t === '¿Qué necesitas?')).toHaveLength(2);
+  });
+
   it('volver_al_menu termina el segmento y muestra el menú', async () => {
     opus.push(
       () => msg([use('t1', 'volver_al_menu', {})], 'tool_use'),
