@@ -62,3 +62,10 @@ export async function recentHistory(
   if (!rows.length) return null;
   return rows.map((r) => `${r.origin === 'customer' ? 'Cliente' : 'Negocio'}: ${r.body}`).join('\n');
 }
+
+/** Un turno del cliente en la transcripción (no un mensaje de resultados de herramientas). */
+export function isCustomerTurn(msg: Anthropic.Beta.Messages.BetaMessageParam): boolean {
+  if (msg.role !== 'user' || !Array.isArray(msg.content)) return false;
+  const first = msg.content[0] as { type: string; text?: string } | undefined;
+  return first?.type === 'text' && (first.text ?? '').startsWith('Ahora: ');
+}

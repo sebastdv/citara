@@ -33,6 +33,7 @@ import { AiGate } from './agent/ai-gate';
 import { AgentService } from './agent/agent.service';
 import { InterpreterService } from './agent/interpreter.service';
 import { AgentQueue } from './queues/agent.queue';
+import { AgentProcessor } from './agent/agent.processor';
 import { GoogleConnectService } from './google/google-connect.service';
 import { GoogleBusyService } from './google/google-busy.service';
 import { CalendarQueue } from './queues/calendar.queue';
@@ -163,6 +164,7 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     AgentService,
     InterpreterService,
     AgentQueue,
+    AgentProcessor,
     { provide: CLOCK, useValue: systemClock },
   ],
 })

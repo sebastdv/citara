@@ -107,6 +107,22 @@ export class MetaSender {
     return { wamid };
   }
 
+  /**
+   * Marca el entrante como leído y muestra "escribiendo..." (spec §11: latencia
+   * percibida). Se ve hasta 25 s o hasta la respuesta. VERIFICAR el formato
+   * contra la documentación de Meta al probar con un número real.
+   */
+  async markTyping(channel: ResolvedChannel, wamid: string): Promise<void> {
+    const res = await fetch(`https://graph.facebook.com/${this.graphVersion}/${channel.phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${channel.accessToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', status: 'read', message_id: wamid,
+                             typing_indicator: { type: 'text' } }),
+      signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`Meta rechazó el indicador de escritura (${res.status})`);
+  }
+
   private buildBody(to: string, content: OutboundContent): Record<string, unknown> {
     const base = { messaging_product: 'whatsapp', recipient_type: 'individual', to };
 

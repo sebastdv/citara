@@ -1,5 +1,5 @@
 import type { INestApplicationContext } from '@nestjs/common';
-import { UnrecoverableError, Worker } from 'bullmq';
+import { DelayedError, UnrecoverableError, Worker } from 'bullmq';
 import { FlowRunner } from '../flow-engine/flow-runner.service';
 import {
   INBOUND_QUEUE, rehydrateEchoJob, rehydrateInboundJob, rehydrateStatusJob,
@@ -22,6 +22,8 @@ import { CalendarPushProcessor } from '../google/calendar-push.processor';
 import { CalendarPullProcessor } from '../google/calendar-pull.processor';
 import { CalendarWatchService } from '../google/calendar-watch.service';
 import { CalendarHealthProcessor } from '../google/calendar-health.processor';
+import { AGENT_QUEUE, type AgentJob } from './agent.queue';
+import { AgentProcessor } from '../agent/agent.processor';
 
 /**
  * Arranca los consumidores de las colas sobre un contexto de Nest ya creado.
@@ -149,8 +151,29 @@ export function startWorkers(
       .catch((err: Error) => console.error(`[calendar] no se pudo programar el barrido: ${err.message}`));
   }
 
+  const agentProcessor = ctx.get(AgentProcessor);
+  // Concurrencia 5: cada job es sobre todo espera de red al modelo. El lease
+  // serializa por conversación; si otro job lo tiene, este vuelve en 1,5 s.
+  const agent = new Worker<AgentJob>(AGENT_QUEUE, async (job, token) => {
+    const r = await agentProcessor.process(job.data);
+    if (r === 'busy') {
+      await job.moveToDelayed(Date.now() + 1500, token);
+      throw new DelayedError();
+    }
+    return r;
+  }, { connection, concurrency: 5 });
+  agent.on('failed', (job, err) => {
+    console.error(`[agent] job ${job?.id} falló: ${err.message}`);
+    // Al usuario nunca se le deja en silencio (spec §7.2).
+    if (job && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      agentProcessor.failSafe(job.data).catch((e: Error) =>
+        console.error(`[agent] no se pudo degradar el job ${job.id}: ${e.message}`));
+    }
+  });
+  agent.on('error', (err) => console.error(`[agent] error del worker: ${err.message}`));
+
   return {
     close: async () => { await inbound.close(); await outbound.close(); await sync.close();
-      await remindersWorker.close(); await calendar.close(); },
+      await remindersWorker.close(); await calendar.close(); await agent.close(); },
   };
 }
