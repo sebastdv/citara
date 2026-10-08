@@ -179,7 +179,8 @@ export class FlowRunner {
       const { tool, args, stepKey } = result.pending;
       const step = flow.steps[stepKey] as Extract<FlowStep, { type: 'tool' }>;
       const out = await this.tools.run(tool, args, {
-        m, tenantId: job.tenantId, contactId: inbound.contactId, conversationId, now: this.clock.now() });
+        m, tenantId: job.tenantId, contactId: inbound.contactId, conversationId, now: this.clock.now(),
+        turnId: inboundId, actor: 'flow' });
 
       const vars = { ...result.state.vars };
       let next = out.ok ? step.on_success : step.on_error;
