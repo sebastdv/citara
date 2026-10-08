@@ -166,6 +166,24 @@ describe('el agente de punta a punta', () => {
     expect(await adminQuery(`SELECT status FROM messages WHERE origin = 'bot'`)).toEqual([{ status: 'superseded' }]);
   });
 
+  it('si el dueño contestó mientras el agente pensaba, el traspaso del agente no pisa su control', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    opus.push(
+      async () => { await gate; return msg([use('t1', 'pasar_a_humano', { motivo: 'lo pidió' })], 'tool_use'); },
+      () => msg([text('Te comunico con alguien del equipo.')]),
+    );
+    await say('Quiero hablar con una persona');
+    await new Promise((r) => setTimeout(r, 300));
+    await post(echoPayload({ wamid: 'wamid.DUENO2', to: '573001112233', text: 'Hola, aquí estoy' }));
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await quiesce();
+    expect(sent).toEqual([]);
+    expect(await adminQuery(`SELECT control, control_reason FROM conversations`))
+      .toEqual([{ control: 'human', control_reason: 'phone' }]);
+  });
+
   it('si el modelo falla, el cliente recibe la disculpa y la conversación pasa a un humano', async () => {
     opus.push(() => { throw new Error('overloaded'); });
     await say('Hola, quiero un corte');

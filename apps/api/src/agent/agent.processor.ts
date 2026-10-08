@@ -242,6 +242,10 @@ export class AgentProcessor {
     await m.query(
       `UPDATE conversation_sessions SET status = 'handoff', ${CLEAR_AGENT}, updated_at = now()
         WHERE conversation_id = $1 AND status = 'active'`, [job.conversationId]);
+    // Si el dueño ya intervino mientras el modelo pensaba, su control se respeta:
+    // pasarlo a 'flow_handoff' dejaría salir la respuesta del bot encima de la suya.
+    const control = await readControl(m, job.conversationId);
+    if (humanInControl(control, new Date()) && control.reason !== 'flow_handoff') return;
     await giveControlToHuman(m, { tenantId: job.tenantId, conversationId: job.conversationId,
                                   from: new Date(), reason: 'flow_handoff', actor });
   }
