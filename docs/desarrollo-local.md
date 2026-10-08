@@ -185,7 +185,9 @@ Lo que ya estaba agendado sube a su calendario en el siguiente minuto.
 - Cada cita nueva, movida o cancelada se refleja en «Citas» en menos de un minuto.
 - Si el dueño **borra o mueve** una cita en «Citas», Citara la cancela o la mueve (y sus
   recordatorios). Al cliente no se le escribe. Si la mueve encima de otra cita, no se aplica y
-  vuelve a su hora en Google. Todo queda en `audit_log` con `actor = 'google'`.
+  vuelve a su hora en Google. Si la borra y la recupera con "Deshacer", la cita vuelve (si la
+  franja sigue libre; si no, el evento se borra otra vez). Todo queda en `audit_log` con
+  `actor = 'google'`.
 - Los avisos de Google (`events.watch`) exigen `PUBLIC_BASE_URL` con HTTPS. Sin HTTPS (en
   desarrollo), los cambios se leen cada 15 minutos.
 

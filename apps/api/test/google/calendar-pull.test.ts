@@ -45,7 +45,7 @@ describe('CalendarPullProcessor', () => {
     const a = await book(); await synced(a.id);
     google.listEvents.mockResolvedValue(page([{ id: googleEventId(a.id), status: 'cancelled' }]));
 
-    expect(await run()).toEqual({ cancelled: 1, moved: 0, rejected: 0 });
+    expect(await run()).toEqual({ cancelled: 1, moved: 0, rejected: 0, restored: 0 });
 
     expect((await cita(a.id)).status).toBe('cancelled');
     expect(await adminQuery(`SELECT DISTINCT status FROM reminders`)).toEqual([{ status: 'cancelled' }]);
@@ -71,14 +71,14 @@ describe('CalendarPullProcessor', () => {
   it('si la cita tiene un cambio local pendiente, gana lo local', async () => {
     const a = await book();   // queda pending: todavía no subió
     google.listEvents.mockResolvedValue(page([{ id: googleEventId(a.id), status: 'cancelled' }]));
-    expect(await run()).toEqual({ cancelled: 0, moved: 0, rejected: 0 });
+    expect(await run()).toEqual({ cancelled: 0, moved: 0, rejected: 0, restored: 0 });
     expect((await cita(a.id)).status).toBe('confirmed');
   });
 
   it('lo que no es una cita de Citara se ignora', async () => {
     google.listEvents.mockResolvedValue(page([{ id: '7kvq2h0s1d2o9c3jtn4u0tqk1c', status: 'confirmed',
       start: { dateTime: '2026-09-10T15:00:00Z' }, end: { dateTime: '2026-09-10T16:00:00Z' } }]));
-    expect(await run()).toEqual({ cancelled: 0, moved: 0, rejected: 0 });
+    expect(await run()).toEqual({ cancelled: 0, moved: 0, rejected: 0, restored: 0 });
   });
 
   it('un movimiento que choca con otra cita no se aplica y la hora de Citara vuelve a Google', async () => {
@@ -91,6 +91,43 @@ describe('CalendarPullProcessor', () => {
     expect(await cita(a.id)).toMatchObject({ status: 'confirmed', s: 'pending', v: 1 });
     expect(new Date((await cita(a.id)).starts_at).toISOString()).toBe('2026-09-10T15:00:00.000Z');
     expect((await adminQuery(`SELECT action FROM audit_log`))[0].action).toBe('appointment.move_rejected');
+  });
+
+  it('si el dueño deshace el borrado en Google, la cita vuelve con sus recordatorios', async () => {
+    const a = await book(); await synced(a.id);
+    google.listEvents.mockResolvedValueOnce(page([{ id: googleEventId(a.id), status: 'cancelled' }]));
+    await run();
+    google.listEvents.mockResolvedValueOnce(page([moved(a.id, '2026-09-10T15:00:00Z', '2026-09-10T15:30:00Z')]));
+
+    expect(await run()).toMatchObject({ restored: 1 });
+
+    expect(await cita(a.id)).toMatchObject({ status: 'confirmed', s: 'synced' });
+    expect(await adminQuery(`SELECT DISTINCT status FROM reminders`)).toEqual([{ status: 'pending' }]);
+    const actions = (await adminQuery(`SELECT action FROM audit_log ORDER BY created_at`)).map((r: { action: string }) => r.action);
+    expect(actions).toEqual(['appointment.cancelled_in_google', 'appointment.restored_in_google']);
+  });
+
+  it('si al deshacer la franja ya está tomada, la cita sigue cancelada y Google vuelve a quedar igual', async () => {
+    const a = await book(); await synced(a.id);
+    google.listEvents.mockResolvedValueOnce(page([{ id: googleEventId(a.id), status: 'cancelled' }]));
+    await run();
+    await book();   // otro cliente tomó la misma franja
+    google.listEvents.mockResolvedValueOnce(page([moved(a.id, '2026-09-10T15:00:00Z', '2026-09-10T15:30:00Z')]));
+
+    expect(await run()).toMatchObject({ rejected: 1 });
+
+    expect(await cita(a.id)).toMatchObject({ status: 'cancelled', s: 'pending', v: 1 });
+  });
+
+  it('una cita cancelada en Citara cuyo evento reaparece en Google se vuelve a borrar', async () => {
+    const a = await book();
+    await inTenant((m) => buildScheduling().booking.cancel(m, a.id, contactId));
+    await synced(a.id);
+    google.listEvents.mockResolvedValue(page([moved(a.id, '2026-09-10T15:00:00Z', '2026-09-10T15:30:00Z')]));
+
+    await run();
+
+    expect(await cita(a.id)).toMatchObject({ status: 'cancelled', s: 'pending', v: 2 });
   });
 
   it('usa el syncToken guardado y recorre todas las páginas', async () => {
