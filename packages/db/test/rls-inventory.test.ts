@@ -65,6 +65,8 @@ const PRESUPUESTO: Record<string, string[]> = {
   whatsapp_channels: ['SELECT'],
   webhook_events: ['SELECT', 'INSERT'],
   onboarding_links: ['SELECT'],
+  // Google: la app guarda y renueva la conexión; reconectar actualiza, no borra.
+  google_accounts: ['SELECT', 'INSERT', 'UPDATE'],
   // Las migraciones las corre el administrador, nunca la aplicación.
   migrations: [],
 };
