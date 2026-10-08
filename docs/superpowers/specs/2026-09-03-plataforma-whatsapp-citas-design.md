@@ -1,10 +1,18 @@
 # Citara — Chatbot de agendamiento por WhatsApp, operado como servicio
 
-**Versión:** 2 (2026-10-06) · v1: 2026-09-03
+**Versión:** 2.1 (2026-10-08) · v2: 2026-10-06 · v1: 2026-09-03
 **Estado:** v2 en revisión
 **Autor:** diseño colaborativo (brainstorming)
 
 ## Registro de cambios
+
+**v2.1 (2026-10-08)** — al planear la Fase 4
+- **Google Calendar en un calendario aparte.** Citara crea un calendario «Citas · <recurso>»
+  en la cuenta de cada recurso (`calendar.app.created`) y consulta el principal solo como
+  ocupado (`calendar.freebusy`). Permisos mínimos y sin mezclar eventos (§4.1, §7.3).
+- **Cambios del dueño en Google:** se reflejan en Citara (cita y recordatorios) sin
+  escribirle al cliente final (§7.3).
+- **Cola `calendar`** propia, separada de `sync` (§3.4).
 
 **v2 (2026-10-06)**
 - **Encuadre del producto.** No es un SaaS de autoservicio: es un chatbot de agendamiento
@@ -132,7 +140,8 @@ de punta a punta levanten exactamente el mismo código que producción.
 |---|---|
 | `inbound` | Mensajes del cliente, ecos del celular, estados de entrega, `account_update` |
 | `outbound` | Un job por turno o por lote de salida |
-| `sync` | Historial y contactos de coexistencia, calendario, salud de tokens |
+| `sync` | Historial y contactos de coexistencia |
+| `calendar` | Google Calendar: subir citas, leer cambios, renovar canales de `watch`, salud de las conexiones |
 | `reminders` | Recordatorios programados |
 | `agent` | Turnos con LLM |
 
@@ -218,8 +227,9 @@ CREATE POLICY tenant_isolation ON appointments
 - `resource_services`: qué recurso presta qué servicio
 - `business_hours`, `time_off`
 - `appointments`: **fuente de verdad**
-- `google_accounts`: **una por `resource`**, con refresh token cifrado, `calendar_id`,
-  `sync_token` y estado de salud
+- `google_accounts`: **una por `resource`**, con refresh token cifrado, `calendar_id` (el
+  calendario «Citas» que crea la app), `sync_token`, canal de `watch` y estado
+  (`active` | `needs_reauth`)
 
 **Operación**
 - `audit_log`: actor, acción, negocio y motivo de cada acción del operador y de cada
@@ -408,6 +418,17 @@ canal.
 
 ### 7.3 Reconciliación con Google Calendar
 
+**Calendario aparte.** Las citas viven en un calendario secundario «Citas · <recurso>» que
+crea la app; el calendario principal de la persona solo se consulta con `freeBusy` para no
+ofrecer lo que tiene ocupado (con timeout corto y degradación a solo-Citara). Así las citas
+propias nunca cuentan dos veces como ocupado y la sincronización inversa solo ve eventos
+de citas.
+
+**Cambios del dueño.** Si borra o mueve una cita en «Citas», se cancela o se mueve en
+Citara con sus recordatorios, sin escribirle al cliente. Un cambio local pendiente gana
+sobre lo leído de Google, y un movimiento que choca con otra cita no se aplica: la hora de
+Citara vuelve a Google.
+
 **Orden.** El `INSERT` en `appointments` va primero, protegido por la restricción de
 exclusión. La cita es válida y confirmable sin que Google exista. Solo después se encola
 la creación del evento, con `google_sync_status` en la fila.
@@ -501,7 +522,7 @@ debe caer por la razón correcta).
 | **1.5. Coexistencia (núcleo)** | Modelo de datos §4 (incluida `audit_log`, porque los cambios de control se registran desde aquí), eventos §5, control §6, `superseded`. Probada con payloads de ejemplo | Por planear |
 | **2. Agenda** | Servicios, recursos, horarios, disponibilidad, `appointments` con exclusión, `tenant:apply`, recordatorios por el outbox con plantillas. Se agenda por menús, sin IA | Plan existente, a ajustar |
 | **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | A replanear (sustituye a la antigua Fase 6) |
-| **4. Google Calendar** | OAuth por recurso con enlace firmado, insert idempotente, `watch`, health check | Plan existente, a ajustar |
+| **4. Google Calendar** | OAuth por recurso con enlace firmado, insert idempotente, `watch`, health check | Implementada (2026-10-08); falta la prueba con una cuenta real |
 | **5. El agente** | `ai_turn`, `ai_fallback`, clasificador, herramientas, guardarraíles, `agent_runs`, banco de regresión | Plan existente, a ajustar |
 | **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar o devolver el control, consulta de `audit_log`, traspasos abiertos, costo de IA por cita | A replanear (reducida) |
 
