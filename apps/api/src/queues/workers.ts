@@ -16,6 +16,9 @@ import { RemindersQueue, REMINDERS_QUEUE } from './reminders.queue';
 import { OutboundQueue } from './outbound.queue';
 import { OutboundProcessor } from './outbound.processor';
 import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
+import { CALENDAR_QUEUE, CalendarQueue, type PushJob } from './calendar.queue';
+import { CalendarSweep } from '../google/calendar-sweep.service';
+import { CalendarPushProcessor } from '../google/calendar-push.processor';
 
 /**
  * Arranca los consumidores de las colas sobre un contexto de Nest ya creado.
@@ -25,7 +28,7 @@ import { OUTBOUND_QUEUE, type OutboundJob } from './outbound.queue';
  */
 export function startWorkers(
   ctx: INestApplicationContext,
-  opts: { concurrency?: number; scheduleReminders?: boolean } = {},
+  opts: { concurrency?: number; scheduleReminders?: boolean; scheduleCalendar?: boolean } = {},
 ): { close: () => Promise<void> } {
   const connection = { url: process.env.REDIS_URL };
   const concurrency = opts.concurrency ?? Number(process.env.WORKER_CONCURRENCY ?? 10);
@@ -112,8 +115,33 @@ export function startWorkers(
       .catch((err: Error) => console.error(`[reminders] no se pudo programar el barrido: ${err.message}`));
   }
 
+  const calendarQueue = ctx.get(CalendarQueue);
+  const sweep = ctx.get(CalendarSweep);
+  const push = ctx.get(CalendarPushProcessor);
+  // Concurrencia 5: cada job es una o dos llamadas a Google; el barrido solo lee.
+  const calendar = new Worker(CALENDAR_QUEUE, async (job) => {
+    switch (job.name) {
+      case 'sweep': for (const j of await sweep.run(new Date())) await calendarQueue.add(j); return;
+      case 'push': return push.process(job.data as PushJob);
+      default: throw new UnrecoverableError(`job de calendario desconocido: ${job.name}`);
+    }
+  }, { connection, concurrency: 5 });
+  calendar.on('failed', (job, err) => {
+    console.error(`[calendar] job ${job?.id} falló: ${err.message}`);
+    // Reintentos agotados: la cita queda `failed` y el chequeo diario la retoma.
+    if (job?.name === 'push' && job.attemptsMade >= (job.opts.attempts ?? 1)) {
+      push.markFailed(job.data as PushJob).catch((e: Error) =>
+        console.error(`[calendar] no se pudo marcar la cita ${(job.data as PushJob).appointmentId}: ${e.message}`));
+    }
+  });
+  calendar.on('error', (err) => console.error(`[calendar] error del worker: ${err.message}`));
+  if (opts.scheduleCalendar !== false) {
+    void calendarQueue.schedule()
+      .catch((err: Error) => console.error(`[calendar] no se pudo programar el barrido: ${err.message}`));
+  }
+
   return {
     close: async () => { await inbound.close(); await outbound.close(); await sync.close();
-      await remindersWorker.close(); },
+      await remindersWorker.close(); await calendar.close(); },
   };
 }

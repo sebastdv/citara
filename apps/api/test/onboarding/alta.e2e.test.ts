@@ -16,6 +16,7 @@ import { INBOUND_QUEUE } from '../../src/queues/inbound.queue';
 import { OUTBOUND_QUEUE } from '../../src/queues/outbound.queue';
 import { SYNC_QUEUE } from '../../src/queues/sync.queue';
 import { REMINDERS_QUEUE } from '../../src/queues/reminders.queue';
+import { CALENDAR_QUEUE } from '../../src/queues/calendar.queue';
 import { createTenant } from '../../src/cli/tenants';
 import { applyTenantConfig } from '../../src/cli/tenant-config';
 import { resetDb, adminQuery, closeHelpers } from '../helpers';
@@ -60,11 +61,11 @@ beforeAll(async () => {
   app = moduleRef.createNestApplication({ rawBody: true });
   await app.init();
   admin = createDataSource(process.env.DATABASE_ADMIN_URL!); await admin.initialize();
-  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE, REMINDERS_QUEUE]
+  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE, REMINDERS_QUEUE, CALENDAR_QUEUE]
     .map((n) => new Queue(n, { connection: { url: process.env.REDIS_URL } }));
   for (const q of queues) await q.obliterate({ force: true });
   await resetDb();
-  workers = startWorkers(app, { concurrency: 5, scheduleReminders: false });
+  workers = startWorkers(app, { concurrency: 5, scheduleReminders: false, scheduleCalendar: false });
 });
 afterAll(async () => {
   await workers.close();

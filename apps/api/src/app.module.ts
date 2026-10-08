@@ -30,6 +30,9 @@ import { GoogleClient } from './google/google.client';
 import { GoogleTokens } from './google/google-tokens.service';
 import { GoogleConnectService } from './google/google-connect.service';
 import { GoogleBusyService } from './google/google-busy.service';
+import { CalendarQueue } from './queues/calendar.queue';
+import { CalendarPushProcessor } from './google/calendar-push.processor';
+import { CalendarSweep } from './google/calendar-sweep.service';
 import { ConnectGoogleController } from './google/connect-google.controller';
 
 @Module({
@@ -105,6 +108,9 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     GoogleBusyService,
     // AvailabilityService recibe lo ocupado en Google por este token.
     { provide: EXTERNAL_BUSY, useExisting: GoogleBusyService },
+    CalendarQueue,
+    CalendarPushProcessor,
+    CalendarSweep,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
