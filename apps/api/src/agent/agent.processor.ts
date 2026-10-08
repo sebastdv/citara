@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import type Anthropic from '@anthropic-ai/sdk';
 // Imports de VALOR: parámetros del constructor de un servicio Nest.
 import { DataSource, type EntityManager } from 'typeorm';
@@ -22,6 +23,8 @@ type MessageParam = Anthropic.Beta.Messages.BetaMessageParam;
 type AiStep = Extract<FlowStep, { type: 'ai_turn' }>;
 
 const LEASE_SECONDS = 120;
+/** El dueño renueva su lease a este ritmo mientras trabaja (un turno lento pasa de los 120 s). */
+const RENEW_EVERY_MS = 30_000;
 /** Un segmento largo se corta: cada turno reenvía la transcripción entera. */
 export const MAX_SEGMENT_TURNS = 15;
 export const MENU_NOTICE = 'Ahora mismo te atiendo con el menú.';
@@ -62,12 +65,17 @@ export class AgentProcessor {
   ) {}
 
   async process(job: AgentJob): Promise<'answered' | 'nothing' | 'busy' | 'skipped'> {
-    if (!(await this.acquire(job))) return 'busy';
+    const owner = randomUUID();
+    if (!(await acquireLease(this.ds, job.tenantId, job.conversationId, owner))) return 'busy';
+    const heartbeat = setInterval(() => {
+      renewLease(this.ds, job.tenantId, job.conversationId, owner)
+        .catch((err: Error) => this.log.warn(`no se pudo renovar el lease: ${err.message}`));
+    }, RENEW_EVERY_MS);
     try {
-      return await this.run(job);
+      return await this.run({ ...job, owner });
     } finally {
-      await runInTenant(this.ds, job.tenantId, (m) => m.query(
-        `UPDATE conversations SET agent_lease_until = NULL WHERE id = $1`, [job.conversationId]));
+      clearInterval(heartbeat);
+      await releaseLease(this.ds, job.tenantId, job.conversationId, owner);
     }
   }
 
@@ -80,15 +88,7 @@ export class AgentProcessor {
     await this.enqueueTurn(job, job.inboundId);
   }
 
-  private async acquire(job: AgentJob): Promise<boolean> {
-    const [, affected] = (await runInTenant(this.ds, job.tenantId, (m) => m.query(
-      `UPDATE conversations SET agent_lease_until = now() + make_interval(secs => $2)
-        WHERE id = $1 AND (agent_lease_until IS NULL OR agent_lease_until < now())`,
-      [job.conversationId, LEASE_SECONDS]))) as [unknown[], number];
-    return affected > 0;
-  }
-
-  private async run(job: AgentJob): Promise<'answered' | 'nothing' | 'skipped'> {
+  private async run(job: LeasedJob): Promise<'answered' | 'nothing' | 'skipped'> {
     const now = this.clock.now();
     const read = await runInTenant(this.ds, job.tenantId, async (m) => {
       const control = await readControl(m, job.conversationId);
@@ -121,7 +121,7 @@ export class AgentProcessor {
     return this.converse(job, flow, session, gate, now, timezone);
   }
 
-  private async interpret(job: AgentJob, flow: FlowDefinition, session: Session, gate: AiAvailability) {
+  private async interpret(job: LeasedJob, flow: FlowDefinition, session: Session, gate: AiAvailability) {
     // Si la persona ya escribió otra cosa, ese mensaje manda: su propio turno ya corrió.
     const [newer] = await runInTenant(this.ds, job.tenantId, (m) => m.query(
       `SELECT 1 FROM messages WHERE conversation_id = $1 AND direction = 'in' AND origin = 'customer'
@@ -157,7 +157,7 @@ export class AgentProcessor {
     return 'answered' as const;
   }
 
-  private async converse(job: AgentJob, flow: FlowDefinition, session: Session, gate: AiAvailability,
+  private async converse(job: LeasedJob, flow: FlowDefinition, session: Session, gate: AiAvailability,
                          now: Date, timezone: string): Promise<'answered' | 'nothing'> {
     // Todo lo que el cliente escribió desde la última respuesta. La comparación
     // va en SQL: created_at tiene microsegundos y un Date de JS no.
@@ -218,7 +218,7 @@ export class AgentProcessor {
     return 'answered';
   }
 
-  private async leaveToMenu(job: AgentJob, session: Session, aiStep: AiStep, firstId: string, lastId: string,
+  private async leaveToMenu(job: LeasedJob, session: Session, aiStep: AiStep, firstId: string, lastId: string,
                             notices: string[]): Promise<'answered'> {
     await this.finish(job, firstId, async (m) => {
       await insertBotReplies(m, job.tenantId, job.conversationId, firstId,
@@ -250,13 +250,22 @@ export class AgentProcessor {
                                   from: new Date(), reason: 'flow_handoff', actor });
   }
 
-  private async finish(job: AgentJob, turnId: string, fn: (m: EntityManager) => Promise<AiRequest | null>) {
-    const next = await runInTenant(this.ds, job.tenantId, fn);
+  private async finish(job: LeasedJob, turnId: string, fn: (m: EntityManager) => Promise<AiRequest | null>) {
+    const next = await runInTenant(this.ds, job.tenantId, async (m) => {
+      // Si este job perdió el lease (la renovación falló), otro ya está atendiendo
+      // la conversación: no se escribe nada y BullMQ lo reintenta.
+      const [mine] = await m.query(
+        `SELECT 1 FROM conversations WHERE id = $1 AND agent_lease_owner = $2 FOR NO KEY UPDATE`,
+        [job.conversationId, job.owner]);
+      if (!mine) throw new Error(`el job del agente perdió el lease de la conversación ${job.conversationId}`);
+      return fn(m);
+    });
     // Una opción del menú que lleva a otro paso con IA se atiende en su propio job,
     // y es ESE job el que encola el envío del turno: el jobId del envío es el id
     // del turno, y un segundo encolado con el mismo id BullMQ lo descarta.
     if (next) {
-      await this.agents.add({ ...job, kind: next.kind, stepKey: next.stepKey,
+      const { owner: _owner, ...plain } = job;
+      await this.agents.add({ ...plain, kind: next.kind, stepKey: next.stepKey,
                               input: next.kind === 'interpret' ? next.input : undefined });
       return;
     }
@@ -281,6 +290,36 @@ export class AgentProcessor {
       this.log.debug(`sin indicador de escritura: ${(err as Error).message}`);
     }
   }
+}
+
+type LeasedJob = AgentJob & { owner: string };
+
+/** Toma el lease si está libre o vencido. Compare-and-set: solo un job por conversación. */
+export async function acquireLease(
+  ds: DataSource, tenantId: string, conversationId: string, owner: string, seconds = LEASE_SECONDS,
+): Promise<boolean> {
+  const [, affected] = (await runInTenant(ds, tenantId, (m) => m.query(
+    `UPDATE conversations SET agent_lease_until = now() + make_interval(secs => $2), agent_lease_owner = $3
+      WHERE id = $1 AND (agent_lease_until IS NULL OR agent_lease_until < now())`,
+    [conversationId, seconds, owner]))) as [unknown[], number];
+  return affected > 0;
+}
+
+/** Solo el dueño lo renueva. */
+export async function renewLease(
+  ds: DataSource, tenantId: string, conversationId: string, owner: string, seconds = LEASE_SECONDS,
+): Promise<boolean> {
+  const [, affected] = (await runInTenant(ds, tenantId, (m) => m.query(
+    `UPDATE conversations SET agent_lease_until = now() + make_interval(secs => $2)
+      WHERE id = $1 AND agent_lease_owner = $3`, [conversationId, seconds, owner]))) as [unknown[], number];
+  return affected > 0;
+}
+
+/** Solo el dueño lo libera: un job que lo perdió no suelta el de otro. */
+export async function releaseLease(ds: DataSource, tenantId: string, conversationId: string, owner: string) {
+  await runInTenant(ds, tenantId, (m) => m.query(
+    `UPDATE conversations SET agent_lease_until = NULL, agent_lease_owner = NULL
+      WHERE id = $1 AND agent_lease_owner = $2`, [conversationId, owner]));
 }
 
 /** Las opciones que el intérprete puede elegir: los botones, o las filas de una lista numerada. */
