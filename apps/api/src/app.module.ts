@@ -26,6 +26,8 @@ import { AccountUpdateProcessor } from './coexistence/account-update.processor';
 import { MetaOnboardingClient } from './onboarding/meta-onboarding.client';
 import { OnboardingService } from './onboarding/onboarding.service';
 import { ConnectController } from './onboarding/connect.controller';
+import { GoogleClient } from './google/google.client';
+import { GoogleTokens } from './google/google-tokens.service';
 
 @Module({
   controllers: [WhatsappController, ConnectController],
@@ -88,6 +90,14 @@ import { ConnectController } from './onboarding/connect.controller';
         process.env.META_GRAPH_VERSION ?? 'v25.0', process.env.META_APP_ID ?? '', process.env.META_APP_SECRET ?? ''),
     },
     OnboardingService,
+    {
+      // Credenciales del cliente OAuth de Citara (no de cada negocio). Los tests lo reemplazan.
+      provide: GoogleClient,
+      useFactory: () => new GoogleClient(
+        process.env.GOOGLE_CLIENT_ID ?? '', process.env.GOOGLE_CLIENT_SECRET ?? '',
+        `${(process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')}/connect/google/callback`),
+    },
+    GoogleTokens,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
