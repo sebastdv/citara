@@ -31,6 +31,7 @@ import { GoogleTokens } from './google/google-tokens.service';
 import { LLM, AnthropicProvider } from './agent/llm';
 import { AiGate } from './agent/ai-gate';
 import { AgentService } from './agent/agent.service';
+import { InterpreterService } from './agent/interpreter.service';
 import { GoogleConnectService } from './google/google-connect.service';
 import { GoogleBusyService } from './google/google-busy.service';
 import { CalendarQueue } from './queues/calendar.queue';
@@ -159,6 +160,7 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     { provide: LLM, useFactory: () => new AnthropicProvider(process.env.ANTHROPIC_API_KEY) },
     AiGate,
     AgentService,
+    InterpreterService,
     { provide: CLOCK, useValue: systemClock },
   ],
 })
