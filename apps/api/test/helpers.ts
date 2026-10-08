@@ -32,7 +32,7 @@ async function adminDs(): Promise<DataSource> {
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE google_accounts, onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
+    TRUNCATE agent_runs, agent_configs, google_accounts, onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
              flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
@@ -153,4 +153,20 @@ export async function seedGoogleAccount(
     [tenantId, resourceId, over.calendarId === undefined ? 'citas123@group.calendar.google.com' : over.calendarId,
      enc.encrypt('1//refresh-de-prueba'), over.status ?? 'active']);
   return a.id;
+}
+
+/** Una configuración del agente activa para el negocio (versión 1 por defecto). */
+export async function seedAgentConfig(
+  tenantId: string,
+  over: Partial<{ enabled: boolean; model: string; effort: string; monthlyBudgetUsd: number;
+                  instructions: string; version: number }> = {},
+): Promise<string> {
+  const ds = await adminDs();
+  const [c] = await ds.query(
+    `INSERT INTO agent_configs (tenant_id, version, enabled, model, effort, interpreter_model, instructions,
+                                monthly_budget_usd, config_hash, is_active)
+     VALUES ($1, $2, $3, $4, $5, 'claude-haiku-5-5', $6, $7, repeat('0', 64), true) RETURNING id`,
+    [tenantId, over.version ?? 1, over.enabled ?? true, over.model ?? 'claude-opus-5-5', over.effort ?? 'low',
+     over.instructions ?? '', over.monthlyBudgetUsd ?? 20]);
+  return c.id;
 }
