@@ -7,6 +7,8 @@ import type { BusyInterval } from '../scheduling/availability';
 import type { ExternalBusy } from '../scheduling/availability.service';
 
 const CACHE_MS = 60_000;
+/** Tras un fallo, no se vuelve a esperar a Google durante este tiempo. */
+const FAILURE_CACHE_MS = 60_000;
 /** Se consulta dentro del turno: el cliente espera, así que se corta pronto. */
 const TIMEOUT_MS = 3_000;
 
@@ -18,6 +20,12 @@ const TIMEOUT_MS = 3_000;
 export class GoogleBusyService implements ExternalBusy {
   private readonly log = new Logger(GoogleBusyService.name);
   private readonly cache = new Map<string, { at: number; from: number; to: number; busy: BusyInterval[] }>();
+  private readonly failures = new Map<string, number>();
+  /**
+   * Plazo TOTAL de la consulta, renovación del token y reintento incluidos: corre
+   * dentro de la transacción del turno, con la conversación bloqueada.
+   */
+  deadlineMs = TIMEOUT_MS;
 
   constructor(private readonly tokens: GoogleTokens, private readonly google: GoogleClient) {}
 
@@ -33,15 +41,30 @@ export class GoogleBusyService implements ExternalBusy {
   }
 
   private async fetch(acc: { id: string; refresh_token_encrypted: Buffer }, from: Date, to: Date, now: number) {
+    const failedAt = this.failures.get(acc.id);
+    if (failedAt !== undefined && now - failedAt < FAILURE_CACHE_MS) return [];
     try {
-      const busy = await this.tokens.withToken({ id: acc.id, refreshTokenEncrypted: acc.refresh_token_encrypted },
-        (token) => this.google.freeBusy(token, from, to, TIMEOUT_MS));
+      const busy = await withDeadline(
+        this.tokens.withToken({ id: acc.id, refreshTokenEncrypted: acc.refresh_token_encrypted },
+          (token) => this.google.freeBusy(token, from, to, this.deadlineMs)),
+        this.deadlineMs);
+      this.failures.delete(acc.id);
       this.cache.set(acc.id, { at: now, from: from.getTime(), to: to.getTime(), busy });
       return busy;
     } catch (err) {
       // D4: sin Google se agenda igual. Una cuenta revocada la detecta el chequeo de salud.
+      this.failures.set(acc.id, now);
       this.log.warn(`sin ocupado de Google para la cuenta ${acc.id}: ${(err as Error).message}`);
       return [];
     }
   }
+}
+
+/** La promesa, o un error si tarda más que `ms`. La llamada sigue en el aire, pero el turno ya no la espera. */
+function withDeadline<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Google no respondió en ${ms} ms`)), ms);
+  });
+  return Promise.race([p, deadline]).finally(() => clearTimeout(timer));
 }

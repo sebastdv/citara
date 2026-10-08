@@ -60,4 +60,27 @@ describe('GoogleBusyService', () => {
     google.freeBusy.mockRejectedValue(new GoogleApiError('consulta de ocupado: fallo de red (TimeoutError)', null));
     expect(await busy()).toEqual([]);
   });
+
+  it('un plazo total corta la espera aunque la renovación del token se cuelgue', async () => {
+    // Se consulta dentro del turno, con la conversación bloqueada: ni la
+    // renovación del token (10 s) ni un reintento pueden alargarlo.
+    await seedGoogleAccount(tenantId, resourceId);
+    const hung = { withToken: () => new Promise(() => {}) };
+    service = new GoogleBusyService(hung as never, google as never);
+    service.deadlineMs = 50;
+    const t0 = Date.now();
+    expect(await busy()).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(1000);
+  });
+
+  it('tras un fallo no vuelve a preguntarle a Google durante un minuto', async () => {
+    await seedGoogleAccount(tenantId, resourceId);
+    google.freeBusy.mockRejectedValue(new GoogleApiError('consulta de ocupado: Google respondió 503', 503));
+    const t0 = Date.now();
+    await busy(FROM, TO, t0);
+    await busy(FROM, TO, t0 + 30_000);
+    expect(google.freeBusy).toHaveBeenCalledTimes(1);
+    await busy(FROM, TO, t0 + 61_000);
+    expect(google.freeBusy).toHaveBeenCalledTimes(2);
+  });
 });

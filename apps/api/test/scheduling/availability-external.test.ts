@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vites
 import { DataSource, type EntityManager } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { runInTenant } from '../../src/tenancy/tenant-context';
-import { resetDb, seedChannel, seedCatalog, seedHours, closeHelpers, buildScheduling } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, seedHours, addResource, closeHelpers, buildScheduling } from '../helpers';
 
 let app: DataSource;
 let tenantId: string, serviceId: string, resourceId: string;
@@ -49,5 +49,18 @@ describe('disponibilidad con lo ocupado fuera de Citara', () => {
     const slots = await inTenant((m) => availability.slotsFor(m, tenantId,
       { serviceId, resourceId: null, ...JUEVES, now: AHORA }));
     expect(slots.map((s) => s.start.toISOString())).toContain('2026-09-10T15:00:00.000Z');
+  });
+
+  it('consulta a Google por todos los recursos a la vez, no uno tras otro', async () => {
+    await addResource(tenantId, 'pedro', 'Pedro', serviceId);
+    const waiting: (() => void)[] = [];
+    const slow = { busyFor: vi.fn(() => new Promise<[]>((r) => { waiting.push(() => r([])); })) };
+    const { availability } = buildScheduling(undefined, slow);
+    const done = inTenant((m) => availability.slotsFor(m, tenantId, { serviceId, resourceId: null, ...JUEVES, now: AHORA }));
+
+    await new Promise((r) => setTimeout(r, 100));
+    expect(slow.busyFor).toHaveBeenCalledTimes(2);
+    waiting.forEach((resolve) => resolve());
+    await done;
   });
 });
