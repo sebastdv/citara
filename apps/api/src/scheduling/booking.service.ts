@@ -69,7 +69,8 @@ export class BookingService {
   async cancel(m: EntityManager, appointmentId: string, contactId: string): Promise<Appointment> {
     // La propiedad se verifica en SQL (R3). Con UPDATE, TypeORM devuelve [filas, conteo].
     const [rows] = (await m.query(
-      `UPDATE appointments SET status = 'cancelled', updated_at = now()
+      `UPDATE appointments SET status = 'cancelled', updated_at = now(),
+              google_sync_status = 'pending', google_sync_version = google_sync_version + 1
         WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
         RETURNING ${COLUMNS}`, [appointmentId, contactId])) as [Row[], number];
     if (!rows[0]) throw new NotFoundError('esa cita');
@@ -101,7 +102,8 @@ export class BookingService {
       // Con UPDATE, TypeORM devuelve [filas, conteo]. La exclusión compara
       // contra las OTRAS filas, así que actualizar en sitio no choca consigo.
       const [rows] = (await m.query(
-        `UPDATE appointments SET starts_at = $3, ends_at = $4, updated_at = now()
+        `UPDATE appointments SET starts_at = $3, ends_at = $4, updated_at = now(),
+                google_sync_status = 'pending', google_sync_version = google_sync_version + 1
           WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
           RETURNING ${COLUMNS}`, [appointmentId, contactId, newStart, endsAt])) as [Row[], number];
       if (!rows[0]) throw new NotFoundError('esa cita');

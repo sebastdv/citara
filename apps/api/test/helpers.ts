@@ -7,7 +7,7 @@ import type { INestApplication } from '@nestjs/common';
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../src/crypto/encryption.service';
 import { AppModule } from '../src/app.module';
-import { AvailabilityService } from '../src/scheduling/availability.service';
+import { AvailabilityService, type ExternalBusy } from '../src/scheduling/availability.service';
 import { BookingService } from '../src/scheduling/booking.service';
 import { ToolRegistry } from '../src/scheduling/tools/registry';
 import { RemindersService } from '../src/scheduling/reminders.service';
@@ -32,7 +32,7 @@ async function adminDs(): Promise<DataSource> {
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
+    TRUNCATE google_accounts, onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
              flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
@@ -129,12 +129,28 @@ export async function seedContact(tenantId: string, waId = '573001112233'): Prom
   return c.id;
 }
 
-/** Los servicios de agenda, cableados como en AppModule. Sin estado ni conexiones. */
-export function buildScheduling(ds?: DataSource) {
-  const availability = new AvailabilityService();
+/** Los servicios de agenda, cableados como en AppModule. `external` reemplaza a Google. */
+export function buildScheduling(ds?: DataSource, external?: ExternalBusy) {
+  const availability = new AvailabilityService(external);
   // El barrido necesita la DataSource; programar y cancelar usan el EntityManager del llamador.
   const reminders = new RemindersService(ds as DataSource);
   const booking = new BookingService(availability, reminders);
   const tools = new ToolRegistry(availability, booking);
   return { availability, reminders, booking, tools };
+}
+
+/** Una cuenta de Google conectada para el recurso, con un refresh token de prueba cifrado. */
+export async function seedGoogleAccount(
+  tenantId: string, resourceId: string,
+  over: { status?: string; calendarId?: string | null } = {},
+): Promise<string> {
+  const ds = await adminDs();
+  const enc = new EncryptionService(process.env.DB_ENCRYPTION_KEY!);
+  await enc.ready();
+  const [a] = await ds.query(
+    `INSERT INTO google_accounts (tenant_id, resource_id, email, calendar_id, refresh_token_encrypted, status)
+     VALUES ($1, $2, 'maria@gmail.com', $3, $4, $5) RETURNING id`,
+    [tenantId, resourceId, over.calendarId === undefined ? 'citas123@group.calendar.google.com' : over.calendarId,
+     enc.encrypt('1//refresh-de-prueba'), over.status ?? 'active']);
+  return a.id;
 }

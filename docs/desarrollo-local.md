@@ -151,6 +151,51 @@ Otros comandos: `pnpm tenant link <slug>` (enlace nuevo si se perdió o venció;
 `pnpm tenant suspend <slug>` / `pnpm tenant resume <slug>` (suspender corta al instante, incluso lo que
 ya estaba en cola, y anula los enlaces sin usar).
 
+## Google Calendar (Fase 4)
+
+Cada recurso (la estilista, el médico) conecta su propia cuenta de Google. Citara crea en
+ella un calendario **«Citas · <recurso>»** donde pone las citas, y consulta su calendario
+principal solo para saber cuándo está ocupado (sin leer el contenido de sus eventos).
+
+### Antes del primer cliente (una sola vez)
+
+1. Proyecto en Google Cloud con la **Calendar API** habilitada.
+2. Pantalla de consentimiento OAuth con política de privacidad en el dominio propio, y los
+   scopes `openid`, `email`, `calendar.app.created` y `calendar.freebusy`. Son sensibles:
+   hay que solicitar la verificación (con video). Mientras tanto, en modo *testing* y con
+   usuarios de prueba, **el acceso vence a los 7 días** y hay que reconectar.
+3. Cliente OAuth de tipo "Aplicación web" con la URI de redirección
+   `${PUBLIC_BASE_URL}/connect/google/callback`. Su ID y su secreto van en `GOOGLE_CLIENT_ID`
+   y `GOOGLE_CLIENT_SECRET`.
+
+### Cada recurso
+
+```bash
+pnpm tenant google peluqueria-ana maria
+```
+
+Imprime un enlace de un solo uso para ese recurso (vence en 72 h; uno nuevo anula el
+anterior). La persona lo abre, entra con su cuenta de Google y acepta **todos** los permisos.
+Lo que ya estaba agendado sube a su calendario en el siguiente minuto.
+
+### Qué pasa después
+
+- Lo ocupado en su calendario principal deja de ofrecerse por WhatsApp. Si Google no
+  responde, se ofrecen las franjas según Citara: el sistema sigue agendando.
+- Cada cita nueva, movida o cancelada se refleja en «Citas» en menos de un minuto.
+- Si el dueño **borra o mueve** una cita en «Citas», Citara la cancela o la mueve (y sus
+  recordatorios). Al cliente no se le escribe. Si la mueve encima de otra cita, no se aplica y
+  vuelve a su hora en Google. Si la borra y la recupera con "Deshacer", la cita vuelve (si la
+  franja sigue libre; si no, el evento se borra otra vez). Todo queda en `audit_log` con
+  `actor = 'google'`.
+- Los avisos de Google (`events.watch`) exigen `PUBLIC_BASE_URL` con HTTPS. Sin HTTPS (en
+  desarrollo), los cambios se leen cada 15 minutos.
+
+`pnpm tenant list` muestra, por recurso, `ok`, `RECONECTAR` (revocó el acceso o venció el
+modo *testing*: mándale `pnpm tenant google ...` de nuevo), `SIN CALENDARIO` (lo borró; se
+recrea solo en menos de una hora), `avisos FALLAN` o `avisos VENCIDOS`, y cuántas citas
+faltan por subir.
+
 ## Coexistencia (Fase 1.5)
 
 Con un número conectado en coexistencia (ver el alta, arriba), en la app de

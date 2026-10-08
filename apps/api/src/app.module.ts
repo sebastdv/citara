@@ -12,7 +12,7 @@ import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
 import { SyncQueue } from './queues/sync.queue';
-import { AvailabilityService } from './scheduling/availability.service';
+import { AvailabilityService, EXTERNAL_BUSY } from './scheduling/availability.service';
 import { BookingService } from './scheduling/booking.service';
 import { ToolRegistry } from './scheduling/tools/registry';
 import { CLOCK, systemClock } from './clock';
@@ -26,9 +26,21 @@ import { AccountUpdateProcessor } from './coexistence/account-update.processor';
 import { MetaOnboardingClient } from './onboarding/meta-onboarding.client';
 import { OnboardingService } from './onboarding/onboarding.service';
 import { ConnectController } from './onboarding/connect.controller';
+import { GoogleClient } from './google/google.client';
+import { GoogleTokens } from './google/google-tokens.service';
+import { GoogleConnectService } from './google/google-connect.service';
+import { GoogleBusyService } from './google/google-busy.service';
+import { CalendarQueue } from './queues/calendar.queue';
+import { CalendarPushProcessor } from './google/calendar-push.processor';
+import { CalendarSweep } from './google/calendar-sweep.service';
+import { CalendarPullProcessor } from './google/calendar-pull.processor';
+import { CalendarWatchService } from './google/calendar-watch.service';
+import { CalendarHealthProcessor } from './google/calendar-health.processor';
+import { GoogleWebhookController } from './google/google-webhook.controller';
+import { ConnectGoogleController } from './google/connect-google.controller';
 
 @Module({
-  controllers: [WhatsappController, ConnectController],
+  controllers: [WhatsappController, ConnectController, ConnectGoogleController, GoogleWebhookController],
   providers: [
     {
       // DataSource de la APLICACIÓN (DATABASE_URL, rol citara_app) — nunca el
@@ -88,6 +100,24 @@ import { ConnectController } from './onboarding/connect.controller';
         process.env.META_GRAPH_VERSION ?? 'v25.0', process.env.META_APP_ID ?? '', process.env.META_APP_SECRET ?? ''),
     },
     OnboardingService,
+    {
+      // Credenciales del cliente OAuth de Citara (no de cada negocio). Los tests lo reemplazan.
+      provide: GoogleClient,
+      useFactory: () => new GoogleClient(
+        process.env.GOOGLE_CLIENT_ID ?? '', process.env.GOOGLE_CLIENT_SECRET ?? '',
+        `${(process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')}/connect/google/callback`),
+    },
+    GoogleTokens,
+    GoogleConnectService,
+    GoogleBusyService,
+    // AvailabilityService recibe lo ocupado en Google por este token.
+    { provide: EXTERNAL_BUSY, useExisting: GoogleBusyService },
+    CalendarQueue,
+    CalendarPushProcessor,
+    CalendarSweep,
+    CalendarPullProcessor,
+    CalendarWatchService,
+    CalendarHealthProcessor,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
