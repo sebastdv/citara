@@ -122,6 +122,25 @@ describe('GET /connect/google/callback', () => {
       .toEqual([{ status: 'active', calendar_id: 'citas-nuevo@group.calendar.google.com' }]);
   });
 
+  it('al reconectar, lo que quedó pendiente con la cuenta caída vuelve a encolarse con una versión nueva', async () => {
+    // El jobId de la subida es push-<cita>-<versión>, y BullMQ ignora un id que ya
+    // completó: sin versión nueva, lo pendiente esperaría horas tras reconectar.
+    await callback().expect(200);
+    const contactId = await seedContact(tenantId);
+    const [{ id }] = await adminQuery(
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, google_sync_version)
+       SELECT $1, $2, s.id, $3, now() + interval '2 days', now() + interval '2 days 30 minutes', 4
+         FROM services s RETURNING id`, [tenantId, resourceId, contactId]);
+    await adminQuery(`UPDATE google_accounts SET status = 'needs_reauth'`);
+    token = await createLink(admin, tenantId, 'google', { resourceId });
+    google.calendarExists.mockResolvedValue(true);
+
+    await callback().expect(200);
+
+    expect(await adminQuery(`SELECT google_sync_status, google_sync_version FROM appointments WHERE id = $1`, [id]))
+      .toEqual([{ google_sync_status: 'pending', google_sync_version: 5 }]);
+  });
+
   it('si crear el calendario falla, la conexión queda y el calendario se crea después', async () => {
     google.createCalendar.mockRejectedValue(new GoogleApiError('creación del calendario: Google respondió 503', 503));
     await callback().expect(200);

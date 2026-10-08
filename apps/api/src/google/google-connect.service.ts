@@ -60,6 +60,14 @@ export class GoogleConnectService {
                  status = 'active', calendar_id = EXCLUDED.calendar_id, last_checked_at = now(), updated_at = now()
            RETURNING id`,
           [link.tenantId, resourceId, ex.email, reuse ? previous : null, this.enc.encrypt(ex.refreshToken!)]);
+        // Con el calendario reutilizado, lo que quedó sin subir mientras la cuenta
+        // estuvo caída se vuelve a encolar con versión nueva: el jobId
+        // push-<cita>-<versión> anterior ya completó (se saltó) y BullMQ ignoraría
+        // el mismo id durante horas. Con calendario nuevo lo hace attachNewCalendar.
+        if (reuse) await m.query(
+          `UPDATE appointments SET google_sync_status = 'pending', google_sync_version = google_sync_version + 1
+            WHERE resource_id = $1 AND google_sync_status IN ('pending', 'failed') AND ends_at > now()`,
+          [resourceId]);
         await recordAudit(m, { tenantId: link.tenantId, actor: 'onboarding', action: 'calendar.connected',
                                details: { resourceId, email: ex.email } });
         return acc.id as string;
