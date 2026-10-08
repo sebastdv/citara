@@ -57,4 +57,12 @@ describe('AiGate', () => {
     const [r] = await adminQuery(`SELECT usd, tools, latency_ms FROM agent_runs`);
     expect([Number(r.usd), r.tools, r.latency_ms]).toEqual([0.014, ['consultar_servicios'], 1200]);
   });
+
+  it('un modelo sin precio (p. ej. el de un fallback) se cobra al precio del pedido, sin romper el turno', async () => {
+    const usd = await recordRun(app, { tenantId, conversationId: null, inboundMessageId: null, kind: 'agent',
+      model: 'claude-respaldo-desconocido', priceModel: 'claude-opus-5-5', configVersion: 1,
+      usage: { input_tokens: 1000, output_tokens: 500 }, latencyMs: 10, tools: [], stopReason: 'end_turn', error: null });
+    expect(usd).toBeCloseTo(0.014, 9);
+    expect(await adminQuery(`SELECT model FROM agent_runs`)).toEqual([{ model: 'claude-respaldo-desconocido' }]);
+  });
 });

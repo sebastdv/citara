@@ -35,7 +35,8 @@ export class InterpreterService {
     const started = Date.now();
     const record = (res: { model?: string; usage?: never; stop_reason?: string } | null, error: string | null) =>
       recordRun(this.ds, { tenantId: i.tenantId, conversationId: i.conversationId, inboundMessageId: i.turnId,
-        kind: 'interpret', model: res?.model ?? i.model, configVersion: i.configVersion, usage: res?.usage ?? null,
+        kind: 'interpret', model: res?.model ?? i.model, priceModel: i.model, configVersion: i.configVersion,
+        usage: res?.usage ?? null,
         latencyMs: Date.now() - started, tools: [], stopReason: res?.stop_reason ?? null, error });
     let res;
     try {

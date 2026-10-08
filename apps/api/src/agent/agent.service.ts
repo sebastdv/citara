@@ -103,7 +103,7 @@ export class AgentService {
     return recordRun(this.ds, {
       tenantId: i.tenantId, conversationId: i.conversationId, inboundMessageId: i.turnId, kind: 'agent',
       // El modelo que respondió (con un fallback puede ser otro), o el pedido si falló.
-      model: res?.model ?? i.segment.model, configVersion: i.segment.configVersion,
+      model: res?.model ?? i.segment.model, priceModel: i.segment.model, configVersion: i.segment.configVersion,
       usage: res?.usage ?? null, latencyMs, tools, stopReason, error,
     });
   }
