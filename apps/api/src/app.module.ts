@@ -32,6 +32,7 @@ import { LLM, AnthropicProvider } from './agent/llm';
 import { AiGate } from './agent/ai-gate';
 import { AgentService } from './agent/agent.service';
 import { InterpreterService } from './agent/interpreter.service';
+import { AgentQueue } from './queues/agent.queue';
 import { GoogleConnectService } from './google/google-connect.service';
 import { GoogleBusyService } from './google/google-busy.service';
 import { CalendarQueue } from './queues/calendar.queue';
@@ -161,6 +162,7 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     AiGate,
     AgentService,
     InterpreterService,
+    AgentQueue,
     { provide: CLOCK, useValue: systemClock },
   ],
 })
