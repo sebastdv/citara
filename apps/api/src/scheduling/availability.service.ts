@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 import { DateTime } from 'luxon';
 import { computeSlots, type BusyInterval, type HoursBlock } from './availability';
@@ -7,6 +7,13 @@ import { NotFoundError } from './scheduling.errors';
 export interface BookingSettings { timezone: string; minLeadMin: number; horizonDays: number; granularityMin: number }
 export interface ResourceSlot { start: Date; end: Date; resourceId: string; resourceName: string }
 export type Bookability = 'ok' | 'too_soon' | 'too_far' | 'outside_hours' | 'taken';
+
+/** Lo ocupado fuera de Citara (el calendario principal en Google). Nunca lanza. */
+export interface ExternalBusy {
+  busyFor(m: EntityManager, resourceId: string, from: Date, to: Date): Promise<BusyInterval[]>;
+}
+export const EXTERNAL_BUSY = Symbol('EXTERNAL_BUSY');
+const NO_EXTERNAL_BUSY: ExternalBusy = { busyFor: async () => [] };
 
 const HOURS_COLUMNS = `weekday, to_char(start_time, 'HH24:MI') AS start, to_char(end_time, 'HH24:MI') AS "end"`;
 
@@ -18,6 +25,8 @@ const HOURS_COLUMNS = `weekday, to_char(start_time, 'HH24:MI') AS start, to_char
  */
 @Injectable()
 export class AvailabilityService {
+  constructor(@Optional() @Inject(EXTERNAL_BUSY) private readonly external: ExternalBusy = NO_EXTERNAL_BUSY) {}
+
   async settings(m: EntityManager, tenantId: string): Promise<BookingSettings> {
     const [t] = await m.query(
       `SELECT timezone, min_lead_minutes, horizon_days, slot_granularity_minutes FROM tenants WHERE id = $1`,
@@ -70,11 +79,15 @@ export class AvailabilityService {
         [r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin),
          q.excludeAppointmentId ?? null]);
 
+      // Lo ocupado en Google se suma a lo de Citara. Con el mismo margen del buffer.
+      const external = q.ignoreBusy ? [] : await this.external.busyFor(
+        m, r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin));
+
       for (const slot of computeSlots({
         from: q.from, to: q.to, now: q.now, timezone: settings.timezone,
         durationMin: service.duration_min, bufferMin: service.buffer_min,
         granularityMin: settings.granularityMin, minLeadMin: settings.minLeadMin,
-        horizonDays: settings.horizonDays, hours, busy,
+        horizonDays: settings.horizonDays, hours, busy: [...busy, ...external],
       })) {
         out.push({ ...slot, resourceId: r.id, resourceName: r.name });
       }

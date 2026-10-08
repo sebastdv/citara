@@ -7,7 +7,7 @@ import type { INestApplication } from '@nestjs/common';
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../src/crypto/encryption.service';
 import { AppModule } from '../src/app.module';
-import { AvailabilityService } from '../src/scheduling/availability.service';
+import { AvailabilityService, type ExternalBusy } from '../src/scheduling/availability.service';
 import { BookingService } from '../src/scheduling/booking.service';
 import { ToolRegistry } from '../src/scheduling/tools/registry';
 import { RemindersService } from '../src/scheduling/reminders.service';
@@ -129,9 +129,9 @@ export async function seedContact(tenantId: string, waId = '573001112233'): Prom
   return c.id;
 }
 
-/** Los servicios de agenda, cableados como en AppModule. Sin estado ni conexiones. */
-export function buildScheduling(ds?: DataSource) {
-  const availability = new AvailabilityService();
+/** Los servicios de agenda, cableados como en AppModule. `external` reemplaza a Google. */
+export function buildScheduling(ds?: DataSource, external?: ExternalBusy) {
+  const availability = new AvailabilityService(external);
   // El barrido necesita la DataSource; programar y cancelar usan el EntityManager del llamador.
   const reminders = new RemindersService(ds as DataSource);
   const booking = new BookingService(availability, reminders);

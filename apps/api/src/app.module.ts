@@ -12,7 +12,7 @@ import { MetaSender } from './whatsapp/sender';
 import { WhatsappController } from './whatsapp/whatsapp.controller';
 import { FlowRunner } from './flow-engine/flow-runner.service';
 import { SyncQueue } from './queues/sync.queue';
-import { AvailabilityService } from './scheduling/availability.service';
+import { AvailabilityService, EXTERNAL_BUSY } from './scheduling/availability.service';
 import { BookingService } from './scheduling/booking.service';
 import { ToolRegistry } from './scheduling/tools/registry';
 import { CLOCK, systemClock } from './clock';
@@ -29,6 +29,7 @@ import { ConnectController } from './onboarding/connect.controller';
 import { GoogleClient } from './google/google.client';
 import { GoogleTokens } from './google/google-tokens.service';
 import { GoogleConnectService } from './google/google-connect.service';
+import { GoogleBusyService } from './google/google-busy.service';
 import { ConnectGoogleController } from './google/connect-google.controller';
 
 @Module({
@@ -101,6 +102,9 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     },
     GoogleTokens,
     GoogleConnectService,
+    GoogleBusyService,
+    // AvailabilityService recibe lo ocupado en Google por este token.
+    { provide: EXTERNAL_BUSY, useExisting: GoogleBusyService },
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con
