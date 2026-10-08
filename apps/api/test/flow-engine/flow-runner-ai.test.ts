@@ -87,4 +87,24 @@ describe('FlowRunner con IA', () => {
     await runner.handle({ tenantId, channelId, message: msg });
     expect(derived.map((j) => j.inboundId)).toEqual([derived[0].inboundId, derived[0].inboundId]);
   });
+
+  it('si encolar la interpretación falló, la reentrega del mismo mensaje la vuelve a derivar', async () => {
+    await seedAgentConfig(tenantId);
+    await say('Hola');
+    const msg = { wamid: 'wamid.DUPI', phoneNumberId: '106540', wabaId: '102290', from: '573001112233',
+      profileName: 'Ana', type: 'text', text: 'quiero ver mis citas', mediaId: null, timestamp: new Date(), raw: {} } as InboundMessage;
+    await runner.handle({ tenantId, channelId, message: msg });
+    await runner.handle({ tenantId, channelId, message: msg });
+    expect(derived.map((j) => [j.kind, j.input])).toEqual([
+      ['interpret', 'quiero ver mis citas'], ['interpret', 'quiero ver mis citas']]);
+  });
+
+  it('una reentrega de un mensaje del menú ya respondido no deriva nada', async () => {
+    await seedAgentConfig(tenantId);
+    const msg = { wamid: 'wamid.DUPH', phoneNumberId: '106540', wabaId: '102290', from: '573001112233',
+      profileName: 'Ana', type: 'text', text: 'Hola', mediaId: null, timestamp: new Date(), raw: {} } as InboundMessage;
+    await runner.handle({ tenantId, channelId, message: msg });
+    await runner.handle({ tenantId, channelId, message: msg });
+    expect(derived).toEqual([]);
+  });
 });

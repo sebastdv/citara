@@ -89,7 +89,7 @@ export class FlowRunner {
         const [{ n }] = await m.query(
           `SELECT count(*)::int AS n FROM messages
             WHERE reply_to_id = $1 AND status = 'pending'`, [inbound.messageId]);
-        const ai = await this.unansweredAgentTurn(m, inbound.conversationId, inbound.messageId);
+        const ai = await this.unansweredAiTurn(m, inbound.conversationId, inbound.messageId, job.message.text);
         return { ...inbound, outbound: [] as OutboundContent[], pending: n > 0, ai };
       }
 
@@ -290,17 +290,32 @@ export class FlowRunner {
     };
   }
 
-  /** Un entrante del agente sin responder: su sesión sigue en el segmento y el cursor no lo pasó. */
-  private async unansweredAgentTurn(
-    m: EntityManager, conversationId: string, inboundId: string,
+  /**
+   * Un turno derivado a la IA que nadie atendió (encolar falló tras el commit):
+   * - del agente: la sesión sigue en un paso ai_turn y el cursor no lo pasó;
+   * - de interpretación: la sesión sigue en un menú, el mensaje no tiene
+   *   salientes y es el último que escribió el cliente.
+   */
+  private async unansweredAiTurn(
+    m: EntityManager, conversationId: string, inboundId: string, text: string | null,
   ): Promise<AiRequest | undefined> {
+    // Sin cola del agente (el arnés, un despliegue sin IA) no hay a quién derivar.
+    if (!this.agents) return undefined;
     const [s] = await m.query(
-      `SELECT s.step_key, f.definition FROM conversation_sessions s
-         JOIN flows f ON f.id = s.flow_id, messages i
-        WHERE s.conversation_id = $1 AND s.status = 'active' AND i.id = $2
-          AND s.agent_cursor IS NOT NULL AND s.agent_cursor < i.created_at`, [conversationId, inboundId]);
+      `SELECT s.step_key, f.definition,
+              (s.agent_cursor IS NOT NULL AND s.agent_cursor < i.created_at) AS after_cursor,
+              NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to_id = i.id) AS unanswered,
+              NOT EXISTS (SELECT 1 FROM messages n WHERE n.conversation_id = i.conversation_id
+                            AND n.direction = 'in' AND n.origin = 'customer' AND n.created_at > i.created_at) AS latest
+         FROM conversation_sessions s JOIN flows f ON f.id = s.flow_id, messages i
+        WHERE s.conversation_id = $1 AND s.status = 'active' AND i.id = $2`, [conversationId, inboundId]);
+    if (!s) return undefined;
+    const step = (s.definition as FlowDefinition).steps[s.step_key];
     // El cursor sobrevive al segmento: solo cuenta si la sesión sigue en un paso del agente.
-    if (!s || (s.definition as FlowDefinition).steps[s.step_key]?.type !== 'ai_turn') return undefined;
-    return { kind: 'agent', stepKey: s.step_key };
+    if (step?.type === 'ai_turn' && s.after_cursor) return { kind: 'agent', stepKey: s.step_key };
+    if ((step?.type === 'choice' || step?.type === 'pick') && s.unanswered && s.latest && text?.trim()) {
+      return { kind: 'interpret', stepKey: s.step_key, input: text };
+    }
+    return undefined;
   }
 }
