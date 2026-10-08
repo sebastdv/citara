@@ -74,3 +74,21 @@ describe('CalendarSweep: lecturas y canales', () => {
     process.env.PUBLIC_BASE_URL = 'http://localhost:3000';
   });
 });
+
+describe('CalendarSweep: chequeo de salud', () => {
+  const health = async () => (await sweep.run(AHORA)).filter((j) => j.name === 'health');
+
+  it('una vez al día por cuenta, y cada hora si le falta el calendario', async () => {
+    const acc = await seedGoogleAccount(tenantId, resourceId);
+    expect(await health()).toEqual([expect.objectContaining({ data: { tenantId, accountId: acc } })]);
+    await adminQuery(`UPDATE google_accounts SET last_checked_at = $1`, [new Date(AHORA.getTime() - 3_600_000)]);
+    expect(await health()).toEqual([]);
+    await adminQuery(`UPDATE google_accounts SET calendar_id = NULL`);
+    expect((await health())[0].jobId).toMatch(/-h\d+$/);
+  });
+
+  it('una cuenta que hay que reconectar no se chequea', async () => {
+    await seedGoogleAccount(tenantId, resourceId, { status: 'needs_reauth' });
+    expect(await health()).toEqual([]);
+  });
+});

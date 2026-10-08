@@ -35,6 +35,7 @@ import { CalendarPushProcessor } from './google/calendar-push.processor';
 import { CalendarSweep } from './google/calendar-sweep.service';
 import { CalendarPullProcessor } from './google/calendar-pull.processor';
 import { CalendarWatchService } from './google/calendar-watch.service';
+import { CalendarHealthProcessor } from './google/calendar-health.processor';
 import { GoogleWebhookController } from './google/google-webhook.controller';
 import { ConnectGoogleController } from './google/connect-google.controller';
 
@@ -116,6 +117,7 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     CalendarSweep,
     CalendarPullProcessor,
     CalendarWatchService,
+    CalendarHealthProcessor,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con

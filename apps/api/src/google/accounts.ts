@@ -65,6 +65,7 @@ export async function markCalendarMissing(
 export async function attachNewCalendar(
   ds: DataSource, google: GoogleClient, accessToken: string,
   a: { id: string; tenantId: string; resourceId: string; resourceName: string; timezone: string },
+  now = new Date(),
 ): Promise<string> {
   const calendarId = await google.createCalendar(accessToken, `Citas · ${a.resourceName}`, a.timezone);
   await runInTenant(ds, a.tenantId, async (m) => {
@@ -76,7 +77,7 @@ export async function attachNewCalendar(
         WHERE id = $1`, [a.id, calendarId]);
     await m.query(
       `UPDATE appointments SET google_sync_status = 'pending', google_sync_version = google_sync_version + 1
-        WHERE resource_id = $1 AND status = 'confirmed' AND ends_at > now()`, [a.resourceId]);
+        WHERE resource_id = $1 AND status = 'confirmed' AND ends_at > $2`, [a.resourceId, now]);
     await recordAudit(m, { tenantId: a.tenantId, actor: 'google', action: 'calendar.created',
                            details: { resourceId: a.resourceId } });
   });

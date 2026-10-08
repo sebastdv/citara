@@ -6,7 +6,7 @@ import { peekLink } from '../../src/onboarding/links';
 import { connectUrl, createTenant, googleConnectUrl, listTenants, newGoogleLink, newLink, setSuspended, syncTenant }
   from '../../src/cli/tenants';
 import { applyTenantConfig } from '../../src/cli/tenant-config';
-import { resetDb, adminQuery, closeHelpers } from '../helpers';
+import { resetDb, adminQuery, closeHelpers, seedGoogleAccount } from '../helpers';
 
 let admin: DataSource, app: DataSource, enc: EncryptionService;
 
@@ -122,5 +122,16 @@ describe('CLI del operador', () => {
     const google = await newGoogleLink(admin, 'nuevo', 'maria');
     await newLink(admin, 'nuevo');
     expect(await peekLink(admin, google, 'google')).not.toBeNull();
+  });
+
+  it('la lista muestra la conexión de Google de cada recurso', async () => {
+    const { tenantId } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await applyTenantConfig(admin, agenda);
+    const [r] = await adminQuery(`SELECT id FROM resources WHERE key = 'maria'`);
+    await seedGoogleAccount(tenantId, r.id, { status: 'needs_reauth' });
+
+    const [t] = await listTenants(admin);
+    expect(t.google).toEqual([{ resource: 'maria', status: 'needs_reauth', calendar: true,
+                                watchExpiresAt: null, watchError: false, unsynced: 0 }]);
   });
 });

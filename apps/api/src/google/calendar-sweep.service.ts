@@ -52,6 +52,17 @@ export class CalendarSweep {
         out.push({ name: 'watch', data: { tenantId, accountId: a.id }, jobId: `watch-${a.id}-${hourBucket}` });
       }
     }
+    // Salud: una vez al día; cada hora si a la cuenta le falta el calendario.
+    const checks: { id: string; last_checked_at: Date | null; calendar_id: string | null }[] = await m.query(
+      `SELECT id, last_checked_at, calendar_id FROM google_accounts WHERE status = 'active'`);
+    const dayBucket = now.toISOString().slice(0, 10).replace(/-/g, '');
+    for (const c of checks) {
+      if (!c.calendar_id) {
+        out.push({ name: 'health', data: { tenantId, accountId: c.id }, jobId: `health-${c.id}-h${hourBucket}` });
+      } else if (!c.last_checked_at || now.getTime() - new Date(c.last_checked_at).getTime() >= 86_400_000) {
+        out.push({ name: 'health', data: { tenantId, accountId: c.id }, jobId: `health-${c.id}-${dayBucket}` });
+      }
+    }
     return out;
   }
 }

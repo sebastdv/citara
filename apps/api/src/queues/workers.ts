@@ -21,6 +21,7 @@ import { CalendarSweep } from '../google/calendar-sweep.service';
 import { CalendarPushProcessor } from '../google/calendar-push.processor';
 import { CalendarPullProcessor } from '../google/calendar-pull.processor';
 import { CalendarWatchService } from '../google/calendar-watch.service';
+import { CalendarHealthProcessor } from '../google/calendar-health.processor';
 
 /**
  * Arranca los consumidores de las colas sobre un contexto de Nest ya creado.
@@ -122,6 +123,7 @@ export function startWorkers(
   const push = ctx.get(CalendarPushProcessor);
   const pull = ctx.get(CalendarPullProcessor);
   const watch = ctx.get(CalendarWatchService);
+  const health = ctx.get(CalendarHealthProcessor);
   // Concurrencia 5: cada job es una o dos llamadas a Google; el barrido solo lee.
   const calendar = new Worker(CALENDAR_QUEUE, async (job) => {
     switch (job.name) {
@@ -129,6 +131,7 @@ export function startWorkers(
       case 'push': return push.process(job.data as PushJob);
       case 'pull': return pull.process(job.data as AccountJob);
       case 'watch': return watch.renew(job.data as AccountJob);
+      case 'health': return health.process(job.data as AccountJob);
       default: throw new UnrecoverableError(`job de calendario desconocido: ${job.name}`);
     }
   }, { connection, concurrency: 5 });

@@ -28,6 +28,17 @@ const fmtSyncs = (syncs: TenantSummary['syncs']) => {
     .map((k) => `${SYNC_NAMES[k]} ${syncs[k] === 'failed' ? 'FALLÓ' : 'ok'}`);
   return `sync ${parts.length ? parts.join(', ') : '—'}`;
 };
+/** "google maria ok · pedro RECONECTAR (3 sin subir)": lo que el operador tiene que mirar. */
+const fmtGoogle = (google: TenantSummary['google']) => {
+  if (!google.length) return 'google —';
+  return 'google ' + google.map((g) => {
+    const state = g.status === 'needs_reauth' ? 'RECONECTAR' : !g.calendar ? 'SIN CALENDARIO' : 'ok';
+    const watch = g.watchError ? ' avisos FALLAN'
+      : g.watchExpiresAt && new Date(g.watchExpiresAt) < new Date() ? ' avisos VENCIDOS' : '';
+    const unsynced = g.unsynced ? ` (${g.unsynced} sin subir)` : '';
+    return `${g.resource} ${state}${watch}${unsynced}`;
+  }).join(' · ');
+};
 
 async function main() {
   const [cmd, ...args] = process.argv.slice(2);
@@ -61,7 +72,7 @@ async function main() {
       case 'list':
         for (const t of await listTenants(admin)) {
           console.log([t.slug, t.status, t.phone ?? 'sin número', t.mode ?? '—', t.channelStatus ?? '—',
-                       `historial ${t.historySync ?? '—'}`, fmtSyncs(t.syncs), `último eco ${fmt(t.lastPhoneEcho)}`,
+                       `historial ${t.historySync ?? '—'}`, fmtSyncs(t.syncs), fmtGoogle(t.google), `último eco ${fmt(t.lastPhoneEcho)}`,
                        `último cliente ${fmt(t.lastCustomer)}`].join(' | '));
         }
         break;
