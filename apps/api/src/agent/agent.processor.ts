@@ -252,10 +252,15 @@ export class AgentProcessor {
 
   private async finish(job: AgentJob, turnId: string, fn: (m: EntityManager) => Promise<AiRequest | null>) {
     const next = await runInTenant(this.ds, job.tenantId, fn);
+    // Una opción del menú que lleva a otro paso con IA se atiende en su propio job,
+    // y es ESE job el que encola el envío del turno: el jobId del envío es el id
+    // del turno, y un segundo encolado con el mismo id BullMQ lo descarta.
+    if (next) {
+      await this.agents.add({ ...job, kind: next.kind, stepKey: next.stepKey,
+                              input: next.kind === 'interpret' ? next.input : undefined });
+      return;
+    }
     await this.enqueueTurn(job, turnId);
-    // Una opción del menú que lleva a otro paso con IA se atiende en su propio job.
-    if (next) await this.agents.add({ ...job, kind: next.kind, stepKey: next.stepKey,
-                                      input: next.kind === 'interpret' ? next.input : undefined });
   }
 
   private enqueueTurn(job: AgentJob, turnId: string) {

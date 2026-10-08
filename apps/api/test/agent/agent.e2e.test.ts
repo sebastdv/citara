@@ -218,6 +218,21 @@ describe('el agente de punta a punta', () => {
     expect(JSON.stringify(opusCalls[1].system)).toBe(JSON.stringify(opusCalls[0].system));
   });
 
+  it('una opción del menú que lleva al asistente: su respuesta sí sale', async () => {
+    // Flujo propio con un botón hacia el ai_turn (lo permite el YAML).
+    const flow = structuredClone(AGENDA_FLOW);
+    const menu = flow.steps.menu as { buttons: { id: string; title: string; next: string }[] };
+    menu.buttons.push({ id: 'asistente', title: 'Hablar con el asistente', next: 'asistente' });
+    await adminQuery(`UPDATE flows SET definition = $1`, [JSON.stringify(flow)]);
+    await say('Hola');
+    await quiesce();
+    haiku = msg([text(JSON.stringify({ action: 'option', option_id: 'asistente' }))], 'end_turn', 'claude-haiku-5-5');
+    opus.push(() => msg([text('Hola, soy el asistente. ¿En qué te ayudo?')]));
+    await say('quiero hablar con el asistente');
+    await quiesce();
+    expect(sent.at(-1)).toBe('Hola, soy el asistente. ¿En qué te ayudo?');
+  });
+
   it('volver_al_menu termina el segmento y muestra el menú', async () => {
     opus.push(
       () => msg([use('t1', 'volver_al_menu', {})], 'tool_use'),
