@@ -4,6 +4,8 @@ import type { DataSource } from 'typeorm';
 import type { FlowDefinition } from '@citara/shared';
 import { AGENDA_FLOW } from '../flow-engine/flows/agenda';
 import { agentYamlSchema, applyAgentConfig } from '../agent/agent-config';
+import { assertBenchPassed } from '../agent/bench/results';
+import { recordAudit } from '../audit/audit';
 import { setDefaultFlow } from './provision';
 
 const DAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 } as const;
@@ -63,7 +65,9 @@ export const tenantConfigSchema = z.object({
 export type TenantConfig = z.infer<typeof tenantConfigSchema>;
 
 /** Aplica la configuración en UNA transacción, con la conexión admin. */
-export async function applyTenantConfig(admin: DataSource, raw: unknown) {
+export async function applyTenantConfig(
+  admin: DataSource, raw: unknown, opts: { skipBench?: boolean; benchDir?: string } = {},
+) {
   const parsed = tenantConfigSchema.safeParse(raw);
   if (!parsed.success) {
     throw new Error(parsed.error.issues.map((i) => `${i.path.join('.') || '(raíz)'}: ${i.message}`).join('\n'));
@@ -147,7 +151,13 @@ export async function applyTenantConfig(admin: DataSource, raw: unknown) {
     // Si al negocio en alta solo le faltaba la agenda, aquí queda activo.
     const [{ status }] = await m.query(`SELECT refresh_tenant_status($1) AS status`, [tenantId]);
 
-    const agent = c.agent ? await applyAgentConfig(m, tenantId, c.agent) : null;
+    const benchDir = opts.benchDir ?? process.env.BENCH_RESULTS_DIR ?? 'bench-results';
+    const agent = c.agent ? await applyAgentConfig(m, tenantId, c.agent,
+      opts.skipBench ? undefined : (hash) => assertBenchPassed(benchDir, hash)) : null;
+    if (agent?.behaviorChanged && opts.skipBench) {
+      await recordAudit(m, { tenantId, actor: 'operator', action: 'agent.published_without_bench',
+                             details: { version: agent.version, hash: agent.hash } });
+    }
 
     return { tenantId, services: c.services.length, resources: c.resources.length,
              hours, timeOff: c.time_off.length, flow, status: status as string, agent };

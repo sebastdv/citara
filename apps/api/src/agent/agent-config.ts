@@ -25,7 +25,11 @@ export function configHash(c: AgentYaml): string {
 }
 
 /** Dentro de la transacción admin de tenant:apply. Crea versión solo si algo cambió. */
-export async function applyAgentConfig(m: EntityManager, tenantId: string, c: AgentYaml) {
+export async function applyAgentConfig(
+  m: EntityManager, tenantId: string, c: AgentYaml,
+  /** Se llama antes de publicar un cambio de comportamiento: la compuerta del banco. */
+  verify?: (hash: string) => void,
+) {
   const hash = configHash(c);
   const [active] = await m.query(
     `SELECT version, enabled, monthly_budget_usd, config_hash FROM agent_configs
@@ -34,6 +38,7 @@ export async function applyAgentConfig(m: EntityManager, tenantId: string, c: Ag
       && Number(active.monthly_budget_usd) === c.monthly_budget_usd) {
     return { version: active.version as number, changed: false, behaviorChanged: false, hash };
   }
+  if (active?.config_hash !== hash) verify?.(hash);
   const [{ next }] = await m.query(
     `SELECT COALESCE(max(version), 0) + 1 AS next FROM agent_configs WHERE tenant_id = $1`, [tenantId]);
   await m.query(`UPDATE agent_configs SET is_active = false WHERE tenant_id = $1 AND is_active`, [tenantId]);

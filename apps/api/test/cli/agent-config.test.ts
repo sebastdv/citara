@@ -2,7 +2,11 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { applyTenantConfig } from '../../src/cli/tenant-config';
-import { listAgentVersions, rollbackAgentConfig } from '../../src/agent/agent-config';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { agentYamlSchema, listAgentVersions, rollbackAgentConfig } from '../../src/agent/agent-config';
+import { writeBenchResult } from '../../src/agent/bench/runner';
 import { listTenants } from '../../src/cli/tenants';
 import { resetDb, seedChannel, adminQuery, closeHelpers } from '../helpers';
 
@@ -15,7 +19,8 @@ const base = {
   resources: [{ key: 'maria', name: 'María', services: ['corte'] }],
   hours: [{ days: ['mon', 'tue', 'wed', 'thu', 'fri'], start: '09:00', end: '18:00' }],
 };
-const apply = (agent: Record<string, unknown> | undefined) => applyTenantConfig(admin, { ...base, ...(agent ? { agent } : {}) });
+const apply = (agent: Record<string, unknown> | undefined) =>
+  applyTenantConfig(admin, { ...base, ...(agent ? { agent } : {}) }, { skipBench: true });
 const versions = () => listAgentVersions(admin, 'salon');
 
 beforeAll(async () => { admin = createDataSource(process.env.DATABASE_ADMIN_URL!); await admin.initialize(); });
@@ -64,5 +69,20 @@ describe('configuración del agente desde el YAML', () => {
     await adminQuery(`INSERT INTO agent_runs (tenant_id, kind, model, usd) VALUES ($1, 'agent', 'claude-opus-5-5', 2.5)`, [tenantId]);
     const [t] = await listTenants(admin);
     expect(t.ai).toEqual({ enabled: true, model: 'claude-opus-5-5', spentUsd: 2.5, budgetUsd: 10 });
+  });
+
+  it('sin el banco aprobado, un cambio de comportamiento no se publica', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'banco-'));
+    await expect(applyTenantConfig(admin, { ...base, agent: {} }, { benchDir: dir })).rejects.toThrow(/pnpm agent:bench/);
+    writeBenchResult(dir, agentYamlSchema.parse({}), [{ name: 'x', passed: true, reason: null, usd: 0, replies: [] }]);
+    expect((await applyTenantConfig(admin, { ...base, agent: {} }, { benchDir: dir })).agent).toMatchObject({ version: 1 });
+    // Cambiar solo el tope no cambia el comportamiento: no pide banco.
+    expect((await applyTenantConfig(admin, { ...base, agent: { monthly_budget_usd: 5 } }, { benchDir: dir })).agent)
+      .toMatchObject({ version: 2 });
+  });
+
+  it('--sin-banco publica igual y queda auditado', async () => {
+    await applyTenantConfig(admin, { ...base, agent: {} }, { skipBench: true });
+    expect((await adminQuery(`SELECT action FROM audit_log WHERE action = 'agent.published_without_bench'`))).toHaveLength(1);
   });
 });

@@ -1,10 +1,16 @@
 # Citara — Chatbot de agendamiento por WhatsApp, operado como servicio
 
-**Versión:** 2.1 (2026-10-08) · v2: 2026-10-06 · v1: 2026-09-03
+**Versión:** 2.2 (2026-10-09) · v2.1: 2026-10-08 · v2: 2026-10-06 · v1: 2026-09-03
 **Estado:** v2 en revisión
 **Autor:** diseño colaborativo (brainstorming)
 
 ## Registro de cambios
+
+**v2.2 (2026-10-09)** — al planear la Fase 5
+- **Modelos fijados:** `claude-opus-5-5` para el agente por defecto y `claude-haiku-5-5` para interpretar respuestas que no encajan en un menú (§3.2).
+- **La IA corre fuera de la transacción del turno:** el turno deriva a la cola `agent`; un lease por conversación serializa al agente y lo que el cliente escribe mientras tanto se junta en una sola respuesta (§3.6).
+- **Confirmación en dos turnos para el agente:** agendar, mover y cancelar exigen un token emitido en un turno anterior del cliente, que vence en 30 minutos (§6).
+- **Tope mensual por negocio:** al alcanzarlo, menús hasta el mes siguiente (§11). **Banco de regresión** como compuerta de publicación de cambios del agente (§9).
 
 **v2.1 (2026-10-08)** — al planear la Fase 4
 - **Google Calendar en un calendario aparte.** Citara crea un calendario «Citas · <recurso>»
@@ -111,11 +117,9 @@ de punta a punta levanten exactamente el mismo código que producción.
 - **Colas:** BullMQ
 - **Panel del operador:** páginas renderizadas por la propia API, con refresco periódico.
   Sin app de frontend aparte y sin WebSocket en v1.
-- **LLM:** API de Anthropic, detrás de una interfaz `LlmProvider`. El modelo es un campo
-  de `agent_configs`. **Los ids, precios y restricciones de la API se fijan al planear la
-  fase del agente**, contra la documentación vigente (hoy existen `claude-opus-5-5`,
-  `claude-sonnet-5-5` y `claude-haiku-4-5`). Bajar de modelo es una decisión sobre datos
-  del banco de regresión, no un valor por defecto de la arquitectura.
+- **LLM:** API de Anthropic, detrás de una interfaz `LlmProvider`. Agente: `claude-opus-5-5` (effort `low` por
+  defecto); intérprete: `claude-haiku-5-5`. Ambos son campos de `agent_configs`; bajar de modelo es una
+  decisión sobre datos del banco de regresión.
 - **Calendario:** Google Calendar API v3, OAuth 2.0 por recurso
 - **Despliegue:** VPS con Docker Compose, Caddy para TLS
 
@@ -168,7 +172,7 @@ Meta Cloud API
                         ├─ ControlPolicy: ¿manda el humano? → no responde
                         └─ FlowEngine.advance() ─┬─ paso determinista
                                                  ├─ tool → Scheduling (misma transacción)
-                                                 └─ ai_turn → Agent.respond()
+                                                 └─ ai_turn / interpretación → cola agent (fuera de la transacción)
                         └─ salientes en `pending` (outbox)
                                         │ commit
                                    cola outbound (un job por turno)
@@ -523,7 +527,7 @@ debe caer por la razón correcta).
 | **2. Agenda** | Servicios, recursos, horarios, disponibilidad, `appointments` con exclusión, `tenant:apply`, recordatorios por el outbox con plantillas. Se agenda por menús, sin IA | Plan existente, a ajustar |
 | **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | A replanear (sustituye a la antigua Fase 6) |
 | **4. Google Calendar** | OAuth por recurso con enlace firmado, insert idempotente, `watch`, health check | Implementada (2026-10-08); falta la prueba con una cuenta real |
-| **5. El agente** | `ai_turn`, `ai_fallback`, clasificador, herramientas, guardarraíles, `agent_runs`, banco de regresión | Plan existente, a ajustar |
+| **5. El agente** | `ai_turn`, `ai_fallback`, clasificador, herramientas, guardarraíles, `agent_runs`, banco de regresión | Implementada (2026-10-09); falta correr el banco con el modelo real |
 | **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar o devolver el control, consulta de `audit_log`, traspasos abiertos, costo de IA por cita | A replanear (reducida) |
 
 **Punto de corte con valor:** al terminar la Fase 3 hay un cliente real con su número en
