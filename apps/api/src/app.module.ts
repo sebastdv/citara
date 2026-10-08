@@ -28,9 +28,11 @@ import { OnboardingService } from './onboarding/onboarding.service';
 import { ConnectController } from './onboarding/connect.controller';
 import { GoogleClient } from './google/google.client';
 import { GoogleTokens } from './google/google-tokens.service';
+import { GoogleConnectService } from './google/google-connect.service';
+import { ConnectGoogleController } from './google/connect-google.controller';
 
 @Module({
-  controllers: [WhatsappController, ConnectController],
+  controllers: [WhatsappController, ConnectController, ConnectGoogleController],
   providers: [
     {
       // DataSource de la APLICACIÓN (DATABASE_URL, rol citara_app) — nunca el
@@ -98,6 +100,7 @@ import { GoogleTokens } from './google/google-tokens.service';
         `${(process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')}/connect/google/callback`),
     },
     GoogleTokens,
+    GoogleConnectService,
     OutboundQueue,
     SyncQueue,
     // Mismo motivo que InboundProcessor arriba: apps/worker lo resuelve con

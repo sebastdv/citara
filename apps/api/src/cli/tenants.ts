@@ -3,13 +3,16 @@ import { DateTime } from 'luxon';
 import type { EncryptionService } from '../crypto/encryption.service';
 import type { MetaOnboardingClient, SyncType } from '../onboarding/meta-onboarding.client';
 import { OnboardingService } from '../onboarding/onboarding.service';
-import { createLink } from '../onboarding/links';
+import { createLink, type LinkPurpose } from '../onboarding/links';
 import { recordAudit } from '../audit/audit';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{1,62}$/;
 
-export const connectUrl = (token: string) =>
-  `${(process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '')}/connect/whatsapp?t=${token}`;
+const publicBase = () => (process.env.PUBLIC_BASE_URL ?? 'http://localhost:3000').replace(/\/$/, '');
+
+export const connectUrl = (token: string) => `${publicBase()}/connect/whatsapp?t=${token}`;
+
+export const googleConnectUrl = (token: string) => `${publicBase()}/connect/google?t=${token}`;
 
 async function tenantBySlug(admin: DataSource, slug: string): Promise<string> {
   const [t] = await admin.query(`SELECT id FROM tenants WHERE slug = $1`, [slug]);
@@ -33,17 +36,32 @@ export async function createTenant(admin: DataSource, input: { slug: string; nam
   });
 }
 
-/** Vence ya los enlaces sin usar del negocio: uno perdido pudo llegarle a otra persona. */
-const revokeLinks = (m: EntityManager, tenantId: string) => m.query(
-  `UPDATE onboarding_links SET expires_at = now()
-    WHERE tenant_id = $1 AND used_at IS NULL AND expires_at > now()`, [tenantId]);
+/** Vence ya los enlaces sin usar: uno perdido pudo llegarle a otra persona. */
+const revokeLinks = (m: EntityManager, tenantId: string, scope: { purpose?: LinkPurpose; resourceId?: string } = {}) =>
+  m.query(
+    `UPDATE onboarding_links SET expires_at = now()
+      WHERE tenant_id = $1 AND used_at IS NULL AND expires_at > now()
+        AND ($2::varchar IS NULL OR purpose = $2) AND ($3::uuid IS NULL OR resource_id = $3)`,
+    [tenantId, scope.purpose ?? null, scope.resourceId ?? null]);
 
 /** Un enlace nuevo reemplaza a los anteriores: solo el último sirve. */
 export async function newLink(admin: DataSource, slug: string): Promise<string> {
   const tenantId = await tenantBySlug(admin, slug);
   return admin.transaction(async (m) => {
-    await revokeLinks(m, tenantId);
+    await revokeLinks(m, tenantId, { purpose: 'whatsapp' });
     return createLink(m, tenantId, 'whatsapp');
+  });
+}
+
+/** Enlace para que un recurso conecte su Google Calendar. Reemplaza al anterior de ese recurso. */
+export async function newGoogleLink(admin: DataSource, slug: string, resourceKey: string): Promise<string> {
+  const tenantId = await tenantBySlug(admin, slug);
+  return admin.transaction(async (m) => {
+    const [r] = await m.query(
+      `SELECT id FROM resources WHERE tenant_id = $1 AND key = $2 AND active`, [tenantId, resourceKey]);
+    if (!r) throw new Error(`'${slug}' no tiene el recurso activo '${resourceKey}'`);
+    await revokeLinks(m, tenantId, { purpose: 'google', resourceId: r.id });
+    return createLink(m, tenantId, 'google', { resourceId: r.id });
   });
 }
 

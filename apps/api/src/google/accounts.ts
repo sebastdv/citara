@@ -1,5 +1,7 @@
-import type { EntityManager } from 'typeorm';
+import type { DataSource, EntityManager } from 'typeorm';
 import { recordAudit } from '../audit/audit';
+import { runInTenant } from '../tenancy/tenant-context';
+import type { GoogleClient } from './google.client';
 import type { GoogleAccountRef } from './google-tokens.service';
 
 export interface GoogleAccount extends GoogleAccountRef {
@@ -54,4 +56,29 @@ export async function markCalendarMissing(
     await recordAudit(m, { tenantId: a.tenantId, actor: 'google', action: 'calendar.missing',
                            details: { resourceId: a.resourceId } });
   }
+}
+
+/**
+ * Crea el calendario "Citas · <recurso>" y deja todo lo futuro pendiente de
+ * subir a él. Sirve al conectar y cuando el dueño borró el calendario.
+ */
+export async function attachNewCalendar(
+  ds: DataSource, google: GoogleClient, accessToken: string,
+  a: { id: string; tenantId: string; resourceId: string; resourceName: string; timezone: string },
+): Promise<string> {
+  const calendarId = await google.createCalendar(accessToken, `Citas · ${a.resourceName}`, a.timezone);
+  await runInTenant(ds, a.tenantId, async (m) => {
+    // Calendario nuevo: lo leído y los canales del anterior ya no aplican.
+    await m.query(
+      `UPDATE google_accounts SET calendar_id = $2, sync_token = NULL, watch_channel_id = NULL,
+              watch_resource_id = NULL, watch_token_hash = NULL, watch_expires_at = NULL,
+              watch_error = NULL, updated_at = now()
+        WHERE id = $1`, [a.id, calendarId]);
+    await m.query(
+      `UPDATE appointments SET google_sync_status = 'pending', google_sync_version = google_sync_version + 1
+        WHERE resource_id = $1 AND status = 'confirmed' AND ends_at > now()`, [a.resourceId]);
+    await recordAudit(m, { tenantId: a.tenantId, actor: 'google', action: 'calendar.created',
+                           details: { resourceId: a.resourceId } });
+  });
+  return calendarId;
 }

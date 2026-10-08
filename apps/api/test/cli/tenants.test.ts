@@ -3,7 +3,8 @@ import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../../src/crypto/encryption.service';
 import { peekLink } from '../../src/onboarding/links';
-import { connectUrl, createTenant, listTenants, newLink, setSuspended, syncTenant } from '../../src/cli/tenants';
+import { connectUrl, createTenant, googleConnectUrl, listTenants, newGoogleLink, newLink, setSuspended, syncTenant }
+  from '../../src/cli/tenants';
 import { applyTenantConfig } from '../../src/cli/tenant-config';
 import { resetDb, adminQuery, closeHelpers } from '../helpers';
 
@@ -100,5 +101,26 @@ describe('CLI del operador', () => {
     const r = await syncTenant(admin, enc, meta as never, 'nuevo');
     expect(r).toEqual({ smb_app_state_sync: 'requested', history: 'requested' });
     expect(meta.requestSync).toHaveBeenCalledWith('106999', 'EAAG-negocio', 'history');
+  });
+
+  it('un enlace de Google es por recurso y reemplaza solo al anterior de ese recurso', async () => {
+    const { tenantId, token: whatsapp } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await applyTenantConfig(admin, agenda);
+    const primero = await newGoogleLink(admin, 'nuevo', 'maria');
+    const segundo = await newGoogleLink(admin, 'nuevo', 'maria');
+
+    expect(await peekLink(admin, primero, 'google')).toBeNull();
+    expect(await peekLink(admin, segundo, 'google')).toMatchObject({ tenantId, resourceName: 'María' });
+    expect(await peekLink(app, whatsapp, 'whatsapp')).not.toBeNull();
+    expect(googleConnectUrl(segundo)).toMatch(/\/connect\/google\?t=/);
+    await expect(newGoogleLink(admin, 'nuevo', 'pedro')).rejects.toThrow(/pedro/);
+  });
+
+  it('un enlace nuevo de WhatsApp no anula los de Google', async () => {
+    await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await applyTenantConfig(admin, agenda);
+    const google = await newGoogleLink(admin, 'nuevo', 'maria');
+    await newLink(admin, 'nuevo');
+    expect(await peekLink(admin, google, 'google')).not.toBeNull();
   });
 });

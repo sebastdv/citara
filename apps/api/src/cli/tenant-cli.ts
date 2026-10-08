@@ -6,14 +6,18 @@ config();
 import { createDataSource } from '@citara/db';
 import { EncryptionService } from '../crypto/encryption.service';
 import { MetaOnboardingClient } from '../onboarding/meta-onboarding.client';
-import { connectUrl, createTenant, listTenants, newLink, setSuspended, syncTenant, type TenantSummary } from './tenants';
+import {
+  connectUrl, createTenant, googleConnectUrl, listTenants, newGoogleLink, newLink, setSuspended, syncTenant,
+  type TenantSummary,
+} from './tenants';
 
 const USAGE = `Uso:
   pnpm tenant create <slug> "<nombre>" [zona]   crea el negocio en alta e imprime el enlace de conexión
   pnpm tenant link <slug>                         imprime un enlace de conexión nuevo
   pnpm tenant suspend <slug> | resume <slug>      saca o devuelve el negocio a operación
   pnpm tenant list                                estado de los negocios y sus canales
-  pnpm tenant sync <slug>                         reintenta la sincronización de historial y contactos`;
+  pnpm tenant sync <slug>                         reintenta la sincronización de historial y contactos
+  pnpm tenant google <slug> <recurso>             imprime el enlace para conectar el Google Calendar de un recurso`;
 
 const fmt = (d: Date | null) => (d ? new Date(d).toISOString().replace('T', ' ').slice(0, 16) : '—');
 const SYNC_NAMES = { smb_app_state_sync: 'contactos', history: 'historial' } as const;
@@ -43,6 +47,11 @@ async function main() {
       case 'link':
         if (!args[0]) throw new Error(USAGE);
         console.log(connectUrl(await newLink(admin, args[0])));
+        break;
+      case 'google':
+        if (!args[0] || !args[1]) throw new Error(USAGE);
+        console.log(`Enlace para el calendario de '${args[1]}' (vence en 72 h, un solo uso):\n` +
+                    googleConnectUrl(await newGoogleLink(admin, args[0], args[1])));
         break;
       case 'suspend':
       case 'resume':
