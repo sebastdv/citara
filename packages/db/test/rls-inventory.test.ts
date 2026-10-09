@@ -67,6 +67,9 @@ const PRESUPUESTO: Record<string, string[]> = {
   onboarding_links: ['SELECT'],
   // Google: la app guarda y renueva la conexión; reconectar actualiza, no borra.
   google_accounts: ['SELECT', 'INSERT', 'UPDATE'],
+  // IA: la configuración es del operador; las corridas solo se agregan.
+  agent_configs: ['SELECT'],
+  agent_runs: ['SELECT', 'INSERT'],
   // Las migraciones las corre el administrador, nunca la aplicación.
   migrations: [],
 };

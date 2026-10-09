@@ -17,6 +17,7 @@ import { RemindersService } from '../../src/scheduling/reminders.service';
 import { SYNC_QUEUE } from '../../src/queues/sync.queue';
 import { REMINDERS_QUEUE } from '../../src/queues/reminders.queue';
 import { CALENDAR_QUEUE } from '../../src/queues/calendar.queue';
+import { AGENT_QUEUE } from '../../src/queues/agent.queue';
 import { echoPayload, historyPayload } from '../whatsapp/fixtures/coexistence';
 import { DEMO_FLOW } from '../../src/cli/provision';
 import { resetDb, seedChannel, seedFlow, seedCatalog, seedHours, adminQuery, closeHelpers } from '../helpers';
@@ -92,7 +93,7 @@ beforeAll(async () => {
     .compile();
   app = moduleRef.createNestApplication({ rawBody: true });
   await app.init();
-  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE, REMINDERS_QUEUE, CALENDAR_QUEUE].map(
+  queues = [INBOUND_QUEUE, OUTBOUND_QUEUE, SYNC_QUEUE, REMINDERS_QUEUE, CALENDAR_QUEUE, AGENT_QUEUE].map(
     (name) => new Queue(name, { connection: { url: process.env.REDIS_URL } }));
 });
 

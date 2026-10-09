@@ -11,9 +11,9 @@ let s: ReturnType<typeof buildScheduling>;
 let tenantId: string, contactId: string, conversationId: string, serviceId: string, resourceId: string;
 
 const AHORA = new Date('2026-09-08T12:00:00Z');
-const run = (name: string, args: unknown, who = contactId): Promise<ToolResult> =>
+const run = (name: string, args: unknown, who = contactId, extra: Partial<ToolContext> = {}): Promise<ToolResult> =>
   runInTenant(app, tenantId, (m) =>
-    s.tools.run(name, args, { m, tenantId, contactId: who, conversationId, now: AHORA } satisfies ToolContext));
+    s.tools.run(name, args, { m, tenantId, contactId: who, conversationId, now: AHORA, ...extra } satisfies ToolContext));
 const agendar = () => run('agendar_cita', {
   servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' });
 
@@ -193,5 +193,57 @@ describe('confirmación en dos tiempos (R4)', () => {
     const { confirmationToken } = await run('reprogramar_cita', args);
     const res = await run('reprogramar_cita', { ...args, confirmation_token: confirmationToken });
     expect(res.data).toMatchObject({ inicio: '2026-09-10T11:00:00-05:00' });
+  });
+});
+
+describe('confirmaciones atadas al turno (R4)', () => {
+  const T1 = '11111111-1111-4111-8111-111111111111', T2 = '22222222-2222-4222-8222-222222222222';
+  const MAS_31_MIN = new Date(AHORA.getTime() + 31 * 60_000);
+
+  it('el token de cancelar no vale en el mismo turno que lo emitió', async () => {
+    const cita = await agendar();
+    const pedido = await run('cancelar_cita', { cita_id: (cita.data as { id: string }).id }, contactId,
+      { turnId: T1, actor: 'agent' });
+    const mismoTurno = await run('cancelar_cita', { cita_id: (cita.data as { id: string }).id,
+      confirmation_token: pedido.confirmationToken }, contactId, { turnId: T1, actor: 'agent' });
+    expect(mismoTurno).toMatchObject({ ok: false });
+    const siguiente = await run('cancelar_cita', { cita_id: (cita.data as { id: string }).id,
+      confirmation_token: pedido.confirmationToken }, contactId, { turnId: T2, actor: 'agent' });
+    expect(siguiente).toMatchObject({ ok: true, data: { cancelada: true } });
+  });
+
+  it('un token vence a los 30 minutos', async () => {
+    const cita = await agendar();
+    const id = (cita.data as { id: string }).id;
+    const pedido = await run('cancelar_cita', { cita_id: id }, contactId, { turnId: T1, actor: 'agent' });
+    const tarde = await runInTenant(app, tenantId, (m) => s.tools.run('cancelar_cita',
+      { cita_id: id, confirmation_token: pedido.confirmationToken },
+      { m, tenantId, contactId, conversationId, now: MAS_31_MIN, turnId: T2, actor: 'agent' }));
+    expect(tarde).toMatchObject({ ok: false, error: expect.stringMatching(/venci/) });
+  });
+
+  it('el agente no puede agendar sin confirmación en un turno posterior', async () => {
+    const args = { servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' };
+    const pedido = await run('agendar_cita', args, contactId, { turnId: T1, actor: 'agent' });
+    expect(pedido).toMatchObject({ ok: true, data: { requiere_confirmacion: true } });
+    expect(await adminQuery(`SELECT id FROM appointments`)).toEqual([]);
+
+    const otraHora = await run('agendar_cita', { ...args, inicio: '2026-09-10T11:00:00-05:00',
+      confirmation_token: pedido.confirmationToken }, contactId, { turnId: T2, actor: 'agent' });
+    expect(otraHora).toMatchObject({ ok: false });
+    const confirmado = await run('agendar_cita', { ...args, confirmation_token: pedido.confirmationToken },
+      contactId, { turnId: T2, actor: 'agent' });
+    expect(confirmado).toMatchObject({ ok: true, data: { estado: 'confirmed' } });
+  });
+
+  it('pedir confirmación de una hora ocupada ya avisa que está ocupada', async () => {
+    await agendar();
+    const args = { servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Luis' };
+    expect(await run('agendar_cita', args, contactId, { turnId: T1, actor: 'agent' }))
+      .toMatchObject({ ok: false, error: 'Esa franja ya está ocupada' });
+  });
+
+  it('los menús siguen agendando directo, sin token', async () => {
+    expect(await agendar()).toMatchObject({ ok: true, data: { estado: 'confirmed' } });
   });
 });

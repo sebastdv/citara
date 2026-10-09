@@ -196,6 +196,32 @@ modo *testing*: mándale `pnpm tenant google ...` de nuevo), `SIN CALENDARIO` (l
 recrea solo en menos de una hora), `avisos FALLAN` o `avisos VENCIDOS`, y cuántas citas
 faltan por subir.
 
+## El agente (Fase 5)
+
+La conversación es **híbrida**: los menús siguen siendo el camino principal y la IA entra en tres casos.
+- **Un primer mensaje con contenido** ("quiero un corte mañana a las 3") va al agente; un "Hola" abre el menú.
+- **Una respuesta que no encaja en un menú** ("quiero ver mis citas porfa") la interpreta `claude-haiku-5-5` y el flujo sigue por la opción. Si es un pedido que el menú no cubre, pasa al agente.
+- **El agente** (`claude-opus-5-5` por defecto) conversa con las herramientas de la agenda. Agendar, mover y cancelar se confirman **siempre** con un "sí" del cliente en un mensaje posterior. Sale con el menú o pasando la conversación a un humano.
+
+### Encenderlo para un negocio
+
+1. `ANTHROPIC_API_KEY` en `.env`. Sin ella, el bot sigue solo con menús.
+2. La sección `agent:` en el YAML del negocio (ver `docs/ejemplos/negocio.yaml`): modelo, effort, tope mensual en USD e instrucciones propias, que se suman al prompt base.
+3. El banco de regresión, contra el modelo real (cuesta centavos de dólar):
+   ```bash
+   pnpm build && pnpm agent:bench clientes/peluqueria-ana.yaml
+   ```
+   Corre 12 conversaciones-guion sobre un negocio de prueba en la base `citara_bench` y guarda el resultado en `bench-results/`.
+4. `pnpm tenant:apply clientes/peluqueria-ana.yaml`. Un cambio de modelo, effort o instrucciones **no se publica** sin el banco aprobado para esa configuración. Cambiar solo el tope o apagarlo no lo pide. `--sin-banco` lo salta y queda auditado.
+
+### Operarlo
+
+- `pnpm tenant list` muestra `IA 3,20/20 USD` (gasto del mes contra el tope), `IA AGOTADA` o `IA apagada`. Al tope, el negocio vuelve a menús hasta el mes siguiente.
+- `pnpm tenant agent <slug>` lista las versiones; `pnpm tenant agent-rollback <slug> <versión>` vuelve a una anterior. Las conversaciones en curso terminan con la configuración con que empezaron.
+- Cada llamada al modelo queda en `agent_runs` con tokens, USD, latencia y herramientas.
+- Si el modelo falla dos veces, se niega o se enreda, el cliente recibe una disculpa y la conversación pasa al dueño. Nunca queda en silencio.
+- Mientras el agente piensa, el cliente ve "escribiendo..." (VERIFICAR el formato con el primer número real).
+
 ## Coexistencia (Fase 1.5)
 
 Con un número conectado en coexistencia (ver el alta, arriba), en la app de

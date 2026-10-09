@@ -217,4 +217,13 @@ describe('FlowRunner', () => {
     const [{ n }] = await adminQuery(`SELECT count(*)::int AS n FROM messages`);
     expect(n).toBe(2);
   });
+
+  it('sin cola del agente, la reentrega de un mensaje que no se respondió (manda el humano) no falla', async () => {
+    await seedFlow(tenantId, DEMO_FLOW);
+    await say('wamid.HU1', 'Hola');
+    await adminQuery(`UPDATE conversations SET control = 'human',
+      human_until = now() + interval '1 hour', control_reason = 'phone'`);
+    await say('wamid.HU2', '¿Siguen abiertos?');
+    await expect(say('wamid.HU2', '¿Siguen abiertos?')).resolves.toEqual([]);
+  });
 });

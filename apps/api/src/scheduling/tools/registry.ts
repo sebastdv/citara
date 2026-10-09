@@ -16,6 +16,10 @@ export interface ToolContext {
   contactId: string;
   conversationId: string;
   now: Date;
+  /** El entrante que se está atendiendo. Un token de confirmación no vale en el turno que lo emitió. */
+  turnId?: string;
+  /** 'agent': agendar también exige confirmación. Por defecto 'flow'. */
+  actor?: 'flow' | 'agent';
 }
 
 export interface ToolResult { ok: boolean; data?: unknown; error?: string; confirmationToken?: string }
@@ -39,19 +43,40 @@ const day = z.string().refine((v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && DateTime.f
 const MAX_RANGE_DAYS = 31;
 const instant = (iso: string) => DateTime.fromISO(iso, { setZone: true }).toJSDate();
 
+/** Lo que dura una confirmación: más que eso, la persona ya está en otra cosa. */
+export const CONFIRMATION_TTL_MS = 30 * 60_000;
+
 /**
- * Token de confirmación (R4) ligado a la herramienta, la cita, quien pregunta
- * y lo que se va a aplicar: el de cancelar no sirve para reprogramar, ni el de
- * un horario para otro. Llave derivada (no la de cifrado tal cual) y sin estado
- * que guardar.
+ * Token de confirmación (R4) ligado a la herramienta, la cita, quien pregunta,
+ * lo que se va a aplicar, el turno en que se pidió y cuándo. Sin estado que
+ * guardar: `<emitido>.<turno>.<mac>`. Llave derivada, no la de cifrado tal cual.
  */
-function tokenFor(parts: string[]): string {
+function issueToken(parts: string[], ctx: ToolContext): string {
+  const issued = String(Math.floor(ctx.now.getTime() / 1000));
+  const turn = ctx.turnId ?? '-';
+  return `${issued}.${turn}.${macFor([...parts, issued, turn])}`;
+}
+
+/** null si sirve; si no, el motivo para el modelo o el menú. */
+function checkToken(given: string | undefined, parts: string[], ctx: ToolContext): string | null {
+  const [issued, turn, mac] = (given ?? '').split('.');
+  if (!issued || !turn || !mac || !sameMac(mac, macFor([...parts, issued, turn]))) {
+    return 'Token de confirmación inválido';
+  }
+  if (ctx.now.getTime() - Number(issued) * 1000 > CONFIRMATION_TTL_MS) {
+    return 'La confirmación venció: vuelve a pedirla';
+  }
+  // La confirmación la da la persona en un mensaje posterior, no el mismo turno que la pidió.
+  if (ctx.turnId && turn === ctx.turnId) return 'Falta que la persona confirme en su próximo mensaje';
+  return null;
+}
+
+function macFor(parts: string[]): string {
   const key = createHmac('sha256', process.env.DB_ENCRYPTION_KEY!).update('citara/tool-confirmation').digest();
   return createHmac('sha256', key).update(parts.join('|')).digest('hex').slice(0, 32);
 }
-function sameToken(given: string | undefined, expected: string): boolean {
-  if (!given || given.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+function sameMac(a: string, b: string): boolean {
+  return a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
 @Injectable()
@@ -183,20 +208,37 @@ export class ToolRegistry {
       },
       {
         name: 'agendar_cita',
-        description: 'Reserva una cita en una franja disponible.',
+        description: 'Reserva una cita en una franja disponible. Para el asistente, requiere confirmación explícita del usuario.',
         schema: z.object({
           servicio_id: z.string().uuid(),
           recurso_id: z.string().uuid(),
           inicio: isoWithOffset,
           nombre: z.string().trim().min(1).max(255),
           notas: z.string().max(1000).optional(),
+          confirmation_token: z.string().optional(),
         }),
         destructive: false,
         async run(a, ctx) {
+          const startsAt = instant(a.inicio);
+          if (ctx.actor === 'agent') {
+            // El agente no reserva sin un "sí" de la persona en un mensaje posterior.
+            const parts = ['agendar_cita', ctx.contactId, a.servicio_id, a.recurso_id, startsAt.toISOString(), a.nombre];
+            if (a.confirmation_token === undefined) {
+              const verdict = await availability.check(ctx.m, ctx.tenantId,
+                { serviceId: a.servicio_id, resourceId: a.recurso_id, start: startsAt, now: ctx.now });
+              if (verdict === 'taken') return { ok: false, error: 'Esa franja ya está ocupada' };
+              if (verdict !== 'ok') return { ok: false, error: 'Ese horario no está disponible' };
+              const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+              return { ok: true, confirmationToken: issueToken(parts, ctx),
+                       data: { requiere_confirmacion: true, etiqueta: labelFor(startsAt, timezone) } };
+            }
+            const invalid = checkToken(a.confirmation_token, parts, ctx);
+            if (invalid) return { ok: false, error: invalid };
+          }
           const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
           const cita = await booking.book(ctx.m, ctx.tenantId, {
             serviceId: a.servicio_id, resourceId: a.recurso_id, contactId: ctx.contactId,
-            conversationId: ctx.conversationId, startsAt: instant(a.inicio),
+            conversationId: ctx.conversationId, startsAt,
             customerName: a.nombre, notes: a.notas ?? null, now: ctx.now });
           return { ok: true, data: { id: cita.id, inicio: isoIn(cita.startsAt, timezone), estado: cita.status,
                                      etiqueta: labelFor(cita.startsAt, timezone) } };
@@ -212,15 +254,16 @@ export class ToolRegistry {
         }),
         destructive: true,
         async run(a, ctx) {
-          const expected = tokenFor(['cancelar_cita', a.cita_id, ctx.contactId]);
+          const parts = ['cancelar_cita', a.cita_id, ctx.contactId];
           const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
           if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
           if (a.confirmation_token === undefined) {
             const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
-            return { ok: true, confirmationToken: expected,
+            return { ok: true, confirmationToken: issueToken(parts, ctx),
                      data: { requiere_confirmacion: true, etiqueta: labelFor(cita.startsAt, timezone) } };
           }
-          if (!sameToken(a.confirmation_token, expected)) return { ok: false, error: 'Token de confirmación inválido' };
+          const invalid = checkToken(a.confirmation_token, parts, ctx);
+          if (invalid) return { ok: false, error: invalid };
           await booking.cancel(ctx.m, a.cita_id, ctx.contactId);
           return { ok: true, data: { cancelada: true } };
         },
@@ -236,7 +279,7 @@ export class ToolRegistry {
         destructive: true,
         async run(a, ctx) {
           const nuevo = instant(a.nuevo_inicio);
-          const expected = tokenFor(['reprogramar_cita', a.cita_id, ctx.contactId, nuevo.toISOString()]);
+          const parts = ['reprogramar_cita', a.cita_id, ctx.contactId, nuevo.toISOString()];
           const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
           if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
           const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
@@ -248,10 +291,11 @@ export class ToolRegistry {
               excludeAppointmentId: cita.id });
             if (verdict !== 'ok' && verdict !== 'taken') return { ok: false, error: 'Ese horario no está disponible' };
             if (verdict === 'taken') return { ok: false, error: 'Esa franja ya está ocupada' };
-            return { ok: true, confirmationToken: expected,
+            return { ok: true, confirmationToken: issueToken(parts, ctx),
                      data: { requiere_confirmacion: true, etiqueta: labelFor(nuevo, timezone) } };
           }
-          if (!sameToken(a.confirmation_token, expected)) return { ok: false, error: 'Token de confirmación inválido' };
+          const invalid = checkToken(a.confirmation_token, parts, ctx);
+          if (invalid) return { ok: false, error: invalid };
           const movida = await booking.reschedule(ctx.m, ctx.tenantId, a.cita_id, ctx.contactId, nuevo, ctx.now);
           return { ok: true, data: { id: movida.id, inicio: isoIn(movida.startsAt, timezone),
                                      etiqueta: labelFor(movida.startsAt, timezone) } };

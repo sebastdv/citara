@@ -4,6 +4,7 @@ import type { FlowDefinition } from '@citara/shared';
 export const AGENDA_FLOW: FlowDefinition = {
   key: 'agenda',
   entry: 'saludo',
+  ai_step: 'asistente',
   steps: {
     saludo: { type: 'message', text: '¡Hola! Soy el asistente de citas 👋', next: 'menu' },
     menu: {
@@ -64,6 +65,8 @@ export const AGENDA_FLOW: FlowDefinition = {
     sin_servicios: { type: 'end', text: 'Por ahora no hay servicios para agendar.' },
     sin_franjas: { type: 'end', text: 'No encontré horarios libres en los próximos días. Escríbenos y te ayudamos.' },
     humano: { type: 'handoff', text: 'Te comunico con alguien del equipo.' },
+    // Spec §1, conversación híbrida: aquí conversa el agente. Sin IA, se salta al menú.
+    asistente: { type: 'ai_turn', next: 'menu', text_unavailable: 'Ahora mismo te atiendo con el menú.' },
     error: { type: 'end', text: 'Tuvimos un problema. Intenta de nuevo más tarde.' },
   },
 };

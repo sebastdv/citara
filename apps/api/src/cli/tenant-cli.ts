@@ -10,6 +10,7 @@ import {
   connectUrl, createTenant, googleConnectUrl, listTenants, newGoogleLink, newLink, setSuspended, syncTenant,
   type TenantSummary,
 } from './tenants';
+import { listAgentVersions, rollbackAgentConfig } from '../agent/agent-config';
 
 const USAGE = `Uso:
   pnpm tenant create <slug> "<nombre>" [zona]   crea el negocio en alta e imprime el enlace de conexión
@@ -17,7 +18,9 @@ const USAGE = `Uso:
   pnpm tenant suspend <slug> | resume <slug>      saca o devuelve el negocio a operación
   pnpm tenant list                                estado de los negocios y sus canales
   pnpm tenant sync <slug>                         reintenta la sincronización de historial y contactos
-  pnpm tenant google <slug> <recurso>             imprime el enlace para conectar el Google Calendar de un recurso`;
+  pnpm tenant google <slug> <recurso>             imprime el enlace para conectar el Google Calendar de un recurso
+  pnpm tenant agent <slug>                        versiones de la configuración del agente
+  pnpm tenant agent-rollback <slug> <versión>     vuelve a una versión anterior del agente`;
 
 const fmt = (d: Date | null) => (d ? new Date(d).toISOString().replace('T', ' ').slice(0, 16) : '—');
 const SYNC_NAMES = { smb_app_state_sync: 'contactos', history: 'historial' } as const;
@@ -38,6 +41,13 @@ const fmtGoogle = (google: TenantSummary['google']) => {
     const unsynced = g.unsynced ? ` (${g.unsynced} sin subir)` : '';
     return `${g.resource} ${state}${watch}${unsynced}`;
   }).join(' · ');
+};
+/** "IA 3,20/20 USD" · "IA AGOTADA 20,10/20 USD" · "IA apagada" · "IA —". */
+const fmtAi = (ai: TenantSummary['ai']) => {
+  if (!ai) return 'IA —';
+  if (!ai.enabled) return 'IA apagada';
+  const money = (n: number) => n.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return `IA ${ai.spentUsd >= ai.budgetUsd ? 'AGOTADA ' : ''}${money(ai.spentUsd)}/${money(ai.budgetUsd)} USD`;
 };
 
 async function main() {
@@ -64,6 +74,19 @@ async function main() {
         console.log(`Enlace para el calendario de '${args[1]}' (vence en 72 h, un solo uso):\n` +
                     googleConnectUrl(await newGoogleLink(admin, args[0], args[1])));
         break;
+      case 'agent':
+        if (!args[0]) throw new Error(USAGE);
+        for (const v of await listAgentVersions(admin, args[0])) {
+          console.log([`v${v.version}${v.active ? ' (activa)' : ''}`, v.enabled ? 'encendida' : 'apagada',
+                       v.model, `effort ${v.effort}`, `tope ${v.budgetUsd} USD`, v.hash.slice(0, 8),
+                       v.createdAt.toISOString().slice(0, 16).replace('T', ' ')].join(' | '));
+        }
+        break;
+      case 'agent-rollback':
+        if (!args[0] || !args[1]) throw new Error(USAGE);
+        await rollbackAgentConfig(admin, args[0], Number(args[1]));
+        console.log(`'${args[0]}' volvió a la versión ${args[1]} del agente`);
+        break;
       case 'suspend':
       case 'resume':
         if (!args[0]) throw new Error(USAGE);
@@ -72,7 +95,7 @@ async function main() {
       case 'list':
         for (const t of await listTenants(admin)) {
           console.log([t.slug, t.status, t.phone ?? 'sin número', t.mode ?? '—', t.channelStatus ?? '—',
-                       `historial ${t.historySync ?? '—'}`, fmtSyncs(t.syncs), fmtGoogle(t.google), `último eco ${fmt(t.lastPhoneEcho)}`,
+                       `historial ${t.historySync ?? '—'}`, fmtSyncs(t.syncs), fmtGoogle(t.google), fmtAi(t.ai), `último eco ${fmt(t.lastPhoneEcho)}`,
                        `último cliente ${fmt(t.lastCustomer)}`].join(' | '));
         }
         break;

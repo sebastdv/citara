@@ -158,3 +158,16 @@ describe('MetaSender', () => {
     });
   });
 });
+
+describe('MetaSender.markTyping', () => {
+  it('marca el mensaje como leído con el indicador de escritura', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ success: true }) });
+    vi.stubGlobal('fetch', fetchMock);
+    await new MetaSender('v25.0').markTyping(
+      { tenantId: 't', channelId: 'c', wabaId: 'w', phoneNumberId: '106540', accessToken: 'EAAG' }, 'wamid.IN');
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe('https://graph.facebook.com/v25.0/106540/messages');
+    expect(JSON.parse(init.body)).toEqual({ messaging_product: 'whatsapp', status: 'read', message_id: 'wamid.IN',
+                                            typing_indicator: { type: 'text' } });
+  });
+});

@@ -5,11 +5,17 @@ import { validateInput } from './validators';
 
 const MAX_CHAIN = 20; // pasos encadenados sin input antes de declarar ciclo
 
+/** Lo que el turno no puede resolver sin un modelo. El ejecutor sigue siendo PURO: no lo llama. */
+export type AiRequest =
+  | { kind: 'agent'; stepKey: string }
+  | { kind: 'interpret'; stepKey: string; input: string };
+
 export interface ExecResult {
   state: SessionState;
   outbound: OutboundContent[];
   /** Intención de invocar una herramienta. El ejecutor sigue siendo PURO: no la ejecuta. */
   pending?: { tool: string; args: Record<string, string>; stepKey: string };
+  ai?: AiRequest;
 }
 
 /** Interpola {{var}} con las variables de sesión; deja intacto lo no resuelto. */
@@ -67,6 +73,7 @@ export function advance(
   flow: FlowDefinition,
   state: SessionState | null,
   input: string | null,
+  opts: { ai?: boolean } = {},
 ): ExecResult {
   let current: SessionState = state ?? { stepKey: flow.entry, vars: {}, status: 'active' };
   const outbound: OutboundContent[] = [];
@@ -104,8 +111,11 @@ export function advance(
 
       const next = matchChoice(step.buttons, input);
       if (next === null) {
+        // Spec §1: con IA, lo que no encaja lo interpreta un modelo barato en vez de repetir el menú.
+        if (opts.ai && step.ai_fallback !== false && input.trim()) {
+          return { state: current, outbound, ai: { kind: 'interpret', stepKey: current.stepKey, input } };
+        }
         // No coincide: repetir el menú sin avanzar.
-        // (En la Fase 4, ai_fallback interceptará justo aquí.)
         outbound.push(renderChoice(step, current.vars));
         return { state: current, outbound };
       }
@@ -155,6 +165,9 @@ export function advance(
       const options: Record<string, unknown>[] = JSON.parse(current.vars[`__${step.from}`] ?? '[]');
       const index = input !== null && /^\d+$/.test(input.trim()) ? Number(input.trim()) - 1 : -1;
       if (index < 0 || index >= options.length) {
+        if (input !== null && opts.ai && step.ai_fallback !== false && input.trim()) {
+          return { state: current, outbound, ai: { kind: 'interpret', stepKey: current.stepKey, input } };
+        }
         // Sin input (primera vez) o fuera de la lista: mostrar o repetir la pregunta.
         outbound.push({ kind: 'text', body: interpolate(step.text, current.vars) });
         return { state: current, outbound };
@@ -167,6 +180,18 @@ export function advance(
         vars: { ...current.vars, ...fields, [step.var]: String(chosen.id ?? chosen.inicio ?? '') },
         stepKey: step.next,
       };
+      input = null;
+      continue;
+    }
+
+    if (step.type === 'ai_turn') {
+      if (opts.ai) return { state: current, outbound, ai: { kind: 'agent', stepKey: current.stepKey } };
+      // Sin IA (apagada o sin presupuesto) el paso se salta. Si la persona venía
+      // hablando con el asistente, se le avisa que sigue el menú.
+      if (input !== null && step.text_unavailable) {
+        outbound.push({ kind: 'text', body: interpolate(step.text_unavailable, current.vars) });
+      }
+      current = { ...current, stepKey: step.next };
       input = null;
       continue;
     }

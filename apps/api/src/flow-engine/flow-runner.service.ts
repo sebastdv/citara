@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 // Import de VALOR, no `import type`: FlowRunner es @Injectable() y recibe
 // DataSource e InboundProcessor por constructor. Con emitDecoratorMetadata
 // activo, un `import type` se borra en la emisión y el design:paramtype
@@ -9,14 +9,11 @@ import { DataSource } from 'typeorm';
 import type { EntityManager } from 'typeorm';
 import type { OutboundContent, FlowDefinition, SessionState } from '@citara/shared';
 import type { FlowStep } from '@citara/shared';
-import { advance, interpolate } from './executor';
+import { advance, interpolate, type AiRequest } from './executor';
+import { isBareGreeting } from './greeting';
+import { insertBotReplies } from './outbox';
 import { ToolRegistry } from '../scheduling/tools/registry';
 import { CLOCK, type Clock } from '../clock';
-import { messageTypeOf } from '../conversations/message-type';
-
-const MAX_TOOL_HOPS = 5;
-/** Una sesión quieta más que esto se da por abandonada. */
-const SESSION_TTL_HOURS = 2;
 import { runInTenant } from '../tenancy/tenant-context';
 import {
   giveControlToHuman, humanControlExpired, humanInControl, readControl, returnControlToBot,
@@ -25,6 +22,12 @@ import { InboundProcessor } from '../queues/inbound.processor';
 import type { InboundJob } from '../queues/inbound.queue';
 import { OutboundQueue } from '../queues/outbound.queue';
 import type { OutboundJob } from '../queues/outbound.queue';
+import { AgentQueue, type AgentEnqueuer } from '../queues/agent.queue';
+import { AiGate } from '../agent/ai-gate';
+
+const MAX_TOOL_HOPS = 5;
+/** Una sesión quieta más que esto se da por abandonada. */
+const SESSION_TTL_HOURS = 2;
 
 /**
  * Lo mínimo que FlowRunner necesita de la cola de salida: encolar un job.
@@ -35,6 +38,16 @@ import type { OutboundJob } from '../queues/outbound.queue';
 export interface OutboundEnqueuer {
   add(job: OutboundJob): unknown;
 }
+
+/** Dónde avanza el flujo: la conversación, quién escribe y el entrante que se atiende. */
+export interface TurnContext { tenantId: string; conversationId: string; contactId: string; inboundId: string }
+
+interface SessionRow {
+  id: string; flow_id?: string; step_key: string; vars: Record<string, string>;
+  status: SessionState['status']; stale?: boolean;
+}
+
+type FlowOutcome = { outbound: OutboundContent[]; enteredHandoff: boolean; ai?: AiRequest };
 
 @Injectable()
 export class FlowRunner {
@@ -48,6 +61,9 @@ export class FlowRunner {
     @Inject(OutboundQueue) private readonly outboundQueue: OutboundEnqueuer,
     private readonly tools: ToolRegistry,
     @Inject(CLOCK) private readonly clock: Clock,
+    // Opcionales: sin ellos (el arnés, un negocio sin IA) el bot es el de menús.
+    @Optional() @Inject(AgentQueue) private readonly agents?: AgentEnqueuer,
+    @Optional() private readonly gate?: AiGate,
   ) {}
 
   async handle(job: InboundJob): Promise<OutboundContent[]> {
@@ -69,11 +85,12 @@ export class FlowRunner {
         // El turno ya se procesó (es atómico con el entrante). Si su salida no
         // terminó de enviarse —la API murió tras el commit, Redis falló al
         // encolar— se vuelve a encolar; el procesador no reenvía lo que ya
-        // salió.
+        // salió. Lo mismo si el agente nunca lo atendió.
         const [{ n }] = await m.query(
           `SELECT count(*)::int AS n FROM messages
             WHERE reply_to_id = $1 AND status = 'pending'`, [inbound.messageId]);
-        return { ...inbound, outbound: [] as OutboundContent[], pending: n > 0 };
+        const ai = await this.unansweredAiTurn(m, inbound.conversationId, inbound.messageId, job.message.text);
+        return { ...inbound, outbound: [] as OutboundContent[], pending: n > 0, ai };
       }
 
       // Regla de control (spec §6.2), ya con la conversación bloqueada por el
@@ -85,7 +102,7 @@ export class FlowRunner {
       if (control.tenantStatus !== 'active' || control.channelStatus === 'disconnected'
           || humanInControl(control, now)) {
         // El entrante ya quedó guardado; el bot no responde.
-        return { ...inbound, outbound: [] as OutboundContent[], pending: false };
+        return { ...inbound, outbound: [] as OutboundContent[], pending: false, ai: undefined };
       }
       if (humanControlExpired(control, now)) {
         await returnControlToBot(m, {
@@ -94,22 +111,27 @@ export class FlowRunner {
         });
       }
 
-      const { outbound, enteredHandoff } =
-        await this.advanceFlow(m, job, inbound);
+      const ctx: TurnContext = { tenantId: job.tenantId, conversationId: inbound.conversationId,
+                                 contactId: inbound.contactId, inboundId: inbound.messageId };
+      const { outbound, enteredHandoff, ai } = await this.advanceFlow(m, ctx, job.message.text);
       if (enteredHandoff) {
         await giveControlToHuman(m, {
           tenantId: job.tenantId, conversationId: inbound.conversationId,
           from: now, reason: 'flow_handoff', actor: 'flow',
         });
       }
-      return { ...inbound, outbound, pending: outbound.length > 0 };
+      return { ...inbound, outbound, pending: outbound.length > 0, ai };
     });
 
     // Se encola DESPUÉS del commit (outbox): las filas `pending` ya existen y
-    // son la fuente de verdad. Encolar dentro de la transacción dejaba jobs
-    // apuntando a filas que podían revertirse, o que el worker tomaba antes de
-    // que fueran visibles.
-    if (turn.pending) {
+    // son la fuente de verdad. Si el turno derivó a la IA, el envío lo encola
+    // el worker del agente cuando escribe su respuesta en este mismo turno.
+    if (turn.ai) {
+      await this.agents!.add({
+        tenantId: job.tenantId, channelId: job.channelId, conversationId: turn.conversationId,
+        contactId: turn.contactId, inboundId: turn.messageId, to: job.message.from, ...turn.ai,
+      });
+    } else if (turn.pending) {
       await this.outboundQueue.add({
         tenantId: job.tenantId,
         channelId: job.channelId,
@@ -121,11 +143,25 @@ export class FlowRunner {
     return turn.outbound;
   }
 
-  private async advanceFlow(
-    m: EntityManager, job: InboundJob,
-    inbound: { conversationId: string; messageId: string; contactId: string },
-  ): Promise<{ outbound: OutboundContent[]; enteredHandoff: boolean }> {
-    const { conversationId, messageId: inboundId } = inbound;
+  /**
+   * Retoma el flujo desde la sesión activa, fuera del turno original (lo usa el
+   * worker del agente): con `input` como si el cliente lo hubiera escrito, o
+   * saltando a `fromStep`. Persiste sesión y salida en `m`.
+   */
+  async resume(
+    m: EntityManager, ctx: TurnContext, opts: { input: string | null; fromStep?: string; ai: boolean },
+  ): Promise<FlowOutcome | null> {
+    const [sessionRow] = await m.query(
+      `SELECT id, flow_id, step_key, vars, status FROM conversation_sessions
+        WHERE conversation_id = $1 AND status = 'active'`, [ctx.conversationId]);
+    if (!sessionRow) return null;
+    const [flowRow] = await m.query(`SELECT id, definition FROM flows WHERE id = $1`, [sessionRow.flow_id]);
+    const state: SessionState = {
+      stepKey: opts.fromStep ?? sessionRow.step_key, vars: sessionRow.vars, status: sessionRow.status };
+    return this.run(m, ctx, flowRow.definition as FlowDefinition, flowRow.id, sessionRow, state, opts.input, opts.ai);
+  }
+
+  private async advanceFlow(m: EntityManager, ctx: TurnContext, text: string | null): Promise<FlowOutcome> {
     const [flowRow] = await m.query(
       `SELECT id, definition FROM flows
         WHERE is_active AND is_default LIMIT 1`,
@@ -140,13 +176,13 @@ export class FlowRunner {
     // saludo. Solo 'ended' significa "esta conversación ya cerró".
     //
     // ORDER BY updated_at (no `id`, que es un UUID sin orden temporal).
-    let [sessionRow] = await m.query(
+    let [sessionRow]: (SessionRow | undefined)[] = await m.query(
       `SELECT id, step_key, vars, status,
               updated_at < now() - make_interval(hours => $2) AS stale
          FROM conversation_sessions
         WHERE conversation_id = $1 AND status <> 'ended'
         ORDER BY updated_at DESC LIMIT 1`,
-      [conversationId, SESSION_TTL_HOURS],
+      [ctx.conversationId, SESSION_TTL_HOURS],
     );
 
     // Aquí ya se sabe que manda el bot. Una sesión es un residuo, y se cierra
@@ -161,17 +197,37 @@ export class FlowRunner {
     if (residue) {
       await m.query(
         `UPDATE conversation_sessions SET status = 'ended', updated_at = now() WHERE id = $1`,
-        [sessionRow.id]);
+        [sessionRow!.id]);
       sessionRow = undefined;
     }
 
-    const state: SessionState | null = sessionRow
+    const ai = await this.aiOn(m, ctx.tenantId);
+    let state: SessionState | null = sessionRow
       ? { stepKey: sessionRow.step_key, vars: sessionRow.vars, status: sessionRow.status }
       : null;
 
-    // Sesión nueva → sin input, para que el flujo emita su paso de entrada.
-    const input = state ? job.message.text : null;
-    let result = advance(flow, state, input);
+    // Sesión nueva → sin input, para que el flujo emita su paso de entrada...
+    let input = state ? text : null;
+    // ...salvo que el primer mensaje traiga un pedido: con IA va directo al agente.
+    if (!state && ai && flow.ai_step && text && !isBareGreeting(text)) {
+      state = { stepKey: flow.ai_step, vars: {}, status: 'active' };
+      input = text;
+    }
+    return this.run(m, ctx, flow, flowRow.id, sessionRow ?? null, state, input, ai);
+  }
+
+  /** ¿Hay IA para este negocio ahora? Sin cola o sin compuerta (el arnés), no. */
+  private async aiOn(m: EntityManager, tenantId: string): Promise<boolean> {
+    if (!this.gate || !this.agents) return false;
+    return (await this.gate.availability(m, tenantId, this.clock.now())).ok;
+  }
+
+  /** Avanza desde `state`, ejecuta herramientas y persiste sesión y salida. */
+  private async run(
+    m: EntityManager, ctx: TurnContext, flow: FlowDefinition, flowId: string,
+    sessionRow: SessionRow | null, state: SessionState | null, input: string | null, ai: boolean,
+  ): Promise<FlowOutcome> {
+    let result = advance(flow, state, input, { ai });
     // Las herramientas corren aquí, en la transacción del turno: si algo falla
     // después de agendar, el rollback se lleva también la cita.
     for (let hop = 0; result.pending; hop++) {
@@ -179,7 +235,8 @@ export class FlowRunner {
       const { tool, args, stepKey } = result.pending;
       const step = flow.steps[stepKey] as Extract<FlowStep, { type: 'tool' }>;
       const out = await this.tools.run(tool, args, {
-        m, tenantId: job.tenantId, contactId: inbound.contactId, conversationId, now: this.clock.now() });
+        m, tenantId: ctx.tenantId, contactId: ctx.contactId, conversationId: ctx.conversationId,
+        now: this.clock.now(), turnId: ctx.inboundId, actor: 'flow' });
 
       const vars = { ...result.state.vars };
       let next = out.ok ? step.on_success : step.on_error;
@@ -193,7 +250,7 @@ export class FlowRunner {
           .join('\n');
         if (items.length === 0) next = step.on_empty ?? step.on_success;
       }
-      const after = advance(flow, { ...result.state, vars, stepKey: next }, null);
+      const after = advance(flow, { ...result.state, vars, stepKey: next }, null, { ai });
       result = { ...after, outbound: [...result.outbound, ...after.outbound] };
     }
 
@@ -209,28 +266,56 @@ export class FlowRunner {
         `INSERT INTO conversation_sessions
            (tenant_id, conversation_id, flow_id, step_key, vars, status)
          VALUES ($1, $2, $3, $4, $5, $6)`,
-        [job.tenantId, conversationId, flowRow.id, result.state.stepKey,
+        [ctx.tenantId, ctx.conversationId, flowId, result.state.stepKey,
          JSON.stringify(result.state.vars), result.state.status],
       );
     }
 
-    for (const [seq, content] of result.outbound.entries()) {
-      // `type` con el MISMO vocabulario que el entrante (el de Meta): botones
-      // y lista son las dos formas de un mensaje interactivo. El `kind` fino
-      // viaja en `payload`, que además es lo que el envío manda tal cual.
-      const type = messageTypeOf(content);
+    // Un segmento nuevo del agente empieza limpio, y responde desde este entrante.
+    if (result.ai?.kind === 'agent' && sessionRow?.step_key !== result.ai.stepKey) {
       await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload,
-                               status, reply_to_id, seq)
-         VALUES ($1, $2, 'out', 'bot', $3, $4, $5, 'pending', $6, $7)`,
-        [job.tenantId, conversationId, type, 'body' in content ? content.body : null, JSON.stringify(content),
-         inboundId, seq],
-      );
+        `UPDATE conversation_sessions
+            SET agent_system = NULL, agent_transcript = NULL, agent_model = NULL, agent_effort = NULL,
+                agent_config_version = NULL,
+                agent_cursor = (SELECT created_at FROM messages WHERE id = $2) - interval '1 microsecond'
+          WHERE conversation_id = $1 AND status = 'active'`, [ctx.conversationId, ctx.inboundId]);
     }
+
+    await insertBotReplies(m, ctx.tenantId, ctx.conversationId, ctx.inboundId, result.outbound);
 
     return {
       outbound: result.outbound,
       enteredHandoff: result.state.status === 'handoff' && state?.status !== 'handoff',
+      ai: result.ai,
     };
+  }
+
+  /**
+   * Un turno derivado a la IA que nadie atendió (encolar falló tras el commit):
+   * - del agente: la sesión sigue en un paso ai_turn y el cursor no lo pasó;
+   * - de interpretación: la sesión sigue en un menú, el mensaje no tiene
+   *   salientes y es el último que escribió el cliente.
+   */
+  private async unansweredAiTurn(
+    m: EntityManager, conversationId: string, inboundId: string, text: string | null,
+  ): Promise<AiRequest | undefined> {
+    // Sin cola del agente (el arnés, un despliegue sin IA) no hay a quién derivar.
+    if (!this.agents) return undefined;
+    const [s] = await m.query(
+      `SELECT s.step_key, f.definition,
+              (s.agent_cursor IS NOT NULL AND s.agent_cursor < i.created_at) AS after_cursor,
+              NOT EXISTS (SELECT 1 FROM messages r WHERE r.reply_to_id = i.id) AS unanswered,
+              NOT EXISTS (SELECT 1 FROM messages n WHERE n.conversation_id = i.conversation_id
+                            AND n.direction = 'in' AND n.origin = 'customer' AND n.created_at > i.created_at) AS latest
+         FROM conversation_sessions s JOIN flows f ON f.id = s.flow_id, messages i
+        WHERE s.conversation_id = $1 AND s.status = 'active' AND i.id = $2`, [conversationId, inboundId]);
+    if (!s) return undefined;
+    const step = (s.definition as FlowDefinition).steps[s.step_key];
+    // El cursor sobrevive al segmento: solo cuenta si la sesión sigue en un paso del agente.
+    if (step?.type === 'ai_turn' && s.after_cursor) return { kind: 'agent', stepKey: s.step_key };
+    if ((step?.type === 'choice' || step?.type === 'pick') && s.unanswered && s.latest && text?.trim()) {
+      return { kind: 'interpret', stepKey: s.step_key, input: text };
+    }
+    return undefined;
   }
 }

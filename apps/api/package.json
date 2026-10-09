@@ -5,6 +5,7 @@
   "main": "./dist/src/index.js",
   "types": "./dist/src/index.d.ts",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.132.1",
     "@citara/db": "workspace:*",
     "@citara/shared": "workspace:*",
     "@nestjs/common": "^11.2.3",

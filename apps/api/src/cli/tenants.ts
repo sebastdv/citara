@@ -91,6 +91,8 @@ export interface TenantSummary {
   /** Por recurso conectado: estado, si tiene calendario, el canal de avisos y lo que no ha subido. */
   google: { resource: string; status: string; calendar: boolean; watchExpiresAt: string | null;
             watchError: boolean; unsynced: number }[];
+  /** La IA del negocio: modelo, gasto del mes y tope; null si no tiene configuración. */
+  ai: { enabled: boolean; model: string; spentUsd: number; budgetUsd: number } | null;
 }
 
 /** Lo que el operador necesita ver: quién opera, cómo está su canal, y si el dueño sigue abriendo la app. */
@@ -114,7 +116,14 @@ export async function listTenants(admin: DataSource): Promise<TenantSummary[]> {
                                      AND a.google_sync_status <> 'synced' AND a.ends_at > now()))
                    ORDER BY r.key)
               FROM google_accounts g JOIN resources r ON r.id = g.resource_id
-             WHERE g.tenant_id = t.id) AS google
+             WHERE g.tenant_id = t.id) AS google,
+           (SELECT jsonb_build_object('enabled', c.enabled, 'model', c.model,
+                     'budgetUsd', c.monthly_budget_usd,
+                     'spentUsd', (SELECT COALESCE(sum(r.usd), 0) FROM agent_runs r
+                                   WHERE r.tenant_id = t.id
+                                     AND r.created_at >= (date_trunc('month', now() AT TIME ZONE t.timezone)
+                                                          AT TIME ZONE t.timezone)))
+              FROM agent_configs c WHERE c.tenant_id = t.id AND c.is_active) AS ai
       FROM tenants t
       LEFT JOIN LATERAL (SELECT * FROM whatsapp_channels c WHERE c.tenant_id = t.id ORDER BY c.created_at DESC LIMIT 1) ch ON true
      ORDER BY t.slug`);
@@ -123,6 +132,8 @@ export async function listTenants(admin: DataSource): Promise<TenantSummary[]> {
     channelStatus: r.channel_status, historySync: r.history_sync,
     lastPhoneEcho: r.last_phone_echo, lastCustomer: r.last_customer, syncs: r.syncs ?? {},
     google: r.google ?? [],
+    ai: r.ai ? { enabled: r.ai.enabled, model: r.ai.model, spentUsd: Number(r.ai.spentUsd),
+                 budgetUsd: Number(r.ai.budgetUsd) } : null,
   }));
 }
 

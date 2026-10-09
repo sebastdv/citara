@@ -25,3 +25,9 @@ hours:
 time_off:
   - { from: '2026-12-24T00:00:00-05:00', to: '2026-12-26T00:00:00-05:00', reason: Navidad }
 flow: agenda                  # el flujo de menús incorporado
+agent:                        # el asistente con IA (opcional; sin esta sección, solo menús)
+  model: claude-opus-5-5      # o claude-sonnet-5-5 / claude-haiku-5-5
+  effort: low                 # low, medium, high, xhigh o max
+  monthly_budget_usd: 20      # al llegar al tope, menús hasta el mes siguiente
+  instructions: |             # se agregan al prompt base; no lo reemplazan
+    Si preguntan por estacionamiento, hay en la esquina.

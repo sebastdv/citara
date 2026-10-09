@@ -71,3 +71,34 @@ describe('advance — message y end', () => {
     expect(() => advance(ciclo, null, null)).toThrow(/ciclo/i);
   });
 });
+
+describe('advance con IA', () => {
+  const flow: FlowDefinition = {
+    key: 'f', entry: 'menu', ai_step: 'asistente',
+    steps: {
+      menu: { type: 'choice', text: '¿Qué necesitas?', buttons: [{ id: 'a', title: 'Agendar', next: 'fin' }] },
+      estricto: { type: 'choice', text: 'Elige', ai_fallback: false, buttons: [{ id: 'a', title: 'A', next: 'fin' }] },
+      asistente: { type: 'ai_turn', next: 'menu', text_unavailable: 'Ahora te atiendo con el menú.' },
+      fin: { type: 'end', text: 'listo' },
+    },
+  };
+  const at = (stepKey: string) => ({ stepKey, vars: {}, status: 'active' as const });
+
+  it('lo que no encaja en un menú se pide interpretar, sin repetir el menú', () => {
+    expect(advance(flow, at('menu'), 'quiero ver mis citas', { ai: true }))
+      .toMatchObject({ outbound: [], ai: { kind: 'interpret', stepKey: 'menu', input: 'quiero ver mis citas' } });
+  });
+
+  it('sin IA, o con ai_fallback: false, el menú se repite como siempre', () => {
+    expect(advance(flow, at('menu'), 'xyz').ai).toBeUndefined();
+    expect(advance(flow, at('estricto'), 'xyz', { ai: true }).ai).toBeUndefined();
+    expect(advance(flow, at('estricto'), 'xyz', { ai: true }).outbound[0]).toMatchObject({ kind: 'buttons' });
+  });
+
+  it('el paso ai_turn deriva al agente con IA, y sin IA se salta avisando si la persona venía hablando', () => {
+    expect(advance(flow, at('asistente'), 'hola', { ai: true })).toMatchObject({ outbound: [], ai: { kind: 'agent', stepKey: 'asistente' } });
+    const sinIa = advance(flow, at('asistente'), 'hola');
+    expect(sinIa.outbound.map((o) => ('body' in o ? o.body : ''))).toEqual(['Ahora te atiendo con el menú.', '¿Qué necesitas?']);
+    expect(sinIa.state.stepKey).toBe('menu');
+  });
+});
