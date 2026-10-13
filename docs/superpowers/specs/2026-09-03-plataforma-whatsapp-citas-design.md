@@ -227,7 +227,7 @@ dentro del contexto de ese negocio, que la conversación le pertenece; si no, 40
 | **Auditoría** (`/panel/auditoria`) | `audit_log` de todos los negocios, paginado por fecha, filtrable por negocio, prefijo de acción y conversación | — |
 | **Costos** (`/panel/costos`) | Por negocio y mes (en su zona): USD de agente e intérprete, llamadas y fallidas, tope y % usado, citas creadas por `booked_by`, **USD ÷ citas** («—» sin citas). Las citas canceladas cuentan: el gasto ya se hizo | — |
 
-**Acciones del chat** (en `runInTenant`, con la conversación `FOR UPDATE`):
+**Acciones del chat** (en `runInTenant`, con la conversación `FOR NO KEY UPDATE`: un `FOR UPDATE` choca con el `FOR KEY SHARE` de los inserts que la referencian):
 
 - **Tomar el control:** `giveControlToHuman` con `reason='operator'`.
 - **Devolver al bot:** `returnControlToBot` con `cause='operator'`.
