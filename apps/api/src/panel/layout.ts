@@ -37,14 +37,17 @@ form.inline{display:inline}pre{white-space:pre-wrap;word-break:break-word;margin
 
 // Refresca solo los elementos marcados, sin tocar lo que el operador escribe.
 // Si la sesión venció, el servidor redirige al login: se recarga la página
-// entera en vez de meter el login dentro de la lista.
-const SCRIPT = `
+// entera en vez de meter el login dentro de la lista. Un 5xx o un corte de red
+// (un despliegue, Caddy reiniciando) no recarga: se reintenta en el siguiente
+// intervalo y el borrador sobrevive.
+export const REFRESH_SCRIPT = `
 document.querySelectorAll('[data-refresh]').forEach(function (el) {
   setInterval(async function () {
     if (document.hidden) return;
     try {
       const r = await fetch(location.href, { headers: { 'X-Fragment': el.id }, credentials: 'same-origin' });
-      if (r.redirected || r.status !== 200) { location.reload(); return; }
+      if (r.redirected || r.status === 401 || r.status === 403 || r.status === 404) { location.reload(); return; }
+      if (r.status !== 200) return;
       el.innerHTML = await r.text();
     } catch (e) {}
   }, Number(el.dataset.refresh));
@@ -59,5 +62,5 @@ export function panelPage(title: string, ctx: PageCtx | { nonce: string }, body:
   return html`<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Citara</title><style nonce="${ctx.nonce}">${raw(STYLE)}</style></head>
-<body>${nav}<main>${body}</main><script nonce="${ctx.nonce}">${raw(SCRIPT)}</script></body></html>`.value;
+<body>${nav}<main>${body}</main><script nonce="${ctx.nonce}">${raw(REFRESH_SCRIPT)}</script></body></html>`.value;
 }

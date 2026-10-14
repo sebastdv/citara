@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { html, raw, SafeHtml } from '../../src/panel/html';
-import { panelPage, newNonce } from '../../src/panel/layout';
+import { runInNewContext } from 'node:vm';
+import { panelPage, newNonce, REFRESH_SCRIPT } from '../../src/panel/layout';
 
 describe('html``', () => {
   it('escapa toda interpolación', () => {
@@ -33,5 +34,44 @@ describe('panelPage', () => {
   });
   it('sin sesión (login) no lleva barra de navegación', () => {
     expect(panelPage('Entrar', { nonce: newNonce() }, html`<p>x</p>`)).not.toContain('<nav>');
+  });
+});
+
+describe('script de refresco', () => {
+  /** Corre el script con un DOM mínimo y devuelve el tick del intervalo y lo que pasó. */
+  function harness(response: () => Promise<{ status: number; redirected: boolean; text: () => Promise<string> }>) {
+    const el = { id: 'mensajes', dataset: { refresh: '5000' }, innerHTML: 'viejo' };
+    const state = { reloads: 0, tick: null as null | (() => Promise<void>) };
+    const sandbox = {
+      document: { hidden: false, querySelectorAll: () => [el] },
+      location: { href: 'http://localhost/panel/x', reload: () => { state.reloads++; } },
+      fetch: response,
+      setInterval: (fn: () => Promise<void>) => { state.tick = fn; },
+      Number,
+    };
+    runInNewContext(REFRESH_SCRIPT, sandbox);
+    return { el, state };
+  }
+  const ok = (body: string) => async () => ({ status: 200, redirected: false, text: async () => body });
+
+  it('con 200 reemplaza solo el fragmento', async () => {
+    const { el, state } = harness(ok('nuevo'));
+    await state.tick!();
+    expect([el.innerHTML, state.reloads]).toEqual(['nuevo', 0]);
+  });
+  it('si la sesión venció (redirección al login, 401/403) recarga la página entera', async () => {
+    for (const r of [{ status: 200, redirected: true }, { status: 403, redirected: false }, { status: 401, redirected: false }]) {
+      const { el, state } = harness(async () => ({ ...r, text: async () => '<form action="/panel/login">' }));
+      await state.tick!();
+      expect([el.innerHTML, state.reloads]).toEqual(['viejo', 1]);
+    }
+  });
+  it('un 5xx pasajero o un error de red no recargan: el borrador sobrevive a un despliegue', async () => {
+    for (const fetchFn of [async () => ({ status: 502, redirected: false, text: async () => 'Bad Gateway' }),
+                           async () => { throw new Error('red caída'); }]) {
+      const { el, state } = harness(fetchFn as never);
+      await state.tick!();
+      expect([el.innerHTML, state.reloads]).toEqual(['viejo', 0]);
+    }
   });
 });
