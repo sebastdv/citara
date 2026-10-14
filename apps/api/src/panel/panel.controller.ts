@@ -1,11 +1,28 @@
-import { Controller, Get, Post, Req, Res, UseFilters, UseGuards } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { Controller, Get, Param, Post, Query, Req, Res, UseFilters, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 // Imports de VALOR: parámetros del constructor de un controlador Nest.
 import { DataSource } from 'typeorm';
+import { runInTenant } from '../tenancy/tenant-context';
 import { LoginRedirectFilter, PanelGuard, pageCtx, sessionCookie, type PanelRequest } from './panel-auth';
 import { destroySession } from './sessions';
-import { panelPage, sendHtml } from './layout';
+import { panelPage, sendHtml, type PageCtx } from './layout';
 import { html } from './html';
+import { loadInbox, type Cursor, type InboxFilter } from './inbox';
+import { loadConversation } from './conversation';
+import { panelTenants, tenantBySlug } from './tenants';
+import { chatMessages, chatView, inboxList, inboxView } from './views';
+
+export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** `antes=<instante exacto>_<uuid>`; cualquier otra cosa es la primera página. */
+export function parseCursor(v: unknown): Cursor | undefined {
+  if (typeof v !== 'string') return undefined;
+  const [at, id] = v.split('_');
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/.test(at ?? '') && UUID.test(id ?? '') ? { at, id } : undefined;
+}
+
+const str = (v: unknown) => (typeof v === 'string' && v ? v.slice(0, 64) : undefined);
 
 @Controller('panel')
 @UseGuards(PanelGuard)
@@ -14,9 +31,26 @@ export class PanelController {
   constructor(private readonly ds: DataSource) {}
 
   @Get()
-  async inbox(@Req() req: PanelRequest, @Res() res: Response) {
+  async inbox(@Query() q: Record<string, unknown>, @Req() req: PanelRequest, @Res() res: Response) {
     const ctx = pageCtx(req);
-    sendHtml(res, 200, panelPage('Bandeja', ctx, html`<h1>Bandeja</h1><div id="lista"></div>`), ctx.nonce);
+    const filter: InboxFilter = {
+      tab: q.tab === 'todas' ? 'todas' : 'traspasos', slug: str(q.negocio), before: parseCursor(q.antes),
+    };
+    const now = new Date();
+    const { rows, next } = await loadInbox(this.ds, filter, now);
+    if (req.get('X-Fragment') === 'lista') return sendHtml(res, 200, inboxList(rows, now).value, ctx.nonce);
+    sendHtml(res, 200, inboxView(ctx, { filter, tenants: await panelTenants(this.ds), rows, next }, now), ctx.nonce);
+  }
+
+  @Get('negocios/:slug/conversaciones/:id')
+  async chat(@Param('slug') slug: string, @Param('id') id: string, @Req() req: PanelRequest, @Res() res: Response) {
+    const ctx = pageCtx(req);
+    const found = await this.find(slug, id);
+    if (!found) return this.notFound(res, ctx);
+    if (req.get('X-Fragment') === 'mensajes') {
+      return sendHtml(res, 200, chatMessages(found.chat, found.tenant.timezone).value, ctx.nonce);
+    }
+    sendHtml(res, 200, chatView(ctx, { ...found, submissionId: randomUUID() }, new Date()), ctx.nonce);
   }
 
   @Post('logout')
@@ -24,6 +58,20 @@ export class PanelController {
     await destroySession(this.ds, req.sessionToken!);
     res.clearCookie(sessionCookie.name, { path: '/panel' });
     res.redirect(303, '/panel/login');
+  }
+
+  /** El slug se resuelve a id en `tenants` y la conversación se busca DENTRO de ese contexto. */
+  private async find(slug: string, id: string) {
+    if (!UUID.test(id)) return null;
+    const tenant = await tenantBySlug(this.ds, slug);
+    if (!tenant) return null;
+    const chat = await runInTenant(this.ds, tenant.id, (m) => loadConversation(m, id));
+    return chat ? { tenant, chat } : null;
+  }
+
+  private notFound(res: Response, ctx: PageCtx) {
+    sendHtml(res, 404, panelPage('No existe', ctx,
+      html`<h1>No existe</h1><p><a href="/panel">Volver a la bandeja</a></p>`), ctx.nonce);
   }
 }
 
