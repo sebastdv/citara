@@ -6,6 +6,7 @@
     "@citara/api": "workspace:*",
     "@nestjs/core": "^11.2.3",
     "bullmq": "^5.81.4",
+    "dotenv": "^16.6.1",
     "reflect-metadata": "^0.2.2"
   }
 }
