@@ -1,0 +1,18 @@
+# Lo que no entra al contexto de construcción: dependencias y compilados locales
+# (se rehacen dentro), secretos y lo que no es código.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.env
+.env.*
+!.env.example
+.superpowers
+.claude
+bench-results
+clientes
+backups
+docs
+**/test
+*.log
+.DS_Store
