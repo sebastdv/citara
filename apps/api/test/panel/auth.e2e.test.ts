@@ -48,6 +48,15 @@ describe('login', () => {
     expect(res.text).toContain('Demasiados intentos');
     expect(res.headers['set-cookie']).toBeUndefined();
   });
+  it('veinte intentos simultáneos con clave mala: solo cinco llegan a verificarse', async () => {
+    const r = await Promise.all(Array.from({ length: 20 }, () => login('op@citara.co', 'mala-mala-mala')));
+    expect(r.filter((x) => x.status === 401)).toHaveLength(5);
+    expect(r.filter((x) => x.status === 429)).toHaveLength(15);
+    await login().expect(429);
+  });
+  it('entrar bien varias veces seguidas no bloquea', async () => {
+    for (let i = 0; i < 7; i++) await login().expect(303);
+  });
   it('next solo lleva a rutas del panel', async () => {
     for (const next of ['//evil.com', 'https://evil.com', '/panel/../x', '/\\evil.com', '/otro', '/panel//evil.com']) {
       const res = await login(undefined, undefined, next).expect(303);

@@ -6,32 +6,35 @@ beforeEach(async () => { await limiter.reset(); });
 afterAll(async () => { await limiter.close(); });
 
 describe('límite de intentos', () => {
-  it('bloquea al quinto fallo del mismo correo, venga de la IP que venga', async () => {
-    for (let i = 0; i < 4; i++) await limiter.fail('Op@Citara.co', `10.0.0.${i}`);
-    expect(await limiter.blocked('op@citara.co', '10.9.9.9')).toBe(false);
-    await limiter.fail('op@citara.co', '10.0.0.5');
-    expect(await limiter.blocked('op@citara.co', '10.9.9.9')).toBe(true);
+  it('cinco intentos fallidos del mismo correo, venga de la IP que venga, bloquean el sexto', async () => {
+    for (let i = 0; i < 5; i++) expect(await limiter.attempt('Op@Citara.co', `10.0.0.${i}`)).toBe(true);
+    expect(await limiter.attempt('op@citara.co', '10.9.9.9')).toBe(false);
   });
-  it('bloquea al quinto fallo desde la misma IP, con correos distintos', async () => {
-    for (let i = 0; i < 5; i++) await limiter.fail(`x${i}@c.co`, '10.0.0.1');
-    expect(await limiter.blocked('otro@c.co', '10.0.0.1')).toBe(true);
+  it('cinco intentos desde la misma IP, con correos distintos, bloquean el sexto', async () => {
+    for (let i = 0; i < 5; i++) expect(await limiter.attempt(`x${i}@c.co`, '10.0.0.1')).toBe(true);
+    expect(await limiter.attempt('otro@c.co', '10.0.0.1')).toBe(false);
   });
-  it('un acierto limpia el contador del correo', async () => {
-    for (let i = 0; i < 4; i++) await limiter.fail('op@citara.co', `10.0.0.${i}`);
-    await limiter.succeed('op@citara.co');
-    await limiter.fail('op@citara.co', '10.0.1.1');
-    expect(await limiter.blocked('op@citara.co', '10.0.2.2')).toBe(false);
+  it('en paralelo también: de veinte intentos simultáneos pasan solo cinco', async () => {
+    const r = await Promise.all(Array.from({ length: 20 }, (_, i) => limiter.attempt('op@citara.co', `10.1.0.${i}`)));
+    expect(r.filter(Boolean)).toHaveLength(5);
   });
-  it('la ventana es de 15 minutos y no se alarga con cada fallo', async () => {
-    await limiter.fail('op@citara.co', '10.0.0.1');
+  it('un acierto no cuenta: devuelve su intento al correo y a la IP', async () => {
+    for (let i = 0; i < 4; i++) await limiter.attempt('op@citara.co', '10.0.0.1');
+    await limiter.attempt('op@citara.co', '10.0.0.1');
+    await limiter.succeed('op@citara.co', '10.0.0.1');
+    // Sin el descuento la IP iría en 6 y este intento ya no pasaría.
+    expect(await limiter.attempt('op@citara.co', '10.0.0.1')).toBe(true);
+    expect(await limiter.attempt('z@c.co', '10.0.0.1')).toBe(false);
+  });
+  it('la ventana es de 15 minutos y no se alarga con cada intento', async () => {
+    await limiter.attempt('op@citara.co', '10.0.0.1');
     const first = await limiter.ttl('op@citara.co');
     expect(first).toBeGreaterThan(14 * 60);
     expect(first).toBeLessThanOrEqual(15 * 60);
   });
   it('sin Redis falla cerrado', async () => {
     const dead = new LoginLimiter('redis://127.0.0.1:1');
-    await expect(dead.blocked('op@citara.co', '10.0.0.1')).rejects.toBeInstanceOf(LimiterUnavailableError);
-    await expect(dead.fail('op@citara.co', '10.0.0.1')).rejects.toBeInstanceOf(LimiterUnavailableError);
+    await expect(dead.attempt('op@citara.co', '10.0.0.1')).rejects.toBeInstanceOf(LimiterUnavailableError);
     await dead.close();
   });
 });

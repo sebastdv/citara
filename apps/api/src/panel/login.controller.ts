@@ -40,13 +40,13 @@ export class PanelLoginController implements OnModuleDestroy {
 
     if (foreignOrigin(req)) return fail(403, 'La solicitud no vino del panel.');
     try {
-      if (await this.limiter.blocked(email, ip)) return fail(429, 'Demasiados intentos. Espera 15 minutos.');
+      if (!(await this.limiter.attempt(email, ip))) return fail(429, 'Demasiados intentos. Espera 15 minutos.');
       const [op] = await this.ds.query(
         `SELECT id, password_hash FROM operators WHERE lower(email) = $1 AND disabled_at IS NULL`, [email]);
       // Mismo trabajo exista o no el correo: el tiempo no revela cuál falló.
       const ok = await verifyPassword(password, op?.password_hash ?? await dummyHash());
-      if (!op || !ok) { await this.limiter.fail(email, ip); return fail(401, BAD); }
-      await this.limiter.succeed(email);
+      if (!op || !ok) return fail(401, BAD);
+      await this.limiter.succeed(email, ip);
       const token = await createSession(this.ds, op.id, { ip, userAgent: req.get('user-agent') ?? null });
       res.cookie(sessionCookie.name, token, sessionCookie.options());
       res.redirect(303, next);

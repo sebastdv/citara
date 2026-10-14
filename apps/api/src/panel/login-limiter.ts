@@ -8,8 +8,9 @@ const PREFIX = 'panel-login:';
 export class LimiterUnavailableError extends Error {}
 
 /**
- * Fallos de login por correo y por IP (spec §3.7.1). Sin Redis no se sabe si
- * alguien está probando contraseñas: el login falla cerrado.
+ * Intentos de login por correo y por IP (spec §3.7.1): cada intento cuenta al
+ * empezar y un acierto se descuenta, así que el contador son los fallos. Sin
+ * Redis no se sabe si alguien está probando contraseñas: el login falla cerrado.
  */
 export class LoginLimiter {
   private readonly redis: Redis;
@@ -29,14 +30,14 @@ export class LoginLimiter {
     try { return await fn(); } catch (err) { throw new LimiterUnavailableError((err as Error).message); }
   }
 
-  blocked(email: string, ip: string): Promise<boolean> {
+  /**
+   * Reserva el intento ANTES de verificar la clave, en una sola operación: si
+   * se contara después, cien POST simultáneos pasarían todos la comprobación
+   * antes de que ninguno sumara. Devuelve false si ya se pasó del límite.
+   */
+  attempt(email: string, ip: string): Promise<boolean> {
     const k = this.keys(email, ip);
-    return this.run(async () => (await this.redis.mget(k.email, k.ip)).some((v) => Number(v) >= MAX_FAILURES));
-  }
-
-  fail(email: string, ip: string): Promise<void> {
-    const k = this.keys(email, ip);
-    // SET NX EX fija la ventana con el primer fallo; INCR no la alarga.
+    // SET NX EX fija la ventana con el primer intento; INCR no la alarga.
     return this.run(async () => {
       const res = await this.redis.multi()
         .set(k.email, '0', 'EX', WINDOW_SECONDS, 'NX').incr(k.email)
@@ -44,11 +45,14 @@ export class LoginLimiter {
         .exec();
       const failed = res?.find(([err]) => err);
       if (!res || failed) throw failed?.[0] ?? new Error('la transacción de Redis no corrió');
+      return Number(res[1][1]) <= MAX_FAILURES && Number(res[3][1]) <= MAX_FAILURES;
     });
   }
 
-  succeed(email: string): Promise<void> {
-    return this.run(async () => { await this.redis.del(this.keys(email, '-').email); });
+  /** Entró: los fallos del correo se olvidan y su intento no cuenta contra la IP. */
+  succeed(email: string, ip: string): Promise<void> {
+    const k = this.keys(email, ip);
+    return this.run(async () => { await this.redis.multi().del(k.email).decr(k.ip).exec(); });
   }
 
   /** Para los tests. */
