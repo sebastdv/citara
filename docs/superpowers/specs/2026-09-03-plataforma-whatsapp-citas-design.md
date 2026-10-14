@@ -1,10 +1,16 @@
 # Citara — Chatbot de agendamiento por WhatsApp, operado como servicio
 
-**Versión:** 2.2 (2026-10-09) · v2.1: 2026-10-08 · v2: 2026-10-06 · v1: 2026-09-03
+**Versión:** 2.3 (2026-10-13) · v2.2: 2026-10-09 · v2.1: 2026-10-08 · v2: 2026-10-06 · v1: 2026-09-03
 **Estado:** v2 en revisión
 **Autor:** diseño colaborativo (brainstorming)
 
 ## Registro de cambios
+
+**v2.3 (2026-10-13)** — al planear la Fase 6
+- **Panel del operador detallado** (§3.7): bandeja de todos los negocios con los traspasos abiertos primero, chat con tomar, devolver y **responder** (`origin='operator'`, solo con la ventana de 24 h abierta), auditoría y costos.
+- **Acceso solo con contraseña** (scrypt), sesión en BD con cookie `HttpOnly` + `SameSite=Strict`, CSRF y límite de intentos. El operador se crea por CLI (§3.7.1).
+- **Costo de IA por cita = gasto del mes ÷ citas creadas en el mes**, por negocio y en su zona horaria. Las citas registran quién las agendó (`booked_by`: `flow` | `agent`) (§3.7.2, §4.1).
+- **`conversations.last_message_at`** mantenido por trigger, para ordenar la bandeja (§4.1).
 
 **v2.2 (2026-10-09)** — al planear la Fase 5
 - **Modelos fijados:** `claude-opus-5-5` para el agente por defecto y `claude-haiku-5-5` para interpretar respuestas que no encajan en un menú (§3.2).
@@ -180,6 +186,63 @@ Meta Cloud API
                      worker: control efectivo + ventana 24 h → reclamo → Meta
 ```
 
+### 3.7 Panel del operador
+
+Páginas HTML que genera la propia API bajo `/panel`, para un único operador. El HTML se
+arma con un helper `html` (plantilla etiquetada) que **escapa toda interpolación** salvo
+la marcada `raw()` a propósito: el panel muestra texto escrito por los clientes. El poco
+JS que lleva (refrescar listas) va inline con nonce de CSP. Sin dependencias nuevas.
+
+Las lecturas entre negocios se hacen **negocio por negocio con `runInTenant`**: RLS sigue
+aplicando y no existe un rol que la salte. Toda acción sobre una conversación verifica,
+dentro del contexto de ese negocio, que la conversación le pertenece; si no, 404.
+
+#### 3.7.1 Acceso
+
+- `operators` y `operator_sessions` son tablas **globales, sin RLS**. La app solo lee
+  `operators`; crear operadores y cambiar contraseñas va por la conexión admin del CLI
+  (`pnpm operator create <correo>`, `pnpm operator password <correo>`; esta última
+  cierra todas sus sesiones). Contraseña de 12 caracteres como mínimo, pedida sin eco.
+- **Contraseña con `scrypt`** (`node:crypto`), sal y parámetros dentro del hash,
+  comparación en tiempo constante. Un correo inexistente compara contra un hash señuelo:
+  misma respuesta y mismo tiempo que una contraseña mala.
+- **Sesión:** cookie `citara_op` con 32 bytes aleatorios (`HttpOnly`,
+  `SameSite=Strict`, `Path=/panel`, `Secure` fuera de local). En BD solo su SHA-256.
+  Vence a las 12 h sin uso y a los 7 días en todo caso. Cerrar sesión borra la fila.
+- **Límite de intentos:** 5 fallos en 15 minutos bloquean, por correo y por IP, contados
+  en Redis. Sin Redis el login falla cerrado. Detrás de Caddy la IP sale de `TRUST_PROXY`.
+- **CSRF:** cada formulario lleva `HMAC-SHA256(clave = token de sesión, "csrf")`, que no se
+  guarda ni se puede calcular sin la cookie, y los POST verifican además `Origin`.
+- **Cabeceras:** CSP con nonce, `X-Frame-Options: DENY`, `Cache-Control: no-store`,
+  `Referrer-Policy: same-origin` (con `no-referrer` el navegador manda `Origin: null`
+  en los POST de formulario).
+- Toda ruta `/panel/*` salvo el login exige sesión. Sin ella, los GET redirigen al login
+  (que vuelve solo a rutas `/panel/...`) y los POST dan 403.
+
+#### 3.7.2 Pantallas
+
+| Pantalla | Contenido | Refresco |
+|---|---|---|
+| **Bandeja** (`/panel`) | Pestaña «Traspasos abiertos» por defecto: donde manda un humano y no venció, con negocio, contacto, motivo, plazo, modalidad y si el último mensaje es del cliente y desde cuándo. Primero las de `cloud_api` sin responder. Pestaña «Todas», paginada y filtrable por negocio, por `last_message_at` | 15 s |
+| **Chat** (`/panel/negocios/<slug>/conversaciones/<id>`) | Control (quién, por qué, hasta cuándo), ventana de 24 h, estado del negocio y del canal; mensajes con su origen y, los salientes, su estado; acciones | 5 s, solo la lista de mensajes |
+| **Auditoría** (`/panel/auditoria`) | `audit_log` de todos los negocios, paginado por fecha, filtrable por negocio, prefijo de acción y conversación | — |
+| **Costos** (`/panel/costos`) | Por negocio y mes (en su zona): USD de agente e intérprete, llamadas y fallidas, tope y % usado, citas creadas por `booked_by`, **USD ÷ citas** («—» sin citas). Las citas canceladas cuentan: el gasto ya se hizo | — |
+
+**Acciones del chat** (en `runInTenant`, con la conversación `FOR NO KEY UPDATE`: un `FOR UPDATE` choca con el `FOR KEY SHARE` de los inserts que la referencian):
+
+- **Tomar el control:** `giveControlToHuman` con `reason='operator'`.
+- **Devolver al bot:** `returnControlToBot` con `cause='operator'`.
+- **Responder:** texto de 1 a 4096 caracteres. El servidor exige ventana abierta, negocio
+  `active` y canal `active`; la UI deshabilita el campo con la razón. Si el operador no
+  tenía el control, enviar se lo da (para que el bot no le conteste encima) y cada envío
+  alarga el plazo. La fila entra al outbox como `origin='operator'`, `pending`, sin
+  entrante asociado, y se encola **tras el commit** con `jobId` = id de la fila. Un id de
+  envío en el formulario hace idempotente el doble clic. Si encolar falla, la fila queda
+  `pending` y el chat ofrece reintentar (solo sobre `pending`; nunca reenvía un
+  `unconfirmed`). Se audita `message.operator_sent`.
+
+Todas las acciones del panel quedan en `audit_log` con `actor='operator:<id>'`.
+
 ---
 
 ## 4. Modelo de datos
@@ -198,7 +261,10 @@ CREATE POLICY tenant_isolation ON appointments
 **Identidad**
 - `tenants`: slug, nombre, **zona horaria**, estado (`onboarding` | `active` |
   `suspended`), `human_takeover_hours` (12 por defecto)
-- `operators`: las cuentas del panel (en v1, una)
+- `operators`: las cuentas del panel (en v1, una): correo, hash `scrypt`, `disabled_at`.
+  Global, sin RLS; la app solo la lee
+- `operator_sessions`: hash del token, `last_seen_at`, `expires_at`, IP y user agent.
+  Global, sin RLS
 - `whatsapp_channels`: `waba_id`, `phone_number_id`, token cifrado, **`mode`**
   (`cloud_api` | `coexistence`), `status` (`active` | `inactive` | `disconnected`),
   **`history_sync`** (`not_applicable` | `pending` | `done` | `declined`)
@@ -207,6 +273,8 @@ CREATE POLICY tenant_isolation ON appointments
 - `contacts`: `wa_id`, nombre de perfil, **`saved_name`** (el nombre con que el negocio
   tiene guardado al cliente en su celular)
 - `conversations`: `status` (`open` | `closed`), `last_inbound_at` (ventana de 24 h),
+  **`last_message_at`** (orden de la bandeja; lo mantiene un trigger `AFTER INSERT` en
+  `messages` con `GREATEST`, así un mensaje viejo del historial no la adelanta),
   **`control`** (`bot` | `human`), **`human_until`**, **`control_reason`** (`phone` |
   `flow_handoff` | `operator` | `history`)
 - `messages`: `wamid` **único** (dedup), `direction` (`in` | `out`), **`origin`**
@@ -230,7 +298,8 @@ CREATE POLICY tenant_isolation ON appointments
 - `resources`: quién atiende (el médico, la estilista, la bahía del taller)
 - `resource_services`: qué recurso presta qué servicio
 - `business_hours`, `time_off`
-- `appointments`: **fuente de verdad**
+- `appointments`: **fuente de verdad**. `booked_by` (`flow` | `agent`): quién la agendó.
+  Mover una cita no crea otra
 - `google_accounts`: **una por `resource`**, con refresh token cifrado, `calendar_id` (el
   calendario «Citas» que crea la app), `sync_token`, canal de `watch` y estado
   (`active` | `needs_reauth`)
@@ -522,13 +591,13 @@ debe caer por la razón correcta).
 
 | Fase | Entrega | Estado |
 |---|---|---|
-| **1. Cimientos** | Monorepo, gateway, tenancy + RLS, conversaciones, motor determinista, outbox de salida | Hecha salvo la prueba con número real y la fusión a `main` |
-| **1.5. Coexistencia (núcleo)** | Modelo de datos §4 (incluida `audit_log`, porque los cambios de control se registran desde aquí), eventos §5, control §6, `superseded`. Probada con payloads de ejemplo | Por planear |
-| **2. Agenda** | Servicios, recursos, horarios, disponibilidad, `appointments` con exclusión, `tenant:apply`, recordatorios por el outbox con plantillas. Se agenda por menús, sin IA | Plan existente, a ajustar |
-| **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | A replanear (sustituye a la antigua Fase 6) |
+| **1. Cimientos** | Monorepo, gateway, tenancy + RLS, conversaciones, motor determinista, outbox de salida | Hecha; falta la prueba con número real |
+| **1.5. Coexistencia (núcleo)** | Modelo de datos §4 (incluida `audit_log`, porque los cambios de control se registran desde aquí), eventos §5, control §6, `superseded`. Probada con payloads de ejemplo | Hecha; falta un número real |
+| **2. Agenda** | Servicios, recursos, horarios, disponibilidad, `appointments` con exclusión, `tenant:apply`, recordatorios por el outbox con plantillas. Se agenda por menús, sin IA | Hecha; faltan las plantillas aprobadas por Meta |
+| **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | Hecha; falta la aprobación de Tech Provider |
 | **4. Google Calendar** | OAuth por recurso con enlace firmado, insert idempotente, `watch`, health check | Implementada (2026-10-08); falta la prueba con una cuenta real |
 | **5. El agente** | `ai_turn`, `ai_fallback`, clasificador, herramientas, guardarraíles, `agent_runs`, banco de regresión | Implementada (2026-10-09); falta correr el banco con el modelo real |
-| **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar o devolver el control, consulta de `audit_log`, traspasos abiertos, costo de IA por cita | A replanear (reducida) |
+| **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar, devolver y responder, consulta de `audit_log`, traspasos abiertos, costo de IA por cita (§3.7) | Implementada (2026-10-14); falta probarla detrás de Caddy con un número real |
 
 **Punto de corte con valor:** al terminar la Fase 3 hay un cliente real con su número en
 coexistencia, agendando por menús, sin una línea de IA.
@@ -571,3 +640,5 @@ con su propia fila `pending` y sin entrante asociado.
 - Facturación a los clientes (se mide el consumo, no se cobra)
 - Descarga de adjuntos del historial importado
 - Notificaciones push al operador
+- Desde el panel: plantillas (con la ventana cerrada no se escribe), editar configuración
+  o citas, búsqueda de texto en los chats, varios operadores con roles, segundo factor

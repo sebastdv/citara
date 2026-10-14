@@ -11,6 +11,7 @@ import { AvailabilityService, type ExternalBusy } from '../src/scheduling/availa
 import { BookingService } from '../src/scheduling/booking.service';
 import { ToolRegistry } from '../src/scheduling/tools/registry';
 import { RemindersService } from '../src/scheduling/reminders.service';
+import { hashPassword } from '../src/panel/password';
 
 let admin: DataSource | null = null;
 
@@ -32,7 +33,7 @@ async function adminDs(): Promise<DataSource> {
 export async function resetDb(): Promise<void> {
   const ds = await adminDs();
   await ds.query(`
-    TRUNCATE agent_runs, agent_configs, google_accounts, onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
+    TRUNCATE operator_sessions, operators, agent_runs, agent_configs, google_accounts, onboarding_links, reminders, webhook_events, audit_log, messages, conversation_sessions, conversations,
              flows, appointments, business_hours, time_off, resource_services, resources, services, contacts, whatsapp_channels, tenants
     RESTART IDENTITY CASCADE
   `);
@@ -169,4 +170,12 @@ export async function seedAgentConfig(
     [tenantId, over.version ?? 1, over.enabled ?? true, over.model ?? 'claude-opus-5-5', over.effort ?? 'low',
      over.instructions ?? '', over.monthlyBudgetUsd ?? 20]);
   return c.id;
+}
+
+/** Un operador del panel con contraseña conocida. */
+export async function seedOperator(email = 'op@citara.co', password = 'clave-de-prueba-123'): Promise<string> {
+  const ds = await adminDs();
+  const [o] = await ds.query(
+    `INSERT INTO operators (email, password_hash) VALUES ($1, $2) RETURNING id`, [email, await hashPassword(password)]);
+  return o.id;
 }

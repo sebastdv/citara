@@ -239,7 +239,7 @@ export class ToolRegistry {
           const cita = await booking.book(ctx.m, ctx.tenantId, {
             serviceId: a.servicio_id, resourceId: a.recurso_id, contactId: ctx.contactId,
             conversationId: ctx.conversationId, startsAt,
-            customerName: a.nombre, notes: a.notas ?? null, now: ctx.now });
+            customerName: a.nombre, notes: a.notas ?? null, now: ctx.now, bookedBy: ctx.actor ?? 'flow' });
           return { ok: true, data: { id: cita.id, inicio: isoIn(cita.startsAt, timezone), estado: cita.status,
                                      etiqueta: labelFor(cita.startsAt, timezone) } };
         },

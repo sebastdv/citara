@@ -236,6 +236,15 @@ describe('confirmaciones atadas al turno (R4)', () => {
     expect(confirmado).toMatchObject({ ok: true, data: { estado: 'confirmed' } });
   });
 
+  it('lo que agenda el agente queda como booked_by = agent; lo de los menús, flow', async () => {
+    const args = { servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' };
+    const pedido = await run('agendar_cita', args, contactId, { turnId: T1, actor: 'agent' });
+    await run('agendar_cita', { ...args, confirmation_token: pedido.confirmationToken }, contactId, { turnId: T2, actor: 'agent' });
+    await run('agendar_cita', { ...args, inicio: '2026-09-10T11:00:00-05:00' });
+    expect((await adminQuery(`SELECT booked_by FROM appointments ORDER BY starts_at`)).map((r: { booked_by: string }) => r.booked_by))
+      .toEqual(['agent', 'flow']);
+  });
+
   it('pedir confirmación de una hora ocupada ya avisa que está ocupada', async () => {
     await agendar();
     const args = { servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Luis' };

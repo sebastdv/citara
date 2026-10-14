@@ -29,6 +29,13 @@ beforeEach(async () => {
 });
 
 describe('BookingService.book', () => {
+  it('registra quién agendó; por defecto el flujo', async () => {
+    const a = await inTenant((m) => s.booking.book(m, tenantId, { ...input(), bookedBy: 'agent' }));
+    const b = await inTenant((m) => s.booking.book(m, tenantId, input(new Date('2026-09-10T16:00:00Z'))));
+    expect(await adminQuery(`SELECT id, booked_by FROM appointments ORDER BY starts_at`))
+      .toEqual([{ id: a.id, booked_by: 'agent' }, { id: b.id, booked_by: 'flow' }]);
+  });
+
   it('reserva una franja libre y calcula el fin con la duración del servicio', async () => {
     const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
     expect(cita.startsAt.toISOString()).toBe(JUEVES_10AM.toISOString());

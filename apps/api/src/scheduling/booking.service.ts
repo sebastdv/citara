@@ -15,6 +15,8 @@ const COLUMNS = `id, service_id, resource_id, contact_id, conversation_id, start
 export interface BookInput {
   serviceId: string; resourceId: string; contactId: string; startsAt: Date;
   customerName: string; conversationId?: string | null; notes?: string | null; now: Date;
+  /** Quién la agenda: el flujo de menús o el agente (spec §3.7.2). */
+  bookedBy?: 'flow' | 'agent';
 }
 
 export interface Appointment {
@@ -49,11 +51,11 @@ export class BookingService {
     try {
       const [row] = await m.query(
         `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, conversation_id,
-                                   starts_at, ends_at, customer_name, notes)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                                   starts_at, ends_at, customer_name, notes, booked_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          RETURNING ${COLUMNS}`,
         [tenantId, input.resourceId, input.serviceId, input.contactId, input.conversationId ?? null,
-         input.startsAt, endsAt, input.customerName, input.notes ?? null]);
+         input.startsAt, endsAt, input.customerName, input.notes ?? null, input.bookedBy ?? 'flow']);
       await m.query(`RELEASE SAVEPOINT reservar_cita`);
       const cita = toAppointment(row);
       await this.reminders.scheduleFor(m, tenantId, cita.id, cita.startsAt, input.now);

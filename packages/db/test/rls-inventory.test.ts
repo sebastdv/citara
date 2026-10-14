@@ -70,6 +70,10 @@ const PRESUPUESTO: Record<string, string[]> = {
   // IA: la configuración es del operador; las corridas solo se agregan.
   agent_configs: ['SELECT'],
   agent_runs: ['SELECT', 'INSERT'],
+  // Panel (Fase 6): globales, sin tenant_id. La app solo lee operadores; las
+  // sesiones las crea, renueva y borra el login.
+  operators: ['SELECT'],
+  operator_sessions: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
   // Las migraciones las corre el administrador, nunca la aplicación.
   migrations: [],
 };

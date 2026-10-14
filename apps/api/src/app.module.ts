@@ -44,9 +44,14 @@ import { CalendarWatchService } from './google/calendar-watch.service';
 import { CalendarHealthProcessor } from './google/calendar-health.processor';
 import { GoogleWebhookController } from './google/google-webhook.controller';
 import { ConnectGoogleController } from './google/connect-google.controller';
+import { LoginLimiter } from './panel/login-limiter';
+import { PanelGuard } from './panel/panel-auth';
+import { PanelLoginController } from './panel/login.controller';
+import { PanelController } from './panel/panel.controller';
 
 @Module({
-  controllers: [WhatsappController, ConnectController, ConnectGoogleController, GoogleWebhookController],
+  controllers: [WhatsappController, ConnectController, ConnectGoogleController, GoogleWebhookController,
+                PanelLoginController, PanelController],
   providers: [
     {
       // DataSource de la APLICACIÓN (DATABASE_URL, rol citara_app) — nunca el
@@ -166,6 +171,9 @@ import { ConnectGoogleController } from './google/connect-google.controller';
     AgentQueue,
     AgentProcessor,
     { provide: CLOCK, useValue: systemClock },
+    // Panel del operador (Fase 6). El limiter no lleva @Injectable(): recibe la URL de Redis.
+    { provide: LoginLimiter, useFactory: () => new LoginLimiter(process.env.REDIS_URL!) },
+    PanelGuard,
   ],
 })
 export class AppModule {}
