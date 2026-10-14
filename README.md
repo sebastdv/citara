@@ -59,6 +59,7 @@ Meta ──webhook──► api (HMAC, dedup, encola, 200)
 
 NestJS 11 · TypeScript · TypeORM (migraciones y SQL a mano) · PostgreSQL 16 (`btree_gist`)
 · Redis + BullMQ · Luxon · Zod · Anthropic SDK · Google Calendar API v3 · Vitest.
+En producción: Docker Compose en un VPS, con Caddy para el TLS.
 
 ## Estructura
 
@@ -69,8 +70,10 @@ apps/
 packages/
   db/         migraciones (una por tabla) y entidades
   shared/     tipos y contratos compartidos (flujos, contenido saliente)
+deploy/       compose de producción, Caddyfile, scripts de despliegue y prueba de humo
 docs/
   desarrollo-local.md                   cómo levantarlo y operarlo
+  produccion.md                         el servidor, desplegar, respaldos y restaurar
   ejemplos/negocio.yaml                 configuración de ejemplo de un negocio
   superpowers/specs/…-design.md         la spec (fuente de verdad del diseño)
   superpowers/plans/                    el plan de cada fase
@@ -139,12 +142,32 @@ pnpm start:worker
 `sync`, `agent`, `agent-rollback`). Todos los comandos de la CLI corren sobre lo compilado:
 `pnpm build` primero.
 
+## Producción
+
+Un VPS con Docker Compose: Postgres, Redis, la API, el worker y Caddy, que saca y renueva el
+certificado. La imagen se construye en el servidor y cada despliegue lo lanzas tú:
+
+```bash
+CITARA_SSH=citara@citas.tudominio.com ./deploy/deploy.sh main
+```
+
+Respalda la base, migra, cambia de versión y comprueba que la API responda y el worker siga
+en pie; si no, vuelve solo a la versión anterior. `./deploy/deploy.sh rollback` vuelve atrás
+sin recompilar. Hay un respaldo nocturno en el disco del VPS. Todo, desde un servidor vacío,
+en [docs/produccion.md](docs/produccion.md).
+
 ## Tests
 
 `pnpm test` corre contra Postgres y Redis reales. Usa una base exclusiva (`citara_test`) y
 una db de Redis aparte, así que no toca tus datos de desarrollo. Meta, Google y el modelo
 se reemplazan por dobles; nunca se llama a sus APIs reales. Los tests de punta a punta
 levantan el webhook firmado, Redis y los workers reales.
+
+En cada PR y en cada push a `main`, GitHub Actions corre el typecheck, todos los tests y la
+construcción de la imagen de producción (`.github/workflows/ci.yml`). Los cambios del
+despliegue se prueban con `./deploy/smoke/smoke.sh`, que levanta el compose de producción en
+tu máquina, lo ejercita (despliegue, rollback, versión rota, respaldo y restauración) y lo
+borra.
 
 El banco de regresión del agente (`pnpm agent:bench`) es la excepción: habla con el modelo
 real, cuesta dinero y no corre en CI. `tenant:apply` exige haberlo pasado antes de
@@ -161,6 +184,7 @@ publicar un cambio de comportamiento del agente.
 | 4 · Google Calendar | OAuth por recurso, proyección y sincronización inversa | Hecha; falta una cuenta real |
 | 5 · El agente | Agente, intérprete, guardarraíles, costos, banco de regresión | Hecha; falta correr el banco con el modelo real |
 | 6 · Panel del operador | Bandeja, control, respuestas, auditoría, costo por cita | Hecha; falta probarlo detrás de Caddy |
+| 7 · Despliegue | Imagen, compose con Caddy, despliegue y rollback, respaldos, CI | Hecha; falta el primer servidor |
 
 Pendiente fuera del código: la aprobación de Meta como Tech Provider, la verificación OAuth
 de Google, las plantillas de recordatorio aprobadas y las pruebas con números reales.
