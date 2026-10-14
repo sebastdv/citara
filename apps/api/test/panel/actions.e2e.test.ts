@@ -169,6 +169,8 @@ describe('acciones del panel de punta a punta', () => {
     await reply(c, 'hola').then((r) => expect(r.status).toBe(303));
     await quiesce();
     expect(sent).toEqual([]);
+    expect((await s.get(chat(c)).expect(200)).text).not.toContain('Hay mensajes tuyos sin enviar');
+    await adminQuery(`UPDATE messages SET created_at = now() - interval '1 minute'`);
     const page = await s.get(chat(c)).expect(200);
     expect(page.text).toContain('Hay mensajes tuyos sin enviar');
     for (let i = 0; i < 2; i++) {

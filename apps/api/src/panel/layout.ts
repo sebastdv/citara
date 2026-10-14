@@ -13,7 +13,9 @@ export function sendHtml(res: Response, status: number, page: string, nonce: str
     `form-action 'self'; base-uri 'none'; frame-ancestors 'none'`);
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Cache-Control', 'no-store');
-  res.setHeader('Referrer-Policy', 'no-referrer');
+  // same-origin y no no-referrer: con no-referrer el navegador manda `Origin: null`
+  // en los POST de formulario y el panel no podría distinguirlos de otro sitio.
+  res.setHeader('Referrer-Policy', 'same-origin');
   res.status(status).type('html').send(page);
 }
 

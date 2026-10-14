@@ -2,6 +2,11 @@ import type { EntityManager } from 'typeorm';
 import type { OutboundContent } from '@citara/shared';
 
 export const CHAT_LIMIT = 200;
+/**
+ * `pending` es también el estado normal mientras el worker lo toma: solo pasado
+ * este margen un mensaje del operador cuenta como atascado (y se ofrece reintentar).
+ */
+export const STUCK_AFTER_SECONDS = 30;
 
 export interface ChatMessage { id: string; direction: 'in' | 'out'; origin: string; status: string | null; at: Date; text: string }
 
@@ -44,8 +49,9 @@ export async function loadConversation(m: EntityManager, conversationId: string)
      ORDER BY occurred_at, created_at, seq NULLS FIRST`, [conversationId, CHAT_LIMIT]);
   const [{ pending }] = await m.query(
     `SELECT EXISTS (SELECT 1 FROM messages
-                     WHERE conversation_id = $1 AND origin = 'operator' AND status = 'pending') AS pending`,
-    [conversationId]);
+                     WHERE conversation_id = $1 AND origin = 'operator' AND status = 'pending'
+                       AND created_at < now() - make_interval(secs => $2)) AS pending`,
+    [conversationId, STUCK_AFTER_SECONDS]);
   return {
     conversationId: c.id, contactName: c.contact_name, waId: c.wa_id, mode: c.mode, channelId: c.channel_id,
     channelStatus: c.channel_status, tenantStatus: c.tenant_status, control: c.control, reason: c.control_reason,

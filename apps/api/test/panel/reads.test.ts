@@ -100,10 +100,20 @@ describe('chat', () => {
     await msg(a.tenantId, c, '2026-10-13T14:01:00Z', { direction: 'out', origin: 'operator', status: 'pending',
       body: 'ya te ayudo', payload: { kind: 'text', body: 'ya te ayudo' } });
     await msg(a.tenantId, c, '2026-10-13T14:00:00Z');
+    await adminQuery(`UPDATE messages SET created_at = now() - interval '1 minute'`);
     const v = (await runInTenant(app, a.tenantId, (m) => loadConversation(m, c)))!;
     expect(v.messages.map((x) => [x.origin, x.status, x.text])).toEqual([
       ['customer', null, 'hola'], ['operator', 'pending', 'ya te ayudo']]);
     expect(v.hasPendingOperator).toBe(true);
+  });
+  it('un mensaje del operador recién enviado no cuenta como atascado: pending es también "va saliendo"', async () => {
+    const a = await seedBiz('a', '1');
+    const c = await seedConv(a, '571');
+    await msg(a.tenantId, c, new Date().toISOString(), { direction: 'out', origin: 'operator', status: 'pending',
+      payload: { kind: 'text', body: 'recién' } });
+    expect((await runInTenant(app, a.tenantId, (m) => loadConversation(m, c)))!.hasPendingOperator).toBe(false);
+    await adminQuery(`UPDATE messages SET created_at = now() - interval '31 seconds'`);
+    expect((await runInTenant(app, a.tenantId, (m) => loadConversation(m, c)))!.hasPendingOperator).toBe(true);
   });
   it('muestra solo los últimos 200 mensajes, en orden', async () => {
     const a = await seedBiz('a', '1');

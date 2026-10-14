@@ -67,6 +67,9 @@ describe('login', () => {
     expect(res.headers['content-security-policy']).toMatch(/script-src 'nonce-[^']+'/);
     expect(res.headers['x-frame-options']).toBe('DENY');
     expect(res.headers['cache-control']).toBe('no-store');
+    // Con no-referrer, Chrome manda `Origin: null` en los POST de formulario y el
+    // panel los rechazaría todos. same-origin no filtra nada hacia otros sitios.
+    expect(res.headers['referrer-policy']).toBe('same-origin');
     expect(res.text).not.toContain('">"');
   });
 });
