@@ -14,8 +14,9 @@ import { html } from './html';
 import { loadInbox, type Cursor, type InboxFilter } from './inbox';
 import { loadConversation } from './conversation';
 import { panelTenants, tenantBySlug } from './tenants';
-import { auditView, chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
+import { auditView, costsView, chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
 import { loadAudit, type AuditFilter } from './audit-view';
+import { loadCosts, parseMonth } from './costs';
 import {
   ACTION_NOTICE, PanelActionError, pendingOperatorJobs, returnControl, sendOperatorMessage, takeControl,
 } from './actions';
@@ -75,6 +76,13 @@ export class PanelController {
     };
     const { rows, next } = await loadAudit(this.ds, filter);
     sendHtml(res, 200, auditView(ctx, { filter, tenants: await panelTenants(this.ds), rows, next }), ctx.nonce);
+  }
+
+  @Get('costos')
+  async costs(@Query('mes') mes: unknown, @Req() req: PanelRequest, @Res() res: Response) {
+    const ctx = pageCtx(req);
+    const ym = parseMonth(mes);
+    sendHtml(res, 200, costsView(ctx, { ym, rows: await loadCosts(this.ds, ym) }), ctx.nonce);
   }
 
   @Post('negocios/:slug/conversaciones/:id/tomar')

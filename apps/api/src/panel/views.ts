@@ -6,6 +6,7 @@ import { CHAT_LIMIT, type ChatView } from './conversation';
 import type { Cursor, InboxFilter, InboxRow } from './inbox';
 import type { PanelTenant } from './tenants';
 import type { AuditFilter, AuditRow } from './audit-view';
+import type { CostRow } from './costs';
 
 export const fmtIn = (d: Date, tz: string) =>
   DateTime.fromJSDate(d).setZone(tz).setLocale('es').toFormat('d LLL HH:mm');
@@ -153,4 +154,28 @@ export function auditView(
         <td><pre>${JSON.stringify(r.details)}</pre></td></tr>`)}
       </tbody></table></div>` : html`<p>No hay registros.</p>`}
     ${d.next ? html`<p><a href="${query('/panel/auditoria', { negocio: f.slug, accion: f.action, conversacion: f.conversationId, antes: cursorParam(d.next) })}">Más antiguos →</a></p>` : ''}`);
+}
+
+const usd = (n: number) =>
+  `US$ ${n.toLocaleString('es-CO', { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+
+export function costsView(ctx: PageCtx, d: { ym: { year: number; month: number }; rows: CostRow[] }): string {
+  const label = `${d.ym.year}-${String(d.ym.month).padStart(2, '0')}`;
+  return panelPage('Costos', ctx, html`
+    <h1>Costo de IA por cita</h1>
+    <form method="get" action="/panel/costos"><input type="month" name="mes" value="${label}"> <button>Ver</button></form>
+    <p class="meta">Mes calendario en la zona horaria de cada negocio. Las citas son las creadas en el mes,
+       aunque luego se hayan cancelado: el gasto para agendarlas ya se hizo.</p>
+    ${d.rows.length ? html`<div class="tabla"><table>
+      <thead><tr><th>Negocio</th><th>Agente</th><th>Intérprete</th><th>Llamadas</th><th>Tope del mes</th>
+                 <th>Citas (agente / menús)</th><th>Costo por cita</th></tr></thead><tbody>
+      ${d.rows.map((r) => {
+        const total = r.agentUsd + r.interpretUsd;
+        const cap = r.budgetUsd === null ? 'sin IA' : !r.enabled ? 'apagada'
+          : `${usd(r.budgetUsd)} (${r.budgetUsd ? Math.round((total / r.budgetUsd) * 100) : 0} %)`;
+        return html`<tr><td>${r.tenant.name}</td><td>${usd(r.agentUsd)}</td><td>${usd(r.interpretUsd)}</td>
+          <td>${r.calls}${r.failed ? html` <span class="meta">(${r.failed} fallidas)</span>` : ''}</td><td>${cap}</td>
+          <td>${r.appointments} (${r.byAgent} / ${r.byFlow})</td>
+          <td>${r.usdPerAppointment === null ? '—' : usd(r.usdPerAppointment)}</td></tr>`;
+      })}</tbody></table></div>` : html`<p>No hay negocios.</p>`}`);
 }
