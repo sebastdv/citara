@@ -1,0 +1,11 @@
+[Unit]
+Description=Respaldo nocturno de la base de Citara
+
+[Timer]
+# 08:30 UTC = 03:30 en Bogotá, la hora más tranquila. Persistent: si el
+# servidor estaba apagado a esa hora, corre al arrancar.
+OnCalendar=*-*-* 08:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
