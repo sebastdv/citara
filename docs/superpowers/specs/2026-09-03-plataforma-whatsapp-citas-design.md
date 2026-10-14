@@ -591,10 +591,10 @@ debe caer por la razón correcta).
 
 | Fase | Entrega | Estado |
 |---|---|---|
-| **1. Cimientos** | Monorepo, gateway, tenancy + RLS, conversaciones, motor determinista, outbox de salida | Hecha salvo la prueba con número real y la fusión a `main` |
-| **1.5. Coexistencia (núcleo)** | Modelo de datos §4 (incluida `audit_log`, porque los cambios de control se registran desde aquí), eventos §5, control §6, `superseded`. Probada con payloads de ejemplo | Por planear |
-| **2. Agenda** | Servicios, recursos, horarios, disponibilidad, `appointments` con exclusión, `tenant:apply`, recordatorios por el outbox con plantillas. Se agenda por menús, sin IA | Plan existente, a ajustar |
-| **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | A replanear (sustituye a la antigua Fase 6) |
+| **1. Cimientos** | Monorepo, gateway, tenancy + RLS, conversaciones, motor determinista, outbox de salida | Hecha; falta la prueba con número real |
+| **1.5. Coexistencia (núcleo)** | Modelo de datos §4 (incluida `audit_log`, porque los cambios de control se registran desde aquí), eventos §5, control §6, `superseded`. Probada con payloads de ejemplo | Hecha; falta un número real |
+| **2. Agenda** | Servicios, recursos, horarios, disponibilidad, `appointments` con exclusión, `tenant:apply`, recordatorios por el outbox con plantillas. Se agenda por menús, sin IA | Hecha; faltan las plantillas aprobadas por Meta |
+| **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | Hecha; falta la aprobación de Tech Provider |
 | **4. Google Calendar** | OAuth por recurso con enlace firmado, insert idempotente, `watch`, health check | Implementada (2026-10-08); falta la prueba con una cuenta real |
 | **5. El agente** | `ai_turn`, `ai_fallback`, clasificador, herramientas, guardarraíles, `agent_runs`, banco de regresión | Implementada (2026-10-09); falta correr el banco con el modelo real |
 | **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar, devolver y responder, consulta de `audit_log`, traspasos abiertos, costo de IA por cita (§3.7) | Implementada (2026-10-14); falta probarla detrás de Caddy con un número real |
