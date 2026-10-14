@@ -214,7 +214,8 @@ dentro del contexto de ese negocio, que la conversación le pertenece; si no, 40
 - **CSRF:** cada formulario lleva `HMAC-SHA256(clave = token de sesión, "csrf")`, que no se
   guarda ni se puede calcular sin la cookie, y los POST verifican además `Origin`.
 - **Cabeceras:** CSP con nonce, `X-Frame-Options: DENY`, `Cache-Control: no-store`,
-  `Referrer-Policy: no-referrer`.
+  `Referrer-Policy: same-origin` (con `no-referrer` el navegador manda `Origin: null`
+  en los POST de formulario).
 - Toda ruta `/panel/*` salvo el login exige sesión. Sin ella, los GET redirigen al login
   (que vuelve solo a rutas `/panel/...`) y los POST dan 403.
 
@@ -596,7 +597,7 @@ debe caer por la razón correcta).
 | **3. Alta asistida** | §8. El código no depende de la aprobación de Tech Provider; el cierre sí | A replanear (sustituye a la antigua Fase 6) |
 | **4. Google Calendar** | OAuth por recurso con enlace firmado, insert idempotente, `watch`, health check | Implementada (2026-10-08); falta la prueba con una cuenta real |
 | **5. El agente** | `ai_turn`, `ai_fallback`, clasificador, herramientas, guardarraíles, `agent_runs`, banco de regresión | Implementada (2026-10-09); falta correr el banco con el modelo real |
-| **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar, devolver y responder, consulta de `audit_log`, traspasos abiertos, costo de IA por cita (§3.7) | Diseñada (2026-10-13) |
+| **6. Panel del operador** | `operators` y sesión, bandeja de todos los negocios, tomar, devolver y responder, consulta de `audit_log`, traspasos abiertos, costo de IA por cita (§3.7) | Implementada (2026-10-14); falta probarla detrás de Caddy con un número real |
 
 **Punto de corte con valor:** al terminar la Fase 3 hay un cliente real con su número en
 coexistencia, agendando por menús, sin una línea de IA.

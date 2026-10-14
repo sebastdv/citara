@@ -222,6 +222,34 @@ La conversación es **híbrida**: los menús siguen siendo el camino principal y
 - Si el modelo falla dos veces, se niega o se enreda, el cliente recibe una disculpa y la conversación pasa al dueño. Nunca queda en silencio.
 - Mientras el agente piensa, el cliente ve "escribiendo..." (VERIFICAR el formato con el primer número real).
 
+## El panel del operador (Fase 6)
+
+1. Crea tu operador. Pide la contraseña sin mostrarla (mínimo 12 caracteres):
+   `pnpm build && pnpm operator create tu@correo.com`
+2. Arranca la API (`pnpm start:api`) y entra en `http://localhost:3000/panel/login`.
+3. Cambiar la contraseña cierra todas tus sesiones: `pnpm operator password tu@correo.com`.
+   Quitar el acceso: `pnpm operator disable tu@correo.com`.
+
+En producción, detrás de Caddy: `PUBLIC_BASE_URL=https://…` (la cookie sale con `Secure` y
+los formularios solo se aceptan desde ese origen) y `TRUST_PROXY=1`, para que el límite de
+intentos (5 fallos en 15 minutos por correo y por IP) vea la IP real y no la del proxy. Sin
+Redis el login falla cerrado.
+
+Qué hay:
+
+- **Bandeja:** los traspasos abiertos de todos los negocios, primero los de número dedicado
+  con el cliente esperando (ahí nadie más va a contestar). La pestaña «Todas» pagina por
+  última actividad. Se refresca sola cada 15 s.
+- **Chat:** quién habla y hasta cuándo, la ventana de 24 h y cada mensaje con su origen y su
+  estado. Tomar, devolver y responder; responder te da el control y solo se puede con la
+  ventana abierta, el negocio activo y el canal conectado. Si encolar falla, el mensaje queda
+  pendiente y aparece «Reintentar». Los mensajes se refrescan cada 5 s sin borrar lo que
+  escribes.
+- **Auditoría:** `audit_log` de todos los negocios, filtrable por negocio, prefijo de acción
+  (`control.`, `agent.`, `channel.`…) y conversación. Lo del panel sale como `operator:<id>`.
+- **Costos:** por negocio y mes (en su zona horaria), USD del agente y del intérprete, el
+  tope, las citas creadas (agente / menús) y el costo por cita.
+
 ## Coexistencia (Fase 1.5)
 
 Con un número conectado en coexistencia (ver el alta, arriba), en la app de
