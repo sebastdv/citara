@@ -1,0 +1,74 @@
+# Typecheck, todos los tests y la imagen de producción en cada PR y en cada push
+# a main. No publica imágenes ni despliega: eso es deploy/deploy.sh, a mano.
+# El banco del agente no corre aquí: habla con el modelo real y cuesta dinero.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: citara
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 5s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-retries 20
+    # Valores solo de prueba: los tests derivan de aquí su base (citara_test) y su db de Redis.
+    env:
+      TZ: UTC
+      DATABASE_URL: postgres://citara_app:citara_app@localhost:5432/citara
+      DATABASE_ADMIN_URL: postgres://postgres:postgres@localhost:5432/citara
+      REDIS_URL: redis://localhost:6379
+      DB_ENCRYPTION_KEY: k0WyDSKN2LMSouvAV+n6Jm31jKptSR3je71V1ZLFkRk=
+      META_APP_SECRET: ci-app-secret
+      META_VERIFY_TOKEN: ci-verify-token
+      META_GRAPH_VERSION: v25.0
+      PUBLIC_BASE_URL: http://localhost:3000
+    steps:
+      - uses: actions/checkout@v4
+      # Toma la versión de pnpm de "packageManager" en package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Construir la imagen de producción
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: citara:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
