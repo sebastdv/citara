@@ -69,7 +69,7 @@ export class PanelGuard implements CanActivate {
   async canActivate(ctx: ExecutionContext): Promise<boolean> {
     const req = ctx.switchToHttp().getRequest<PanelRequest>();
     const token = readCookie(req, SESSION_COOKIE);
-    const session = token ? await findSession(this.ds, token) : null;
+    const session = token ? await findSession(this.ds, token, { touch: !req.get('X-Fragment') }) : null;
     const read = req.method === 'GET' || req.method === 'HEAD';
     if (!session) {
       if (read) throw new LoginRequired(req.originalUrl);

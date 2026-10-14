@@ -30,7 +30,13 @@ export async function createSession(
   return token;
 }
 
-export async function findSession(ds: DataSource, token: string): Promise<OperatorSession | null> {
+/**
+ * `touch: false` para el refresco automático de la página: sondear no es usar
+ * el panel, y si renovara, una pestaña abierta nunca vencería por inactividad.
+ */
+export async function findSession(
+  ds: DataSource, token: string, opts: { touch?: boolean } = {},
+): Promise<OperatorSession | null> {
   const [s] = await ds.query(
     `SELECT s.id, s.operator_id, o.email, s.last_seen_at < now() - interval '1 minute' AS stale
        FROM operator_sessions s JOIN operators o ON o.id = s.operator_id
@@ -39,7 +45,7 @@ export async function findSession(ds: DataSource, token: string): Promise<Operat
     [sha256(token), IDLE_HOURS]);
   if (!s) return null;
   // Se renueva como mucho una vez por minuto: el refresco del chat pide cada 5 s.
-  if (s.stale) await ds.query(`UPDATE operator_sessions SET last_seen_at = now() WHERE id = $1`, [s.id]);
+  if (s.stale && opts.touch !== false) await ds.query(`UPDATE operator_sessions SET last_seen_at = now() WHERE id = $1`, [s.id]);
   return { sessionId: s.id, operatorId: s.operator_id, email: s.email, csrf: csrfFor(token) };
 }
 

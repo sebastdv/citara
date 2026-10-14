@@ -104,6 +104,16 @@ describe('guard', () => {
       .type('form').send({ _csrf: csrf }).expect(403);
     expect(await adminQuery(`SELECT * FROM operator_sessions`)).toHaveLength(1);
   });
+  it('el refresco automático no cuenta como uso: la sesión vence a las 12 h aunque la pestaña siga abierta', async () => {
+    const cookie = cookieOf(await login());
+    const age = async () => (await adminQuery(
+      `SELECT extract(epoch FROM now() - last_seen_at)::int AS s FROM operator_sessions`))[0].s as number;
+    await adminQuery(`UPDATE operator_sessions SET last_seen_at = now() - interval '2 hours'`);
+    await http().get('/panel').set('Cookie', cookie).set('X-Fragment', 'lista').expect(200);
+    expect(await age()).toBeGreaterThan(7000);
+    await http().get('/panel').set('Cookie', cookie).expect(200);
+    expect(await age()).toBeLessThan(60);
+  });
   it('salir borra la sesión y la cookie', async () => {
     const cookie = cookieOf(await login());
     const page = await http().get('/panel').set('Cookie', cookie).expect(200);
