@@ -5,6 +5,7 @@ import { canSendFreeform } from '../conversations/session-window';
 import { CHAT_LIMIT, type ChatView } from './conversation';
 import type { Cursor, InboxFilter, InboxRow } from './inbox';
 import type { PanelTenant } from './tenants';
+import type { AuditFilter, AuditRow } from './audit-view';
 
 export const fmtIn = (d: Date, tz: string) =>
   DateTime.fromJSDate(d).setZone(tz).setLocale('es').toFormat('d LLL HH:mm');
@@ -131,4 +132,25 @@ export function chatView(
       <textarea name="texto" maxlength="4096" ${blocked ? html`disabled` : ''}>${d.draft ?? ''}</textarea>
       <p><button ${blocked ? html`disabled` : ''}>Enviar</button> <span class="meta">Enviar te da el control de la conversación.</span></p>
     </form>`);
+}
+
+export function auditView(
+  ctx: PageCtx, d: { filter: AuditFilter; tenants: PanelTenant[]; rows: AuditRow[]; next: Cursor | null },
+): string {
+  const f = d.filter;
+  return panelPage('Auditoría', ctx, html`
+    <h1>Auditoría</h1>
+    <form method="get" action="/panel/auditoria">
+      ${tenantSelect(d.tenants, f.slug)}
+      <input name="accion" placeholder="control., agent., channel." value="${f.action ?? ''}">
+      ${f.conversationId ? html`<input type="hidden" name="conversacion" value="${f.conversationId}">` : ''}
+      <button>Filtrar</button></form>
+    ${f.conversationId ? html`<p class="meta">Solo una conversación. <a href="${query('/panel/auditoria', { negocio: f.slug, accion: f.action })}">Ver todas</a></p>` : ''}
+    ${d.rows.length ? html`<div class="tabla"><table>
+      <thead><tr><th>Fecha</th><th>Negocio</th><th>Actor</th><th>Acción</th><th>Detalle</th></tr></thead><tbody>
+      ${d.rows.map((r) => html`<tr><td>${fmtIn(r.at, r.tenant.timezone)}</td><td>${r.tenant.name}</td><td>${r.actor}</td>
+        <td>${r.action}${r.conversationId ? html`<br><a href="${chatUrl(r.tenant.slug, r.conversationId)}">conversación</a>` : ''}</td>
+        <td><pre>${JSON.stringify(r.details)}</pre></td></tr>`)}
+      </tbody></table></div>` : html`<p>No hay registros.</p>`}
+    ${d.next ? html`<p><a href="${query('/panel/auditoria', { negocio: f.slug, accion: f.action, conversacion: f.conversationId, antes: cursorParam(d.next) })}">Más antiguos →</a></p>` : ''}`);
 }

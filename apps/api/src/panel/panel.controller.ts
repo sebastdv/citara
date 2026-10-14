@@ -14,7 +14,8 @@ import { html } from './html';
 import { loadInbox, type Cursor, type InboxFilter } from './inbox';
 import { loadConversation } from './conversation';
 import { panelTenants, tenantBySlug } from './tenants';
-import { chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
+import { auditView, chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
+import { loadAudit, type AuditFilter } from './audit-view';
 import {
   ACTION_NOTICE, PanelActionError, pendingOperatorJobs, returnControl, sendOperatorMessage, takeControl,
 } from './actions';
@@ -62,6 +63,18 @@ export class PanelController {
       return sendHtml(res, 200, chatMessages(found.chat, found.tenant.timezone).value, ctx.nonce);
     }
     sendHtml(res, 200, chatView(ctx, { ...found, submissionId: randomUUID() }, new Date()), ctx.nonce);
+  }
+
+  @Get('auditoria')
+  async audit(@Query() q: Record<string, unknown>, @Req() req: PanelRequest, @Res() res: Response) {
+    const ctx = pageCtx(req);
+    const conversationId = str(q.conversacion);
+    const filter: AuditFilter = {
+      slug: str(q.negocio), action: str(q.accion), before: parseCursor(q.antes),
+      conversationId: conversationId && UUID.test(conversationId) ? conversationId : undefined,
+    };
+    const { rows, next } = await loadAudit(this.ds, filter);
+    sendHtml(res, 200, auditView(ctx, { filter, tenants: await panelTenants(this.ds), rows, next }), ctx.nonce);
   }
 
   @Post('negocios/:slug/conversaciones/:id/tomar')
