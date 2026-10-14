@@ -18,6 +18,10 @@ async function bootstrap() {
   // rawBody: true es indispensable — la firma HMAC se calcula sobre los bytes
   // originales, y reserializar el JSON los cambia.
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  // Detrás de Caddy, la IP del cliente viene en X-Forwarded-For: sin esto el
+  // límite de intentos del panel contaría todo a la IP del proxy.
+  const trust = process.env.TRUST_PROXY;
+  if (trust) app.getHttpAdapter().getInstance().set('trust proxy', /^\d+$/.test(trust) ? Number(trust) : trust);
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();
