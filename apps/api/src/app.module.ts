@@ -48,10 +48,12 @@ import { LoginLimiter } from './panel/login-limiter';
 import { PanelGuard } from './panel/panel-auth';
 import { PanelLoginController } from './panel/login.controller';
 import { PanelController } from './panel/panel.controller';
+import { HealthChecker } from './health/health';
+import { HealthController } from './health/health.controller';
 
 @Module({
   controllers: [WhatsappController, ConnectController, ConnectGoogleController, GoogleWebhookController,
-                PanelLoginController, PanelController],
+                PanelLoginController, PanelController, HealthController],
   providers: [
     {
       // DataSource de la APLICACIÓN (DATABASE_URL, rol citara_app) — nunca el
@@ -174,6 +176,12 @@ import { PanelController } from './panel/panel.controller';
     // Panel del operador (Fase 6). El limiter no lleva @Injectable(): recibe la URL de Redis.
     { provide: LoginLimiter, useFactory: () => new LoginLimiter(process.env.REDIS_URL!) },
     PanelGuard,
+    // Healthcheck de Docker y del despliegue (Fase 7).
+    {
+      provide: HealthChecker,
+      useFactory: (ds: DataSource) => new HealthChecker(ds, process.env.REDIS_URL!),
+      inject: [DataSource],
+    },
   ],
 })
 export class AppModule {}
