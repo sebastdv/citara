@@ -17,6 +17,7 @@
     "tenant:apply": "node apps/api/dist/src/cli/tenant-apply.js",
     "tenant": "node apps/api/dist/src/cli/tenant-cli.js",
     "agent:bench": "node apps/api/dist/src/cli/agent-bench.js",
+    "operator": "node apps/api/dist/src/cli/operator-cli.js",
     "db:up": "docker compose up -d postgres redis",
     "db:down": "docker compose down"
   },
