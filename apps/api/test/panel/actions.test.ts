@@ -4,7 +4,8 @@ import { createDataSource } from '@citara/db';
 import type { DataSource, EntityManager } from 'typeorm';
 import { runInTenant } from '../../src/tenancy/tenant-context';
 import { takeControl, returnControl, sendOperatorMessage, pendingOperatorJobs } from '../../src/panel/actions';
-import { resetDb, seedOperator, adminQuery, closeHelpers } from '../helpers';
+import { resetDb, seedOperator, seedFlow, adminQuery, closeHelpers } from '../helpers';
+import { AGENDA_FLOW } from '../../src/flow-engine/flows/agenda';
 import { seedBiz, seedConv, msg } from './seed';
 
 let app: DataSource, a: Awaited<ReturnType<typeof seedBiz>>, c: string, operatorId: string;
@@ -49,6 +50,15 @@ describe('acciones del operador', () => {
     expect((await adminQuery(`SELECT control FROM conversations`))[0].control).toBe('bot');
     expect(await adminQuery(`SELECT actor, action, details FROM audit_log`))
       .toEqual([{ actor: `operator:${operatorId}`, action: 'control.to_bot', details: { cause: 'operator' } }]);
+  });
+  it('devolver cuando ya manda el bot (página vieja, doble clic) no toca la sesión del cliente ni audita', async () => {
+    const flowId = await seedFlow(a.tenantId, AGENDA_FLOW);
+    await adminQuery(
+      `INSERT INTO conversation_sessions (tenant_id, conversation_id, flow_id, step_key, status)
+       VALUES ($1, $2, $3, 'menu', 'active')`, [a.tenantId, c, flowId]);
+    await inA((m) => returnControl(m, { tenantId: a.tenantId, conversationId: c, operatorId }));
+    expect((await adminQuery(`SELECT status FROM conversation_sessions`))[0].status).toBe('active');
+    expect(await adminQuery(`SELECT * FROM audit_log`)).toEqual([]);
   });
   it('responder crea la fila operator pending, toma el control y audita; el mismo envío no duplica', async () => {
     const sub = randomUUID();

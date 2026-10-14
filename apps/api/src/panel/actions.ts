@@ -61,6 +61,9 @@ export async function returnControl(
   m: EntityManager, a: { tenantId: string; conversationId: string; operatorId: string },
 ): Promise<void> {
   await lock(m, a.conversationId);
+  // Una página vieja o un doble clic: si ya manda el bot, devolver le cerraría
+  // al cliente la sesión que lleva a medias y auditaría un traspaso que no hubo.
+  if ((await readControl(m, a.conversationId)).control !== 'human') return;
   await returnControlToBot(m, { tenantId: a.tenantId, conversationId: a.conversationId,
                                 cause: 'operator', actor: actor(a.operatorId) });
 }
