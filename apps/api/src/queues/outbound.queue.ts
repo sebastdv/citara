@@ -44,6 +44,21 @@ export class OutboundQueue implements OnModuleDestroy {
     return this.queue.add('send-turn', job, { jobId: outboundJobId(job), delay: opts.delay });
   }
 
+  /**
+   * Para «reintentar» del panel: BullMQ ignora un add con el id de un job que
+   * ya terminó, así que uno fallido o completado se quita antes. Uno que espera
+   * o está en curso se deja: ya va a salir.
+   */
+  async requeue(job: OutboundJob): Promise<void> {
+    const existing = await this.queue.getJob(outboundJobId(job));
+    if (existing) {
+      const state = await existing.getState();
+      if (state !== 'failed' && state !== 'completed') return;
+      await existing.remove();
+    }
+    await this.add(job);
+  }
+
   constructor() {
     // Sin listener, un corte de Redis es un 'error' sin manejar que tumba el
     // proceso de la API entera, no solo el encolado.

@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { Controller, Get, Param, Post, Query, Req, Res, UseFilters, UseGuards } from '@nestjs/common';
+import {
+  Body, Controller, Get, Inject, Logger, Param, Post, Query, Req, Res, UseFilters, UseGuards,
+} from '@nestjs/common';
 import type { Response } from 'express';
 // Imports de VALOR: parámetros del constructor de un controlador Nest.
-import { DataSource } from 'typeorm';
+import { DataSource, type EntityManager } from 'typeorm';
+import { OutboundQueue } from '../queues/outbound.queue';
 import { runInTenant } from '../tenancy/tenant-context';
 import { LoginRedirectFilter, PanelGuard, pageCtx, sessionCookie, type PanelRequest } from './panel-auth';
 import { destroySession } from './sessions';
@@ -11,7 +14,10 @@ import { html } from './html';
 import { loadInbox, type Cursor, type InboxFilter } from './inbox';
 import { loadConversation } from './conversation';
 import { panelTenants, tenantBySlug } from './tenants';
-import { chatMessages, chatView, inboxList, inboxView } from './views';
+import { chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
+import {
+  ACTION_NOTICE, PanelActionError, pendingOperatorJobs, returnControl, sendOperatorMessage, takeControl,
+} from './actions';
 
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -28,7 +34,12 @@ const str = (v: unknown) => (typeof v === 'string' && v ? v.slice(0, 64) : undef
 @UseGuards(PanelGuard)
 @UseFilters(LoginRedirectFilter)
 export class PanelController {
-  constructor(private readonly ds: DataSource) {}
+  private readonly log = new Logger(PanelController.name);
+
+  constructor(
+    private readonly ds: DataSource,
+    @Inject(OutboundQueue) private readonly outbound: OutboundQueue,
+  ) {}
 
   @Get()
   async inbox(@Query() q: Record<string, unknown>, @Req() req: PanelRequest, @Res() res: Response) {
@@ -53,6 +64,52 @@ export class PanelController {
     sendHtml(res, 200, chatView(ctx, { ...found, submissionId: randomUUID() }, new Date()), ctx.nonce);
   }
 
+  @Post('negocios/:slug/conversaciones/:id/tomar')
+  take(@Param('slug') slug: string, @Param('id') id: string, @Req() req: PanelRequest, @Res() res: Response) {
+    return this.act(slug, id, req, res, (m, tenantId) =>
+      takeControl(m, { tenantId, conversationId: id, operatorId: req.operator!.operatorId, now: new Date() }));
+  }
+
+  @Post('negocios/:slug/conversaciones/:id/devolver')
+  giveBack(@Param('slug') slug: string, @Param('id') id: string, @Req() req: PanelRequest, @Res() res: Response) {
+    return this.act(slug, id, req, res, (m, tenantId) =>
+      returnControl(m, { tenantId, conversationId: id, operatorId: req.operator!.operatorId }));
+  }
+
+  @Post('negocios/:slug/conversaciones/:id/responder')
+  async reply(@Param('slug') slug: string, @Param('id') id: string, @Body() body: Record<string, unknown>,
+              @Req() req: PanelRequest, @Res() res: Response) {
+    const text = typeof body.texto === 'string' ? body.texto : '';
+    const submissionId = typeof body.envio === 'string' && UUID.test(body.envio) ? body.envio : randomUUID();
+    const tenant = UUID.test(id) ? await tenantBySlug(this.ds, slug) : null;
+    if (!tenant) return this.notFound(res, pageCtx(req));
+    try {
+      const { job } = await runInTenant(this.ds, tenant.id, (m) => sendOperatorMessage(m, {
+        tenantId: tenant.id, conversationId: id, operatorId: req.operator!.operatorId, text, submissionId, now: new Date() }));
+      // Tras el commit. Si Redis falla, la fila queda pending y el chat ofrece reintentar.
+      await this.outbound.add(job).catch((err: Error) => this.log.error(`no se encoló el mensaje del operador: ${err.message}`));
+      res.redirect(303, chatUrl(slug, id));
+    } catch (err) {
+      if (!(err instanceof PanelActionError)) throw err;
+      const found = err.code === 'no_encontrada' ? null : await this.find(slug, id);
+      const ctx = pageCtx(req);
+      if (!found) return this.notFound(res, ctx);
+      sendHtml(res, 422, chatView(ctx, { ...found, draft: text, notice: ACTION_NOTICE[err.code], submissionId },
+                                  new Date()), ctx.nonce);
+    }
+  }
+
+  @Post('negocios/:slug/conversaciones/:id/reintentar')
+  async retry(@Param('slug') slug: string, @Param('id') id: string, @Req() req: PanelRequest, @Res() res: Response) {
+    const tenant = UUID.test(id) ? await tenantBySlug(this.ds, slug) : null;
+    if (!tenant) return this.notFound(res, pageCtx(req));
+    const jobs = await runInTenant(this.ds, tenant.id, (m) =>
+      pendingOperatorJobs(m, { tenantId: tenant.id, conversationId: id }));
+    if (!jobs.length && !(await this.find(slug, id))) return this.notFound(res, pageCtx(req));
+    for (const job of jobs) await this.outbound.requeue(job);
+    res.redirect(303, chatUrl(slug, id));
+  }
+
   @Post('logout')
   async logout(@Req() req: PanelRequest, @Res() res: Response) {
     await destroySession(this.ds, req.sessionToken!);
@@ -67,6 +124,20 @@ export class PanelController {
     if (!tenant) return null;
     const chat = await runInTenant(this.ds, tenant.id, (m) => loadConversation(m, id));
     return chat ? { tenant, chat } : null;
+  }
+
+  /** Una acción sobre una conversación del negocio `slug`, en su contexto. */
+  private async act(slug: string, id: string, req: PanelRequest, res: Response,
+                    fn: (m: EntityManager, tenantId: string) => Promise<void>) {
+    const tenant = UUID.test(id) ? await tenantBySlug(this.ds, slug) : null;
+    if (!tenant) return this.notFound(res, pageCtx(req));
+    try {
+      await runInTenant(this.ds, tenant.id, (m) => fn(m, tenant.id));
+    } catch (err) {
+      if (err instanceof PanelActionError && err.code === 'no_encontrada') return this.notFound(res, pageCtx(req));
+      throw err;
+    }
+    res.redirect(303, chatUrl(slug, id));
   }
 
   private notFound(res: Response, ctx: PageCtx) {
