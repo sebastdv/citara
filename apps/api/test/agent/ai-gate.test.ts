@@ -36,6 +36,14 @@ describe('AiGate', () => {
     expect(await inTenant((m) => conClave.availability(m, tenantId))).toMatchObject({ ok: true });
   });
 
+  it('el aviso de tope agotado se audita una sola vez aunque lleguen varios mensajes a la vez', async () => {
+    await seedAgentConfig(tenantId, { monthlyBudgetUsd: 1 });
+    await spend(1.5);
+    await Promise.all(Array.from({ length: 6 }, () => inTenant((m) => gate.availability(m, tenantId))));
+    expect(await adminQuery(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'agent.budget_exhausted'`))
+      .toEqual([{ n: 1 }]);
+  });
+
   it('con presupuesto disponible devuelve la configuración activa', async () => {
     await seedAgentConfig(tenantId, { monthlyBudgetUsd: 20 });
     await spend(5);

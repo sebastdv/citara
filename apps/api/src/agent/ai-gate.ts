@@ -35,6 +35,9 @@ export class AiGate {
     const spent = await this.monthSpend(m, tenantId, now);
     if (spent >= config.monthlyBudgetUsd) {
       // Decisión del usuario: al tope, menús hasta el mes siguiente. Se audita una vez por mes.
+      // El lock (por negocio, hasta el fin de la transacción) hace que dos mensajes
+      // simultáneos no inserten los dos: el segundo espera y ya ve el primero.
+      await m.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':budget', 0))`, [tenantId]);
       await m.query(
         `INSERT INTO audit_log (tenant_id, actor, action, details)
          SELECT $1, 'system', 'agent.budget_exhausted', jsonb_build_object('spentUsd', $2::numeric, 'budgetUsd', $3::numeric)

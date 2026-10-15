@@ -10,6 +10,9 @@ export interface RunRecord {
   latencyMs: number; tools: string[]; stopReason: string | null; error: string | null;
 }
 
+/** Lo que se guarda del error del proveedor: una página de 502 o un volcado enorme no llenan la tabla. */
+export const MAX_ERROR_LENGTH = 1000;
+
 /** Una fila por llamada al modelo, en su propia transacción: el costo queda aunque el turno falle. */
 export async function recordRun(ds: DataSource, r: RunRecord): Promise<number> {
   const usd = r.usage ? costOf(r) : 0;
@@ -20,7 +23,8 @@ export async function recordRun(ds: DataSource, r: RunRecord): Promise<number> {
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
     [r.tenantId, r.conversationId, r.inboundMessageId, r.kind, r.model, r.configVersion,
      r.usage?.input_tokens ?? 0, r.usage?.output_tokens ?? 0, r.usage?.cache_read_input_tokens ?? 0,
-     r.usage?.cache_creation_input_tokens ?? 0, usd, r.latencyMs, r.tools, r.stopReason, r.error]));
+     r.usage?.cache_creation_input_tokens ?? 0, usd, r.latencyMs, r.tools, r.stopReason,
+     r.error === null ? null : Array.from(r.error).slice(0, MAX_ERROR_LENGTH).join('')]));
   return usd;
 }
 

@@ -72,27 +72,29 @@ export class AgentService {
       } catch (err) {
         await this.record(i, null, Date.now() - started, [], null, (err as Error).message);
         this.log.warn(`el modelo falló en la conversación ${i.conversationId}: ${(err as Error).message}`);
-        return this.degrade(i, effects);
+        return this.degrade(i, effects, action, beside);
       }
       const uses = res.content.filter((b): b is ToolUse => b.type === 'tool_use');
       await this.record(i, res, Date.now() - started, uses.map((u) => u.name), res.stop_reason ?? null, null);
-      if (res.stop_reason === 'refusal') return this.degrade(i, effects);
+      if (res.stop_reason === 'refusal') return this.degrade(i, effects, action, beside);
       // Un tool_use sin ejecutar (respuesta cortada por max_tokens u otro motivo) no
       // se puede guardar: el siguiente turno llevaría un tool_use sin su resultado (400).
-      if (uses.length > 0 && res.stop_reason !== 'tool_use') return this.degrade(i, effects);
+      if (uses.length > 0 && res.stop_reason !== 'tool_use') return this.degrade(i, effects, action, beside);
       messages.push({ role: 'assistant', content: res.content as MessageParam['content'] });
 
       if (res.stop_reason !== 'tool_use' || uses.length === 0) {
         const text = res.content
           .flatMap((b) => (b.type === 'text' && b.text.trim() ? [b.text.trim()] : [])).join('\n\n');
-        if (!text && action === 'continue') return this.degrade(i, effects);
+        if (!text && action === 'continue') return this.degrade(i, effects, action, beside);
         // Sin nada escrito, lo hecho se dice igual. Junto al texto del modelo no: ya lo contó.
         const replies = text ? [text] : beside.length ? [beside.join('\n\n')]
           : [...effects, ...(action === 'human' ? [HANDOFF] : [])];
         return { replies, action, transcript: messages, degraded: false, effects };
       }
 
-      if (uses.some((u) => u.name === CONTROL_TOOLS.human || u.name === CONTROL_TOOLS.menu)) {
+      // Solo si la respuesta es SOLO de control: junto a otras herramientas, el texto
+      // suele ser de paso ("déjame revisar…") y no tiene sentido como mensaje final.
+      if (uses.every((u) => u.name === CONTROL_TOOLS.human || u.name === CONTROL_TOOLS.menu)) {
         for (const b of res.content) if (b.type === 'text' && b.text.trim()) beside.push(b.text.trim());
       }
       const results: Anthropic.Beta.Messages.BetaToolResultBlockParam[] = [];
@@ -108,19 +110,22 @@ export class AgentService {
         results.push({ type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(out),
                        ...(out.ok ? {} : { is_error: true }) });
         const effect = effectOf(use.name, out);
-        if (effect) effects.push(effect);
+        if (effect && !effects.includes(effect)) effects.push(effect);
       }
       messages.push({ role: 'user', content: results });
     }
-    return this.degrade(i, effects);
+    return this.degrade(i, effects, action, beside);
   }
 
   /**
    * Disculpa y traspaso, precedidos de lo que el turno alcanzó a hacer. La
    * transcripción queda como estaba: el segmento termina con el traspaso.
    */
-  private degrade(i: AgentTurnInput, effects: string[]): AgentTurnResult {
-    return { replies: [...effects, APOLOGY], action: 'human', transcript: i.segment.transcript, degraded: true, effects };
+  private degrade(i: AgentTurnInput, effects: string[], action: AgentTurnResult['action'], beside: string[]): AgentTurnResult {
+    // Si el modelo ya había pedido el traspaso y lo había dicho, eso es lo que el cliente
+    // debe leer; "tuve un problema" sería falso: el traspaso era lo que se buscaba.
+    const closing = action === 'human' && beside.length ? beside.join('\n\n') : APOLOGY;
+    return { replies: [...effects, closing], action: 'human', transcript: i.segment.transcript, degraded: true, effects };
   }
 
   private record(i: AgentTurnInput, res: LlmMessage | null, latencyMs: number, tools: string[],

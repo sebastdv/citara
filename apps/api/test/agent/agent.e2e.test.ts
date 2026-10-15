@@ -13,7 +13,7 @@ import { APOLOGY } from '../../src/agent/agent.service';
 import { startWorkers } from '../../src/queues/workers';
 import { INBOUND_QUEUE } from '../../src/queues/inbound.queue';
 import { OUTBOUND_QUEUE } from '../../src/queues/outbound.queue';
-import { AGENT_QUEUE } from '../../src/queues/agent.queue';
+import { AGENT_QUEUE, AgentQueue } from '../../src/queues/agent.queue';
 import { CLOCK } from '../../src/clock';
 import { AGENDA_FLOW } from '../../src/flow-engine/flows/agenda';
 import { echoPayload } from '../whatsapp/fixtures/coexistence';
@@ -29,7 +29,7 @@ const AGENDA_NOW = new Date('2026-09-08T03:00:00Z');   // lunes 22:00 en Bogotá
 let app: INestApplication, workers: { close: () => Promise<void> }, queues: Queue[];
 let sent: string[];
 let opus: ((p: LlmParams) => LlmMessage | Promise<LlmMessage>)[];
-let haiku: LlmMessage | null;
+let haiku: LlmMessage | (() => Promise<LlmMessage>) | null;
 let opusCalls: LlmParams[];
 let serviceId: string, resourceId: string;
 
@@ -42,7 +42,7 @@ const fakeLlm = {
   async create(p: LlmParams) {
     if (p.model === 'claude-haiku-5-5') {
       if (!haiku) throw new Error('sin respuesta de haiku');
-      return haiku;
+      return typeof haiku === 'function' ? haiku() : haiku;
     }
     opusCalls.push(structuredClone(p));
     const step = opus.shift();
@@ -193,6 +193,26 @@ describe('el agente de punta a punta', () => {
     expect(sent.slice(before)).toEqual([expect.stringMatching(/quedó agendada/)]);
   }, 20_000);
 
+  it('si el agente termina sin responder, lo que el turno ya dejó pendiente sale igual (no queda atascado)', async () => {
+    opus.push(() => msg([text('Hola, ¿en qué te ayudo?')]));
+    await say('quiero un corte');
+    await quiesce();
+    const before = sent.length;
+    const [conv] = await adminQuery(`SELECT id, contact_id, channel_id, tenant_id FROM conversations`);
+    const [inb] = await adminQuery(
+      `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type, body)
+       VALUES ($1, $2, 'wamid.PENDIENTE', 'in', 'customer', 'text', 'otra cosa') RETURNING id`, [conv.tenant_id, conv.id]);
+    await adminQuery(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload, status, reply_to_id, seq)
+       VALUES ($1, $2, 'out', 'bot', 'text', 'quedó pendiente', '{"kind":"text","body":"quedó pendiente"}', 'pending', $3, 0)`,
+      [conv.tenant_id, conv.id, inb.id]);
+    // Un job cuyo paso ya no es el de la sesión: el worker no tiene nada que contestar.
+    await app.get(AgentQueue).add({ tenantId: conv.tenant_id, channelId: conv.channel_id, conversationId: conv.id,
+      contactId: conv.contact_id, inboundId: inb.id, to: '573001112233', kind: 'interpret', stepKey: 'otro-paso' });
+    await quiesce();
+    expect(sent.slice(before)).toEqual(['quedó pendiente']);
+  });
+
   it('si el dueño contestó mientras el agente pensaba, el traspaso del agente no pisa su control', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
@@ -219,6 +239,21 @@ describe('el agente de punta a punta', () => {
     expect(await adminQuery(`SELECT control, control_reason FROM conversations`))
       .toEqual([{ control: 'human', control_reason: 'flow_handoff' }]);
   });
+
+  it('si el cliente toca otra opción mientras Haiku interpreta, la interpretación vieja no se aplica', async () => {
+    await say('Hola');
+    await quiesce();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    haiku = async () => { await gate; return msg([text(JSON.stringify({ action: 'option', option_id: 'mis_citas' }))], 'end_turn', 'claude-haiku-5-5'); };
+    await say('quiero ver mis citas porfa');
+    await new Promise((r) => setTimeout(r, 500));   // Haiku ya está pensando
+    await say('Agendar cita');                        // el cliente toca otra opción
+    await new Promise((r) => setTimeout(r, 500));
+    release();
+    await quiesce();
+    expect(sent).not.toContain('No tienes citas próximas.');
+  }, 20_000);
 
   it('en el menú, lo que no encaja lo interpreta Haiku y el flujo sigue por la opción', async () => {
     await say('Hola');

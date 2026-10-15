@@ -196,6 +196,41 @@ describe('AgentService', () => {
     expect(conTexto.effects).toEqual([expect.stringMatching(/quedó agendada/)]);
   });
 
+  it('si ya pidió pasar a humano y después falla, el cliente lee el traspaso, no "tuve un problema"', async () => {
+    const r = await respond(new ScriptedLlm([
+      () => reply([text('Te paso con alguien del equipo.'), toolUse('t1', 'pasar_a_humano', { motivo: 'lo pidió' })], 'tool_use'),
+      () => new Error('Request timed out'),
+    ]), ['quiero hablar con una persona']);
+    expect(r).toMatchObject({ action: 'human', degraded: true, replies: ['Te paso con alguien del equipo.'] });
+  });
+
+  it('el texto de una respuesta que mezcla herramientas de agenda y de control no se toma como mensaje', async () => {
+    const r = await respond(new ScriptedLlm([
+      () => reply([text('Déjame revisar tus citas.'), toolUse('t1', 'consultar_mis_citas', {}), toolUse('t2', 'volver_al_menu', {})], 'tool_use'),
+      () => reply([]),
+    ]), ['mis citas y luego el menú']);
+    expect(r).toMatchObject({ action: 'menu', replies: [] });
+  });
+
+  it('el mismo efecto dos veces en un turno se avisa una sola vez', async () => {
+    const [cita] = await adminQuery(
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, customer_name)
+       VALUES ($1, $2, $3, $4, '2026-09-10T15:00:00Z', '2026-09-10T15:30:00Z', 'Ana') RETURNING id`,
+      [tenantId, resourceId, serviceId, contactId]);
+    const args = { cita_id: cita.id, nuevo_inicio: '2026-09-10T11:00:00-05:00' };
+    const r1 = await respond(new ScriptedLlm([
+      () => reply([toolUse('t1', 'reprogramar_cita', args)], 'tool_use'),
+      () => reply([text('¿La muevo a las 11?')]),
+    ]), ['muévela a las 11']);
+    const r2 = await respond(new ScriptedLlm([
+      (p) => { const token = lastToolResult(p).confirmationToken;
+               return reply([toolUse('t2', 'reprogramar_cita', { ...args, confirmation_token: token }),
+                             toolUse('t3', 'reprogramar_cita', { ...args, confirmation_token: token })], 'tool_use'); },
+      () => new Error('boom'),
+    ]), ['sí'], { ...segment(), transcript: r1.transcript }, TURNO_2);
+    expect(r2.replies).toEqual([expect.stringMatching(/quedó movida/), APOLOGY]);
+  });
+
   it('pedir confirmación no es un efecto: si falla después, solo hay disculpa', async () => {
     const r = await respond(new ScriptedLlm([
       () => reply([toolUse('t1', 'agendar_cita', agendar())], 'tool_use'),
