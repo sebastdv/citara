@@ -46,8 +46,9 @@ async function main() {
       await setOperatorPassword(admin, email, password);
       console.log('Contraseña cambiada. Sus sesiones abiertas se cerraron.');
     } else if (cmd === 'enable') {
-      await enableOperator(admin, email);
-      console.log('Operador habilitado de nuevo.');
+      console.log(await enableOperator(admin, email)
+        ? 'Operador habilitado de nuevo, con su contraseña de antes (si la deshabilitaste por una filtración, cámbiala: pnpm operator password).'
+        : 'Ese operador ya estaba habilitado.');
     } else {
       await disableOperator(admin, email);
       console.log('Operador deshabilitado. Sus sesiones abiertas se cerraron.');

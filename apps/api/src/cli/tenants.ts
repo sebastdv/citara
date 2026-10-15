@@ -2,7 +2,7 @@ import type { DataSource, EntityManager } from 'typeorm';
 import { DateTime } from 'luxon';
 import type { EncryptionService } from '../crypto/encryption.service';
 import type { MetaOnboardingClient, SyncType } from '../onboarding/meta-onboarding.client';
-import { OnboardingService } from '../onboarding/onboarding.service';
+import { OnboardingService, SYNC_TYPES } from '../onboarding/onboarding.service';
 import { createLink, type LinkPurpose } from '../onboarding/links';
 import { recordAudit } from '../audit/audit';
 
@@ -32,6 +32,9 @@ export async function createTenant(admin: DataSource, input: { slug: string; nam
       `INSERT INTO tenants (slug, name, timezone, status) VALUES ($1, $2, $3, 'onboarding') RETURNING id`,
       [input.slug, input.name, timezone]);
     const token = await createLink(m, t.id, 'whatsapp');
+    await recordAudit(m, { tenantId: t.id, actor: 'operator', action: 'tenant.created',
+                           details: { slug: input.slug, timezone } });
+    await recordAudit(m, { tenantId: t.id, actor: 'operator', action: 'link.created', details: { purpose: 'whatsapp' } });
     return { tenantId: t.id as string, token };
   });
 }
@@ -49,7 +52,9 @@ export async function newLink(admin: DataSource, slug: string): Promise<string> 
   const tenantId = await tenantBySlug(admin, slug);
   return admin.transaction(async (m) => {
     await revokeLinks(m, tenantId, { purpose: 'whatsapp' });
-    return createLink(m, tenantId, 'whatsapp');
+    const token = await createLink(m, tenantId, 'whatsapp');
+    await recordAudit(m, { tenantId, actor: 'operator', action: 'link.created', details: { purpose: 'whatsapp' } });
+    return token;
   });
 }
 
@@ -61,12 +66,15 @@ export async function newGoogleLink(admin: DataSource, slug: string, resourceKey
       `SELECT id FROM resources WHERE tenant_id = $1 AND key = $2 AND active`, [tenantId, resourceKey]);
     if (!r) throw new Error(`'${slug}' no tiene el recurso activo '${resourceKey}'`);
     await revokeLinks(m, tenantId, { purpose: 'google', resourceId: r.id });
-    return createLink(m, tenantId, 'google', { resourceId: r.id });
+    const token = await createLink(m, tenantId, 'google', { resourceId: r.id });
+    await recordAudit(m, { tenantId, actor: 'operator', action: 'link.created',
+                           details: { purpose: 'google', resourceId: r.id } });
+    return token;
   });
 }
 
 /** Suspender saca al negocio de operación al instante; reanudar lo devuelve si está completo. */
-export async function setSuspended(admin: DataSource, slug: string, suspended: boolean): Promise<string> {
+export async function setSuspended(admin: DataSource, slug: string, suspended: boolean, reason?: string): Promise<string> {
   const tenantId = await tenantBySlug(admin, slug);
   return admin.transaction(async (m) => {
     if (suspended) {
@@ -78,7 +86,7 @@ export async function setSuspended(admin: DataSource, slug: string, suspended: b
     }
     const [{ status }] = await m.query(`SELECT refresh_tenant_status($1) AS status`, [tenantId]);
     await recordAudit(m, { tenantId, actor: 'operator', action: suspended ? 'tenant.suspended' : 'tenant.resumed',
-                           details: { status } });
+                           details: { status, ...(reason ? { reason } : {}) } });
     return status as string;
   });
 }
@@ -137,7 +145,10 @@ export async function summarizeTenant(m: EntityManager, tenantId: string): Promi
                                                           AT TIME ZONE t.timezone)))
               FROM agent_configs c WHERE c.tenant_id = t.id AND c.is_active) AS ai
       FROM tenants t
-      LEFT JOIN LATERAL (SELECT * FROM whatsapp_channels c WHERE c.tenant_id = t.id ORDER BY c.created_at DESC LIMIT 1) ch ON true
+      -- El canal que opera; si ninguno, el desconectado (hay que reconectarlo); el inactivo, al final.
+      LEFT JOIN LATERAL (SELECT * FROM whatsapp_channels c WHERE c.tenant_id = t.id
+                          ORDER BY CASE c.status WHEN 'active' THEN 0 WHEN 'disconnected' THEN 1 ELSE 2 END,
+                                   c.created_at DESC LIMIT 1) ch ON true
      WHERE t.id = $1`, [tenantId]);
   if (!r) return null;
   return {
@@ -169,6 +180,16 @@ export async function syncTenant(admin: DataSource, enc: EncryptionService, meta
     `SELECT phone_number_id, access_token_encrypted FROM whatsapp_channels
       WHERE tenant_id = $1 AND mode = 'coexistence' AND status = 'active' ORDER BY created_at DESC LIMIT 1`, [tenantId]);
   if (!ch) throw new Error(`'${slug}' no tiene un canal activo en coexistencia`);
+  // Solo lo que no salió: Meta acepta cada tipo una vez, y volver a pedir el que
+  // ya salió bien lo rechaza y deja un 'failed' falso en la bitácora.
+  const done: { sync_type: SyncType }[] = await admin.query(
+    `SELECT DISTINCT ON (details->>'syncType') details->>'syncType' AS sync_type, action
+       FROM audit_log
+      WHERE tenant_id = $1 AND action IN ('channel.sync_requested', 'channel.sync_failed')
+        AND details->>'phoneNumberId' = $2
+      ORDER BY details->>'syncType', created_at DESC`, [tenantId, ch.phone_number_id])
+    .then((rows: { sync_type: SyncType; action: string }[]) => rows.filter((r) => r.action === 'channel.sync_requested'));
+  const pending = SYNC_TYPES.filter((t) => !done.some((d) => d.sync_type === t));
   const service = new OnboardingService(admin, enc, meta);
-  return service.requestSyncs(tenantId, ch.phone_number_id, enc.decrypt(ch.access_token_encrypted));
+  return service.requestSyncs(tenantId, ch.phone_number_id, enc.decrypt(ch.access_token_encrypted), pending);
 }

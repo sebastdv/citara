@@ -50,8 +50,10 @@ describe('operadores por CLI', () => {
   it('volver a activar un operador deshabilitado', async () => {
     await createOperator(admin, 'op@citara.co', 'clave-de-prueba-123');
     await disableOperator(admin, 'op@citara.co');
-    await enableOperator(admin, 'OP@citara.co');
+    expect(await enableOperator(admin, 'OP@citara.co')).toBe(true);
     expect((await adminQuery(`SELECT disabled_at FROM operators`))[0].disabled_at).toBeNull();
+    // Ya estaba activo: no se finge que se habilitó.
+    expect(await enableOperator(admin, 'op@citara.co')).toBe(false);
     await expect(enableOperator(admin, 'nadie@citara.co')).rejects.toThrow(/No existe/);
   });
 });
