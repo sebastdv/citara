@@ -43,6 +43,14 @@ export async function setOperatorPassword(admin: DataSource, email: string, pass
   });
 }
 
+/** Le devuelve el acceso a un operador deshabilitado (su contraseña sigue siendo la de antes). */
+export async function enableOperator(admin: DataSource, email: string): Promise<void> {
+  await admin.transaction(async (m) => {
+    const id = await operatorId(m, email);
+    await m.query(`UPDATE operators SET disabled_at = NULL WHERE id = $1`, [id]);
+  });
+}
+
 /** Le quita el acceso y cierra sus sesiones. */
 export async function disableOperator(admin: DataSource, email: string): Promise<void> {
   await admin.transaction(async (m) => {
