@@ -59,6 +59,19 @@ describe('avisos generales', () => {
 });
 
 describe('QueueStats', () => {
+  it('no abre conexiones a Redis hasta que se le pide un conteo (el worker la crea y nunca la usa)', async () => {
+    const probe = new Queue(OUTBOUND_QUEUE, { connection: { url: process.env.REDIS_URL } });
+    const client = await probe.client;
+    const clients = async () => String(await client.client('LIST')).trim().split('\n').length;
+    const before = await clients();
+    const stats = new QueueStats(process.env.REDIS_URL!);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await clients()).toBe(before);
+    await stats.failed();
+    expect(await clients()).toBeGreaterThan(before);
+    await stats.close(); await probe.close();
+  });
+
   it('cuenta los jobs fallidos de las últimas 24 h de cada cola, y sin Redis devuelve null', async () => {
     const probe = new Queue(OUTBOUND_QUEUE, { connection: { url: process.env.REDIS_URL } });
     await probe.obliterate({ force: true });

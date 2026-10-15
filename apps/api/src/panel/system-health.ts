@@ -54,11 +54,15 @@ const RECENT_MS = 24 * 3600_000;
  * sus fallidos para inspección, y el total acumulado no se apagaría nunca.
  */
 export class QueueStats {
-  private readonly queues: Queue[];
+  // Perezosas: el worker también construye este provider (comparte AppModule) y
+  // nunca lo usa; no tiene por qué abrir seis conexiones a Redis.
+  private queues: Queue[] | null = null;
 
-  constructor(url: string) {
-    this.queues = QUEUES.map((name) => {
-      const q = new Queue(name, { connection: { url } });
+  constructor(private readonly url: string) {}
+
+  private open(): Queue[] {
+    return this.queues ??= QUEUES.map((name) => {
+      const q = new Queue(name, { connection: { url: this.url } });
       q.on('error', () => {}); // se reporta como null en failed()
       return q;
     });
@@ -67,7 +71,7 @@ export class QueueStats {
   async failed(): Promise<QueueFailures[] | null> {
     // El conjunto `failed` de BullMQ va ordenado por la hora en que falló cada job.
     const since = Date.now() - RECENT_MS;
-    const counts = Promise.all(this.queues.map(async (q) => {
+    const counts = Promise.all(this.open().map(async (q) => {
       // El cliente es ioredis; BullMQ lo tipa con una interfaz mínima sin zcount.
       const client = (await q.client) as unknown as { zcount(key: string, min: number, max: string): Promise<number> };
       return { queue: q.name, failed: await client.zcount(q.toKey('failed'), since, '+inf') };
@@ -80,6 +84,7 @@ export class QueueStats {
 
   /** Con Redis caído, disconnect espera a una conexión que no llega: se abandona tras un segundo. */
   async close(): Promise<void> {
+    if (!this.queues) return;
     const all = Promise.all(this.queues.map((q) => q.disconnect().catch(() => {})));
     await Promise.race([all, new Promise((ok) => setTimeout(ok, 1000).unref())]);
   }
