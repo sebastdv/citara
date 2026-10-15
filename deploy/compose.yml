@@ -66,6 +66,7 @@ services:
     environment:
       <<: *app-env
       PORT: "3000"
+      PANEL_BACKUP_DIR: /app/backup-status
       # Un salto: Caddy. Así el límite de intentos del panel ve la IP del cliente.
       TRUST_PROXY: "1"
     depends_on:
@@ -77,6 +78,11 @@ services:
       timeout: 4s
       retries: 3
       start_period: 20s
+    # Solo lectura, y solo el archivo de estado del último nocturno (nunca los
+    # respaldos): la pantalla de estado del panel lo muestra. server.sh exporta
+    # la ruta (por defecto /opt/citara/backup-status).
+    volumes:
+      - ${CITARA_BACKUP_STATUS_DIR:-../backup-status}:/app/backup-status:ro
     stop_grace_period: 15s
     logging: *logging
 

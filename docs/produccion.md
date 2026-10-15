@@ -221,6 +221,7 @@ guárdalo en un disco cifrado.
 | Desplegar una versión concreta | `./deploy/deploy.sh <sha o tag>` |
 | Volver a la anterior | `./deploy/deploy.sh rollback` (no recompila; alterna entre las dos últimas) |
 | Estado y últimos respaldos | `./deploy/deploy.sh status` (avisa si el último respaldo nocturno tiene más de 26 h) |
+| Avisos de todos los negocios | `https://<dominio>/panel/estado`: respaldos, colas, canales, el dueño sin abrir la app, Google, IA |
 | Logs | `./deploy/deploy.sh logs api` (o `worker`, `caddy`, `postgres`) |
 | CLI de la app | en el servidor: `./deploy/citara tenant list`, `./deploy/citara operator …` |
 

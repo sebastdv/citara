@@ -249,6 +249,14 @@ Qué hay:
   (`control.`, `agent.`, `channel.`…) y conversación. Lo del panel sale como `operator:<id>`.
 - **Costos:** por negocio y mes (en su zona horaria), USD del agente y del intérprete, el
   tope, las citas creadas (agente / menús) y el costo por cita.
+- **Estado:** lo que hay que mirar, de lo más grave a lo menos. Por servidor: el último
+  respaldo nocturno (crítico si tiene 26 h o más) y los jobs fallidos de las colas. Por
+  negocio: canal desconectado, dueño en coexistencia sin escribir desde su celular (aviso a
+  los 10 días, crítico a los 14, porque Meta corta la sincronización si no abre la app en 14),
+  sincronizaciones fallidas, Google por reconectar o con avisos vencidos, IA agotada y
+  mensajes que no salieron en 24 h. La señal del dueño son sus ecos: si abre la app sin
+  escribir no se ve, así que puede avisar de más, nunca de menos. En desarrollo no hay
+  carpeta de respaldos (`PANEL_BACKUP_DIR`) y lo dice.
 
 ## Coexistencia (Fase 1.5)
 

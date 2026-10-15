@@ -30,6 +30,7 @@ main{max-width:64rem;margin:0 auto;padding:1rem}
 th,td{text-align:left;padding:.4rem .5rem;border-bottom:1px solid #eee;vertical-align:top}
 .tag{display:inline-block;padding:0 .4rem;border-radius:.25rem;background:#eee;font-size:.85em}
 .alerta{background:#fff3cd;padding:.5rem .75rem;border-radius:.25rem}
+.sev-critical{background:#f8d7da;color:#842029}.sev-warning{background:#fff3cd;color:#664d03}.sev-info{background:#e2e3e5}
 .msg{background:#fff;border:1px solid #eee;border-radius:.5rem;padding:.4rem .6rem;margin:.4rem 0;max-width:40rem}
 .out{margin-left:auto;background:#eef6ff}.meta{color:#666;font-size:.8em}
 textarea{width:100%;min-height:5rem;font:inherit;box-sizing:border-box}button{font:inherit;padding:.4rem .9rem;cursor:pointer}
@@ -56,7 +57,7 @@ document.querySelectorAll('[data-refresh]').forEach(function (el) {
 /** Sin `csrf` en el contexto (el login) no hay barra de navegación. */
 export function panelPage(title: string, ctx: PageCtx | { nonce: string }, body: SafeHtml): string {
   const nav = 'csrf' in ctx ? html`<nav>
-    <strong>Citara</strong><a href="/panel">Bandeja</a><a href="/panel/auditoria">Auditoría</a><a href="/panel/costos">Costos</a>
+    <strong>Citara</strong><a href="/panel">Bandeja</a><a href="/panel/auditoria">Auditoría</a><a href="/panel/costos">Costos</a><a href="/panel/estado">Estado</a>
     <form method="post" action="/panel/logout">${csrfField(ctx)}<span class="meta">${ctx.email}</span> <button>Salir</button></form>
   </nav>` : '';
   return html`<!doctype html>

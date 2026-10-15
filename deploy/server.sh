@@ -31,6 +31,14 @@ ENV_FILE="${CITARA_ENV_FILE:-$ROOT/.env.production}"
 PROJECT="${CITARA_PROJECT:-citara}"
 OVERRIDE="${CITARA_COMPOSE_OVERRIDE:-}"
 BACKUP_DIR="${CITARA_BACKUP_DIR:-$ROOT/backups}"
+# Lo único que la API ve de los respaldos: un archivo con el último nocturno,
+# en otra carpeta (montada en solo lectura para la pantalla de estado del panel).
+BACKUP_STATUS_DIR="${CITARA_BACKUP_STATUS_DIR:-$ROOT/backup-status}"
+# Absolutas: el compose resuelve las relativas desde deploy/, no desde aquí.
+mkdir -p "$BACKUP_DIR" "$BACKUP_STATUS_DIR"
+BACKUP_DIR="$(cd "$BACKUP_DIR" && pwd)"
+BACKUP_STATUS_DIR="$(cd "$BACKUP_STATUS_DIR" && pwd)"
+export CITARA_BACKUP_STATUS_DIR="$BACKUP_STATUS_DIR"
 HISTORY="${CITARA_HISTORY:-$ROOT/.deploy-history}"
 HEALTH_TIMEOUT="${CITARA_HEALTH_TIMEOUT:-90}"
 LOCK_WAIT="${CITARA_LOCK_WAIT:-1800}"
@@ -69,6 +77,8 @@ cleanup() {
 trap cleanup EXIT
 
 compose() {
+  # Si no existiera, Docker crearía la carpeta del montaje como root.
+  mkdir -p "$BACKUP_STATUS_DIR"
   local files=(-f "$ROOT/deploy/compose.yml")
   [ -n "$OVERRIDE" ] && files+=(-f "$OVERRIDE")
   docker compose -p "$PROJECT" "${files[@]}" --env-file "$ENV_FILE" "$@"
@@ -175,9 +185,11 @@ prune_images() {
 # puede leer ENTERO (pg_restore a /dev/null recorre todos los datos, no solo el índice).
 dump_to() {
   local name="$1" tmp
+  # 700 y umask 077: los respaldos tienen los datos de todos los negocios, y el
+  # contenedor de la API puede tener el mismo uid que este usuario.
   mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
   tmp="$BACKUP_DIR/.$name.partial"
-  compose exec -T postgres pg_dump -U postgres -Fc citara > "$tmp" || { rm -f "$tmp"; die "pg_dump falló ($name)"; }
+  ( umask 077; compose exec -T postgres pg_dump -U postgres -Fc citara > "$tmp" ) || { rm -f "$tmp"; die "pg_dump falló ($name)"; }
   compose exec -T postgres pg_restore -f /dev/null < "$tmp" || { rm -f "$tmp"; die "el respaldo $name salió ilegible"; }
   chmod 600 "$tmp"
   mv "$tmp" "$BACKUP_DIR/$name"
@@ -201,6 +213,9 @@ cmd_backup() {
     nightly)
       lock "$LOCK_WAIT"
       dump_to "daily-$stamp.dump"
+      # Para la pantalla de estado: nombre y hora, sin datos. Atómico (tmp + mv).
+      printf '%s %s\n' "daily-$stamp.dump" "$(date +%s)" > "$BACKUP_STATUS_DIR/.last-nightly.tmp"
+      chmod 644 "$BACKUP_STATUS_DIR/.last-nightly.tmp"; mv "$BACKUP_STATUS_DIR/.last-nightly.tmp" "$BACKUP_STATUS_DIR/last-nightly"
       # Los domingos, además, uno semanal (copia aparte: se poda por su lado).
       if [ "$(date -u +%u)" = "7" ]; then cp -p "$BACKUP_DIR/daily-$stamp.dump" "$BACKUP_DIR/weekly-$stamp.dump"; fi
       prune_backups ;;

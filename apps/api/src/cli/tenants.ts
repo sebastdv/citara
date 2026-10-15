@@ -86,6 +86,8 @@ export async function setSuspended(admin: DataSource, slug: string, suspended: b
 export interface TenantSummary {
   slug: string; name: string; status: string; phone: string | null; mode: string | null;
   channelStatus: string | null; historySync: string | null; lastPhoneEcho: Date | null; lastCustomer: Date | null;
+  /** Cuándo se conectó el número: sin ningún eco, la ausencia del dueño se cuenta desde ahí. */
+  channelCreatedAt: Date | null;
   /** Último resultado de pedir cada sincronización (del audit_log); vacío si nunca se pidió. */
   syncs: Partial<Record<SyncType, 'requested' | 'failed'>>;
   /** Por recurso conectado: estado, si tiene calendario, el canal de avisos y lo que no ha subido. */
@@ -93,15 +95,25 @@ export interface TenantSummary {
             watchError: boolean; unsynced: number }[];
   /** La IA del negocio: modelo, gasto del mes y tope; null si no tiene configuración. */
   ai: { enabled: boolean; model: string; spentUsd: number; budgetUsd: number } | null;
+  /** Salientes que no llegaron (failed o unconfirmed) en las últimas 24 h. */
+  failedOutbound24h: number;
 }
 
-/** Lo que el operador necesita ver: quién opera, cómo está su canal, y si el dueño sigue abriendo la app. */
-export async function listTenants(admin: DataSource): Promise<TenantSummary[]> {
-  const rows = await admin.query(`
+/**
+ * Lo que el operador necesita ver de UN negocio: quién opera, cómo está su
+ * canal, si el dueño sigue abriendo la app, Google, IA y envíos fallidos. Lo
+ * usan la CLI (conexión admin) y el panel (dentro del contexto RLS del negocio).
+ */
+export async function summarizeTenant(m: EntityManager, tenantId: string): Promise<TenantSummary | null> {
+  const [r] = await m.query(`
     SELECT t.slug, t.name, t.status,
            ch.display_phone_number AS phone, ch.mode, ch.status AS channel_status, ch.history_sync,
+           ch.created_at AS channel_created_at,
            (SELECT max(occurred_at) FROM messages m WHERE m.tenant_id = t.id AND m.origin = 'phone') AS last_phone_echo,
            (SELECT max(occurred_at) FROM messages m WHERE m.tenant_id = t.id AND m.origin = 'customer') AS last_customer,
+           (SELECT count(*)::int FROM messages m
+             WHERE m.tenant_id = t.id AND m.direction = 'out' AND m.status IN ('failed', 'unconfirmed')
+               AND m.created_at > now() - interval '24 hours') AS failed_outbound_24h,
            (SELECT jsonb_object_agg(s.sync_type, s.result) FROM (
               SELECT DISTINCT ON (a.details->>'syncType') a.details->>'syncType' AS sync_type,
                      CASE a.action WHEN 'channel.sync_requested' THEN 'requested' ELSE 'failed' END AS result
@@ -126,15 +138,28 @@ export async function listTenants(admin: DataSource): Promise<TenantSummary[]> {
               FROM agent_configs c WHERE c.tenant_id = t.id AND c.is_active) AS ai
       FROM tenants t
       LEFT JOIN LATERAL (SELECT * FROM whatsapp_channels c WHERE c.tenant_id = t.id ORDER BY c.created_at DESC LIMIT 1) ch ON true
-     ORDER BY t.slug`);
-  return rows.map((r: Record<string, any>) => ({
+     WHERE t.id = $1`, [tenantId]);
+  if (!r) return null;
+  return {
     slug: r.slug, name: r.name, status: r.status, phone: r.phone, mode: r.mode,
-    channelStatus: r.channel_status, historySync: r.history_sync,
+    channelStatus: r.channel_status, historySync: r.history_sync, channelCreatedAt: r.channel_created_at,
     lastPhoneEcho: r.last_phone_echo, lastCustomer: r.last_customer, syncs: r.syncs ?? {},
     google: r.google ?? [],
     ai: r.ai ? { enabled: r.ai.enabled, model: r.ai.model, spentUsd: Number(r.ai.spentUsd),
                  budgetUsd: Number(r.ai.budgetUsd) } : null,
-  }));
+    failedOutbound24h: r.failed_outbound_24h,
+  };
+}
+
+/** Todos los negocios, con la conexión admin (la CLI). */
+export async function listTenants(admin: DataSource): Promise<TenantSummary[]> {
+  const ids: { id: string }[] = await admin.query(`SELECT id FROM tenants ORDER BY slug`);
+  const out: TenantSummary[] = [];
+  for (const { id } of ids) {
+    const s = await summarizeTenant(admin.manager, id);
+    if (s) out.push(s);
+  }
+  return out;
 }
 
 /** Reintenta la sincronización de un número en coexistencia (Meta la acepta dentro de 24 h del alta). */
