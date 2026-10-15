@@ -14,7 +14,10 @@ export interface CostRow {
 
 export function parseMonth(v: unknown, now = new Date()): { year: number; month: number } {
   const m = typeof v === 'string' ? /^(\d{4})-(\d{2})$/.exec(v) : null;
-  if (m && Number(m[2]) >= 1 && Number(m[2]) <= 12) return { year: Number(m[1]), month: Number(m[2]) };
+  // Años razonables: fuera de ahí (0000-01, por ejemplo) make_timestamp falla y la página daba 500.
+  if (m && Number(m[1]) >= 2000 && Number(m[1]) <= 2100 && Number(m[2]) >= 1 && Number(m[2]) <= 12) {
+    return { year: Number(m[1]), month: Number(m[2]) };
+  }
   const d = DateTime.fromJSDate(now).setZone(PANEL_ZONE);
   return { year: d.year, month: d.month };
 }
