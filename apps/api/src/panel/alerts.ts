@@ -43,8 +43,10 @@ export function alertsFor(s: TenantSummary, now: Date): Alert[] {
       const what = echo !== null && echo >= (connected ?? -Infinity)
         ? `El dueño no escribe desde su celular hace ${days} días`
         : `El dueño nunca escribió desde su celular desde que se conectó el número (hace ${days} días)`;
+      const left = OWNER_CRITICAL_DAYS - days;
+      const deadline = left > 1 ? `quedan ${left} días` : left === 1 ? 'queda 1 día' : left === 0 ? 'el plazo vence hoy' : 'ya pasó el plazo';
       add(days >= OWNER_CRITICAL_DAYS ? 'critical' : 'warning', 'dueño',
-        `${what}. Meta corta la sincronización si no abre la app de WhatsApp Business en ${OWNER_CRITICAL_DAYS} días: pídele que la abra.`);
+        `${what}. Meta corta la sincronización si no abre la app de WhatsApp Business en ${OWNER_CRITICAL_DAYS} días (${deadline}): pídele que la abra.`);
     }
   }
 

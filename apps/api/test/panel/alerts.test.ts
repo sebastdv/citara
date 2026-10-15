@@ -30,6 +30,9 @@ describe('avisos de un negocio', () => {
     expect(sev(coex(13))).toEqual(['warning:dueño']);
     expect(sev(coex(14))).toEqual(['critical:dueño']);
     expect(alertsFor(coex(14), NOW)[0].message).toContain('14 días');
+    expect(alertsFor(coex(11), NOW)[0].message).toContain('quedan 3 días');
+    expect(alertsFor(coex(13), NOW)[0].message).toContain('queda 1 día');
+    expect(alertsFor(coex(16), NOW)[0].message).toContain('ya pasó el plazo');
   });
 
   it('si el dueño nunca escribió, cuenta desde que se conectó el número', () => {
