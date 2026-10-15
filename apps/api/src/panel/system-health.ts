@@ -60,6 +60,8 @@ export class QueueStats {
     return Promise.race([counts.catch(() => null), timeout]);
   }
 
+  onModuleDestroy() { return this.close(); }
+
   /** Con Redis caído, disconnect espera a una conexión que no llega: se abandona tras un segundo. */
   async close(): Promise<void> {
     const all = Promise.all(this.queues.map((q) => q.disconnect().catch(() => {})));

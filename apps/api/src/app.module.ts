@@ -49,6 +49,7 @@ import { PanelGuard } from './panel/panel-auth';
 import { PanelLoginController } from './panel/login.controller';
 import { PanelController } from './panel/panel.controller';
 import { HealthChecker } from './health/health';
+import { QueueStats } from './panel/system-health';
 import { HealthController } from './health/health.controller';
 
 @Module({
@@ -176,6 +177,8 @@ import { HealthController } from './health/health.controller';
     // Panel del operador (Fase 6). El limiter no lleva @Injectable(): recibe la URL de Redis.
     { provide: LoginLimiter, useFactory: () => new LoginLimiter(process.env.REDIS_URL!) },
     PanelGuard,
+    // Jobs fallidos por cola, para la pantalla de estado. Recibe la URL de Redis.
+    { provide: QueueStats, useFactory: () => new QueueStats(process.env.REDIS_URL!) },
     // Healthcheck de Docker y del despliegue (Fase 7).
     {
       provide: HealthChecker,

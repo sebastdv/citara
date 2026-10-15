@@ -28,7 +28,8 @@ cliente; el cliente no administra nada:
 - **Control de la conversación.** Si el dueño escribe desde su celular, o el flujo pide un
   humano, el bot se calla hasta que vence el plazo o el operador lo devuelve.
 - **Panel del operador.** Traspasos abiertos de todos los negocios, chat con tomar, devolver
-  y responder, auditoría y costo de IA por cita.
+  y responder, auditoría, costo de IA por cita y una pantalla de estado con lo que hay que
+  mirar (respaldos, colas, canales caídos, el dueño que dejó de abrir la app, Google, IA).
 
 ## Arquitectura
 

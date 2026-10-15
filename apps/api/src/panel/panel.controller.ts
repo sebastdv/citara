@@ -14,9 +14,11 @@ import { html } from './html';
 import { loadInbox, type Cursor, type InboxFilter } from './inbox';
 import { loadConversation } from './conversation';
 import { panelTenants, tenantBySlug } from './tenants';
-import { auditView, costsView, chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
+import { auditView, costsView, estadoView, chatMessages, chatUrl, chatView, inboxList, inboxView } from './views';
 import { loadAudit, type AuditFilter } from './audit-view';
 import { loadCosts, parseMonth } from './costs';
+import { loadEstado } from './estado';
+import { QueueStats } from './system-health';
 import {
   ACTION_NOTICE, PanelActionError, pendingOperatorJobs, returnControl, sendOperatorMessage, takeControl,
 } from './actions';
@@ -41,6 +43,7 @@ export class PanelController {
   constructor(
     private readonly ds: DataSource,
     @Inject(OutboundQueue) private readonly outbound: OutboundQueue,
+    @Inject(QueueStats) private readonly queueStats: QueueStats,
   ) {}
 
   @Get()
@@ -76,6 +79,15 @@ export class PanelController {
     };
     const { rows, next } = await loadAudit(this.ds, filter);
     sendHtml(res, 200, auditView(ctx, { filter, tenants: await panelTenants(this.ds), rows, next }), ctx.nonce);
+  }
+
+  @Get('estado')
+  async estado(@Req() req: PanelRequest, @Res() res: Response) {
+    const ctx = pageCtx(req);
+    const now = new Date();
+    // En producción la carpeta de respaldos del servidor, montada en solo lectura (deploy/compose.yml).
+    const data = await loadEstado(this.ds, this.queueStats, process.env.PANEL_BACKUP_DIR, now);
+    sendHtml(res, 200, estadoView(ctx, data, now), ctx.nonce);
   }
 
   @Get('costos')

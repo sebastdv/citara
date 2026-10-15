@@ -7,6 +7,8 @@ import type { Cursor, InboxFilter, InboxRow } from './inbox';
 import type { PanelTenant } from './tenants';
 import type { AuditFilter, AuditRow } from './audit-view';
 import type { CostRow } from './costs';
+import type { Estado } from './estado';
+import type { Alert } from './alerts';
 
 export const fmtIn = (d: Date, tz: string) =>
   DateTime.fromJSDate(d).setZone(tz).setLocale('es').toFormat('d LLL HH:mm');
@@ -178,4 +180,28 @@ export function costsView(ctx: PageCtx, d: { ym: { year: number; month: number }
           <td>${r.appointments} (${r.byAgent} / ${r.byFlow})</td>
           <td>${r.usdPerAppointment === null ? '—' : usd(r.usdPerAppointment)}</td></tr>`;
       })}</tbody></table></div>` : html`<p>No hay negocios.</p>`}`);
+}
+
+const SEVERITY: Record<Alert['severity'], string> = { critical: 'Crítico', warning: 'Aviso', info: 'Info' };
+
+const alertList = (alerts: Alert[]) => alerts.length
+  ? html`<ul>${alerts.map((a) => html`<li><span class="tag sev-${a.severity}">${SEVERITY[a.severity]}</span> ${a.message}</li>`)}</ul>`
+  : html`<p class="meta">Sin avisos.</p>`;
+
+export function estadoView(ctx: PageCtx, d: Estado, now: Date): string {
+  const b = d.system.backup;
+  const backupLine = !b.configured ? 'Sin carpeta de respaldos (desarrollo).'
+    : b.last ? `Último respaldo nocturno: ${b.last} (hace ${b.ageHours} h).` : 'Sin respaldos nocturnos.';
+  const failedTotal = d.system.queues?.reduce((n, q) => n + q.failed, 0);
+  return panelPage('Estado', ctx, html`
+    <h1>Estado</h1>
+    <h2>Servidor</h2>
+    <p>${backupLine} ${d.system.queues === null ? 'Redis no responde.' : `Jobs fallidos en las colas: ${failedTotal}.`}</p>
+    ${alertList(d.system.alerts)}
+    <h2>Negocios</h2>
+    ${d.tenants.length ? d.tenants.map((t) => html`<section>
+      <h3>${t.summary.name} <span class="meta">${t.summary.slug} · ${t.summary.mode === 'coexistence' ? 'coexistencia' : t.summary.mode === 'cloud_api' ? 'número dedicado' : 'sin número'}${t.summary.phone ? html` · ${t.summary.phone}` : ''}</span></h3>
+      ${alertList(t.alerts)}
+    </section>`) : html`<p>No hay negocios.</p>`}
+    <p class="meta">Calculado ${fmtIn(now, 'America/Bogota')} (hora de Bogotá). Recarga la página para actualizar.</p>`);
 }

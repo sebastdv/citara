@@ -106,6 +106,7 @@ rmdir "$ROOT/.deploy-lock"
 ok "el respaldo nocturno espera el lock de un despliegue en curso"
 for i in $(seq -w 1 16); do : > "$CITARA_BACKUP_DIR/daily-202601${i}-000000.dump"; done
 "$S" backup nightly >/dev/null
+check "la API ve los respaldos (pantalla de estado)" sh -c "docker exec \"\$1\" ls /app/backups | grep -q '^daily-'" _ "$(CITARA_TAG=x compose ps -q api)"
 check "se quedan 14 respaldos diarios" eq "$(ls -1 "$CITARA_BACKUP_DIR"/daily-*.dump | wc -l | tr -d ' ')" "14"
 
 echo "== Apagado limpio"

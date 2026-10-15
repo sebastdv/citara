@@ -31,6 +31,8 @@ ENV_FILE="${CITARA_ENV_FILE:-$ROOT/.env.production}"
 PROJECT="${CITARA_PROJECT:-citara}"
 OVERRIDE="${CITARA_COMPOSE_OVERRIDE:-}"
 BACKUP_DIR="${CITARA_BACKUP_DIR:-$ROOT/backups}"
+# El compose monta esta carpeta en la API (solo lectura) para la pantalla de estado.
+export CITARA_BACKUP_DIR="$BACKUP_DIR"
 HISTORY="${CITARA_HISTORY:-$ROOT/.deploy-history}"
 HEALTH_TIMEOUT="${CITARA_HEALTH_TIMEOUT:-90}"
 LOCK_WAIT="${CITARA_LOCK_WAIT:-1800}"
@@ -69,6 +71,8 @@ cleanup() {
 trap cleanup EXIT
 
 compose() {
+  # Si no existiera, Docker crearía la carpeta del montaje como root.
+  mkdir -p "$BACKUP_DIR"
   local files=(-f "$ROOT/deploy/compose.yml")
   [ -n "$OVERRIDE" ] && files+=(-f "$OVERRIDE")
   docker compose -p "$PROJECT" "${files[@]}" --env-file "$ENV_FILE" "$@"
@@ -175,7 +179,9 @@ prune_images() {
 # puede leer ENTERO (pg_restore a /dev/null recorre todos los datos, no solo el índice).
 dump_to() {
   local name="$1" tmp
-  mkdir -p "$BACKUP_DIR"; chmod 700 "$BACKUP_DIR"
+  # 755: la API (otro uid, en solo lectura) lista nombres y fechas para el panel;
+  # cada .dump queda en 600, así que su contenido sigue siendo solo de este usuario.
+  mkdir -p "$BACKUP_DIR"; chmod 755 "$BACKUP_DIR"
   tmp="$BACKUP_DIR/.$name.partial"
   compose exec -T postgres pg_dump -U postgres -Fc citara > "$tmp" || { rm -f "$tmp"; die "pg_dump falló ($name)"; }
   compose exec -T postgres pg_restore -f /dev/null < "$tmp" || { rm -f "$tmp"; die "el respaldo $name salió ilegible"; }
