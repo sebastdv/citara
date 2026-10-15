@@ -67,13 +67,16 @@ describe('QueueStats', () => {
   it('no abre conexiones a Redis hasta que se le pide un conteo (el worker la crea y nunca la usa)', async () => {
     const probe = new Queue(OUTBOUND_QUEUE, { connection: { url: process.env.REDIS_URL } });
     const client = await probe.client;
-    const clients = async () => String(await client.client('LIST')).trim().split('\n').length;
-    const before = await clients();
-    const stats = new QueueStats(process.env.REDIS_URL!);
+    // Solo las conexiones de ESTE QueueStats, por un nombre único: otros archivos
+    // de tests abren y cierran conexiones en paralelo, y contarlas todas daba falsos fallos.
+    const name = `citara-stats-test-${process.pid}-${Date.now()}`;
+    const ours = async () => String(await client.client('LIST')).split('\n')
+      .filter((l) => l.includes(`name=${name} `)).length;
+    const stats = new QueueStats(process.env.REDIS_URL!, name);
     await new Promise((r) => setTimeout(r, 300));
-    expect(await clients()).toBe(before);
+    expect(await ours()).toBe(0);
     await stats.failed();
-    expect(await clients()).toBeGreaterThan(before);
+    expect(await ours()).toBeGreaterThan(0);
     await stats.close(); await probe.close();
   });
 

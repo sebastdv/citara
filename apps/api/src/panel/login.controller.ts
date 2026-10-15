@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Logger, Post, Query, Req, Res, type OnModuleDestroy } from '@nestjs/common';
+import { Body, Controller, Get, Logger, Post, Query, Req, Res, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
 import type { Request, Response } from 'express';
 // Imports de VALOR: parámetros del constructor de un controlador Nest.
 import { DataSource } from 'typeorm';
@@ -13,10 +13,14 @@ const BAD = 'Correo o contraseña incorrectos';
 
 /** La puerta del panel: el único controlador de /panel sin PanelGuard. */
 @Controller('panel/login')
-export class PanelLoginController implements OnModuleDestroy {
+export class PanelLoginController implements OnModuleInit, OnModuleDestroy {
   private readonly log = new Logger(PanelLoginController.name);
 
   constructor(private readonly ds: DataSource, private readonly limiter: LoginLimiter) {}
+
+  // Al arrancar, no en el primer login con un correo inexistente: ese tardaría el
+  // doble (calcular el señuelo y verificar) y el tiempo delataría que el correo no existe.
+  onModuleInit() { void dummyHash(); }
 
   onModuleDestroy() { return this.limiter.close(); }
 

@@ -51,7 +51,8 @@ export function foreignOrigin(req: Request): boolean {
 
 /** Un GET sin sesión: el filtro lo convierte en una redirección al login. */
 export class LoginRequired extends HttpException {
-  constructor(readonly next: string) { super('Inicia sesión', HttpStatus.SEE_OTHER); }
+  /** next null: al login a secas (por ejemplo, al cerrar una sesión que ya venció). */
+  constructor(readonly next: string | null) { super('Inicia sesión', HttpStatus.SEE_OTHER); }
 }
 
 /** Un POST sin sesión válida o sin CSRF: 403, pero como página del panel (ver PanelForbiddenFilter). */
@@ -81,7 +82,8 @@ export class PanelForbiddenFilter implements ExceptionFilter {
     const draft = (req.body as Record<string, unknown> | undefined)?.texto;
     const nonce = newNonce();
     sendHtml(res, 403, forbiddenView(nonce, { message: e.message, next: backTo(req),
-      draft: typeof draft === 'string' && draft.trim() ? draft.slice(0, 4096) : undefined }), nonce);
+      // Por puntos de código, no por unidades de UTF-16: un emoji no se parte por la mitad.
+      draft: typeof draft === 'string' && draft.trim() ? Array.from(draft).slice(0, 4096).join('') : undefined }), nonce);
   }
 }
 
@@ -89,7 +91,7 @@ export class PanelForbiddenFilter implements ExceptionFilter {
 export class LoginRedirectFilter implements ExceptionFilter {
   catch(e: LoginRequired, host: ArgumentsHost) {
     host.switchToHttp().getResponse<Response>()
-      .redirect(303, `/panel/login?next=${encodeURIComponent(safeNext(e.next))}`);
+      .redirect(303, e.next === null ? '/panel/login' : `/panel/login?next=${encodeURIComponent(safeNext(e.next))}`);
   }
 }
 
@@ -105,6 +107,8 @@ export class PanelGuard implements CanActivate {
     const read = req.method === 'GET' || req.method === 'HEAD';
     if (!session) {
       if (read) throw new LoginRequired(req.originalUrl);
+      // Cerrar una sesión que ya venció no es un error: lo que se quería ya pasó.
+      if (req.path === '/panel/logout') throw new LoginRequired(null);
       throw new PanelForbidden('Tu sesión venció. Vuelve a entrar.');
     }
     if (!read) {

@@ -44,7 +44,13 @@ export async function loadCosts(ds: DataSource, ym: { year: number; month: numbe
         SELECT count(a.id)::int AS total, count(a.id) FILTER (WHERE a.booked_by = 'agent')::int AS by_agent
           FROM b LEFT JOIN appointments a ON a.created_at >= b.lo AND a.created_at < b.hi`,
         [ym.year, ym.month, tenant.id]);
-      const [cfg] = await m.query(`SELECT enabled, monthly_budget_usd FROM agent_configs WHERE is_active`);
+      // El mes en curso (o uno futuro): la configuración activa. Un mes pasado: la
+      // última versión creada antes de que terminara (aproximado si hubo rollbacks,
+      // que cambian cuál está activa sin dejar fecha).
+      const [cfg] = await m.query(`${BOUNDS}
+        SELECT c.enabled, c.monthly_budget_usd FROM b, agent_configs c
+         WHERE (now() < b.hi AND c.is_active) OR (now() >= b.hi AND c.created_at < b.hi)
+         ORDER BY c.version DESC LIMIT 1`, [ym.year, ym.month, tenant.id]);
       return { runs, apps, cfg };
     });
     const agentUsd = Number(row.runs.agent_usd), interpretUsd = Number(row.runs.interpret_usd);

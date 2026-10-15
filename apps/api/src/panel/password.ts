@@ -31,3 +31,5 @@ export async function verifyPassword(pw: string, stored: string): Promise<boolea
 let dummy: Promise<string> | null = null;
 /** Para un correo que no existe: se verifica contra esto y tarda lo mismo que una clave mala. */
 export const dummyHash = () => (dummy ??= hashPassword(randomBytes(16).toString('hex')));
+/** ¿Ya se empezó a calcular? El login lo arranca al iniciar el módulo. */
+export const dummyHashStarted = () => dummy !== null;

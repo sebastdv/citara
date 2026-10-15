@@ -4,6 +4,7 @@ import request from 'supertest';
 import { GUARDS_METADATA } from '@nestjs/common/constants';
 import type { INestApplication } from '@nestjs/common';
 import { LoginLimiter } from '../../src/panel/login-limiter';
+import { dummyHashStarted } from '../../src/panel/password';
 import { PanelGuard } from '../../src/panel/panel-auth';
 import { PANEL_CONTROLLERS } from '../../src/panel/panel.controller';
 import { AppModule } from '../../src/app.module';
@@ -26,6 +27,10 @@ beforeEach(async () => {
 afterAll(async () => { await limiter.close(); await app.close(); await closeHelpers(); });
 
 describe('login', () => {
+  it('el hash señuelo se calcula al arrancar, no en el primer login con un correo inexistente', () => {
+    expect(dummyHashStarted()).toBe(true);
+  });
+
   it('entra con la clave correcta: cookie segura y redirección a next', async () => {
     const res = await login().expect(303);
     expect(res.headers.location).toBe('/panel/costos');
@@ -92,7 +97,7 @@ describe('guard', () => {
     await http().get('/panel').set('X-Fragment', 'lista').expect(303);
   });
   it('sin sesión, un POST da 403', async () => {
-    await http().post('/panel/logout').type('form').send({}).expect(403);
+    await http().post('/panel/negocios/a/conversaciones/11111111-1111-4111-8111-111111111111/tomar').type('form').send({}).expect(403);
   });
   it('un POST con la sesión vencida da una página para volver a entrar, con el texto escrito para copiarlo', async () => {
     const chat = '/panel/negocios/a/conversaciones/11111111-1111-4111-8111-111111111111';
@@ -104,8 +109,19 @@ describe('guard', () => {
     expect(res.text).toContain(`href="/panel/login?next=${encodeURIComponent(chat)}"`);
     expect(res.text).toContain('lo que escribí &lt;b&gt;</textarea>');
   });
+  it('cerrar sesión con la sesión ya vencida lleva al login, sin "No se pudo enviar"', async () => {
+    const res = await http().post('/panel/logout').type('form').send({}).expect(303);
+    expect(res.headers.location).toBe('/panel/login');
+  });
+  it('el recuadro con el texto conserva un salto de línea inicial y no parte un emoji', async () => {
+    const draft = '\nhola ' + '😀'.repeat(4100);
+    const res = await http().post('/panel/negocios/a/conversaciones/11111111-1111-4111-8111-111111111111/responder').type('form').send({ texto: draft }).expect(403);
+    expect(res.text).toContain('<textarea readonly>\n\nhola 😀');
+    expect(res.text).not.toContain('\uFFFD');
+    expect((res.text.match(/😀/g) ?? []).length).toBe(4096 - 6);
+  });
   it('un Referer de otro sitio no se usa como destino al volver a entrar', async () => {
-    const res = await http().post('/panel/logout').set('Referer', 'https://evil.com/x').type('form').send({}).expect(403);
+    const res = await http().post('/panel/negocios/a/conversaciones/11111111-1111-4111-8111-111111111111/tomar').set('Referer', 'https://evil.com/x').type('form').send({}).expect(403);
     expect(res.text).toContain('href="/panel/login?next=%2Fpanel"');
   });
 

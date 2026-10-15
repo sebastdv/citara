@@ -53,16 +53,19 @@ const RECENT_MS = 24 * 3600_000;
  * por cola; null si Redis no responde. Solo los recientes: varias colas guardan
  * sus fallidos para inspección, y el total acumulado no se apagaría nunca.
  */
+export const QUEUE_STATS_CONNECTION = 'citara-panel-stats';
+
 export class QueueStats {
   // Perezosas: el worker también construye este provider (comparte AppModule) y
   // nunca lo usa; no tiene por qué abrir seis conexiones a Redis.
   private queues: Queue[] | null = null;
 
-  constructor(private readonly url: string) {}
+  constructor(private readonly url: string, private readonly connectionName = QUEUE_STATS_CONNECTION) {}
 
   private open(): Queue[] {
     return this.queues ??= QUEUES.map((name) => {
-      const q = new Queue(name, { connection: { url: this.url } });
+      // Con nombre: en un CLIENT LIST se distinguen de las colas que trabajan.
+      const q = new Queue(name, { connection: { url: this.url, connectionName: this.connectionName } });
       q.on('error', () => {}); // se reporta como null en failed()
       return q;
     });
