@@ -51,6 +51,7 @@ export interface EventBody {
 
 const AUTH_URL = 'https://accounts.google.com/o/oauth2/v2/auth';
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 const API = 'https://www.googleapis.com/calendar/v3';
 const TIMEOUT_MS = 10_000;
 /** VERIFICAR: freeBusy rechaza rangos largos (~3 meses). Se pide por ventanas. */
@@ -103,6 +104,26 @@ export class GoogleClient {
     return json.id;
   }
 
+  /** Borra un calendario que creó la app. Ya borrado no es un error. */
+  async deleteCalendar(token: string, calendarId: string): Promise<void> {
+    await this.api('borrado del calendario', token, 'DELETE', `/calendars/${enc(calendarId)}`, { accept: [404, 410] });
+  }
+
+  /**
+   * Revoca un token (access o refresh): la autorización entera deja de valer.
+   * Best effort: quien llama ya decidió no usar el token y no espera respuesta.
+   */
+  async revokeToken(token: string): Promise<void> {
+    try {
+      await fetch(REVOKE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ token }).toString(),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+    } catch { /* la autorización vence sola si nadie la usa */ }
+  }
+
   async calendarExists(token: string, calendarId: string): Promise<boolean> {
     const { status } = await this.api('consulta del calendario', token, 'GET', `/calendars/${enc(calendarId)}`,
       { accept: [404, 410] });
@@ -144,7 +165,10 @@ export class GoogleClient {
   }
 
   async listEvents(token: string, calendarId: string, q: { syncToken: string | null; pageToken: string | null }) {
-    const params = new URLSearchParams({ maxResults: '2500' });
+    // showDeleted siempre (Google pide los mismos parámetros en la lectura completa
+    // y en las incrementales): sin él, una lectura desde cero no trae lo borrado
+    // durante el hueco y esas citas quedan vivas en Citara.
+    const params = new URLSearchParams({ maxResults: '2500', showDeleted: 'true' });
     if (q.syncToken) params.set('syncToken', q.syncToken);
     if (q.pageToken) params.set('pageToken', q.pageToken);
     const { json } = await this.api('lectura de cambios', token, 'GET', `/calendars/${enc(calendarId)}/events?${params}`);

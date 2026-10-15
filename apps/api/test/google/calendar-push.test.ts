@@ -17,8 +17,8 @@ const AHORA = new Date('2026-09-08T12:00:00Z');
 const JUEVES_10AM = new Date('2026-09-10T15:00:00Z');
 const CAL = 'citas123@group.calendar.google.com';
 const inTenant = <T>(fn: (m: EntityManager) => Promise<T>) => runInTenant(app, tenantId, fn);
-const book = () => inTenant((m) => buildScheduling().booking.book(m, tenantId,
-  { serviceId, resourceId, contactId, startsAt: JUEVES_10AM, customerName: 'Ana', now: AHORA }));
+const book = (startsAt = JUEVES_10AM) => inTenant((m) => buildScheduling().booking.book(m, tenantId,
+  { serviceId, resourceId, contactId, startsAt, customerName: 'Ana', now: AHORA }));
 const sync = async (id: string) => (await adminQuery(
   `SELECT google_sync_status AS s, google_sync_version AS v, google_event_id AS e FROM appointments WHERE id = $1`, [id]))[0];
 
@@ -103,13 +103,15 @@ describe('CalendarPushProcessor', () => {
     expect(google.insertEvent).not.toHaveBeenCalled();
   });
 
-  it('sin cuenta de Google, o con la cuenta caída, la cita queda pendiente sin llamar a Google', async () => {
-    const cita = await book();
-    expect(await push.process({ tenantId, appointmentId: cita.id, version: 0 })).toEqual({ result: 'skipped' });
+  it('sin cuenta de Google la cita nace sin nada que subir; con la cuenta caída, queda pendiente', async () => {
+    const sinCuenta = await book();
+    expect((await sync(sinCuenta.id)).s).toBe('none');
+    expect(await push.process({ tenantId, appointmentId: sinCuenta.id, version: 0 })).toEqual({ result: 'skipped' });
     await seedGoogleAccount(tenantId, resourceId, { status: 'needs_reauth' });
-    expect(await push.process({ tenantId, appointmentId: cita.id, version: 0 })).toEqual({ result: 'skipped' });
+    const caida = await book(new Date('2026-09-10T17:00:00Z'));
+    expect(await push.process({ tenantId, appointmentId: caida.id, version: 0 })).toEqual({ result: 'skipped' });
     expect(google.insertEvent).not.toHaveBeenCalled();
-    expect((await sync(cita.id)).s).toBe('pending');
+    expect((await sync(caida.id)).s).toBe('pending');
   });
 
   it('un acceso revocado deja la cuenta para reconectar y la cita pendiente', async () => {

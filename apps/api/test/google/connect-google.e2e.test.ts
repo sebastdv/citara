@@ -19,6 +19,7 @@ let tenantId: string, resourceId: string, token: string;
 const google = {
   authUrl: vi.fn((state: string) => `https://accounts.google.com/o/oauth2/v2/auth?state=${state}`),
   exchangeCode: vi.fn(), calendarExists: vi.fn(), createCalendar: vi.fn(), refreshAccessToken: vi.fn(),
+  revokeToken: vi.fn(), deleteCalendar: vi.fn(), stopChannel: vi.fn(),
 };
 const http = () => request(app.getHttpServer());
 const callback = (q: Record<string, string> = {}) =>
@@ -43,6 +44,8 @@ beforeEach(async () => {
                                           scopes: SCOPES, email: 'maria@gmail.com' });
   google.calendarExists.mockResolvedValue(false);
   google.createCalendar.mockResolvedValue('citas-nuevo@group.calendar.google.com');
+  for (const f of [google.revokeToken, google.deleteCalendar, google.stopChannel, google.refreshAccessToken]) f.mockReset();
+  google.refreshAccessToken.mockResolvedValue({ accessToken: 'ya29.anterior', expiresIn: 3599 });
 });
 
 describe('GET /connect/google', () => {
@@ -94,6 +97,7 @@ describe('GET /connect/google/callback', () => {
     expect(res.text).toContain('marca todas las casillas');
     expect(await adminQuery(`SELECT id FROM google_accounts`)).toEqual([]);
     expect(await peekLink(admin, token, 'google')).not.toBeNull();
+    expect(google.revokeToken).toHaveBeenCalledWith('1//r');
   });
 
   it('si canceló en Google, la página lo dice y el enlace sigue sirviendo', async () => {
@@ -139,6 +143,34 @@ describe('GET /connect/google/callback', () => {
 
     expect(await adminQuery(`SELECT google_sync_status, google_sync_version FROM appointments WHERE id = $1`, [id]))
       .toEqual([{ google_sync_status: 'pending', google_sync_version: 5 }]);
+  });
+
+  it('al reconectar con OTRA cuenta, cierra el canal, borra el calendario y revoca el acceso de la anterior', async () => {
+    await callback().expect(200);
+    await adminQuery(`UPDATE google_accounts SET status = 'needs_reauth',
+                        watch_channel_id = gen_random_uuid(), watch_resource_id = 'RID-viejo'`);
+    token = await createLink(admin, tenantId, 'google', { resourceId });
+    google.exchangeCode.mockResolvedValue({ accessToken: 'ya29.b', expiresIn: 3599, refreshToken: '1//otra',
+                                            scopes: SCOPES, email: 'otra@gmail.com' });
+    google.createCalendar.mockResolvedValue('citas-otra@group.calendar.google.com');
+
+    await callback().expect(200);
+
+    await vi.waitFor(() => expect(google.revokeToken).toHaveBeenCalledWith('1//refresh'));
+    expect(google.refreshAccessToken).toHaveBeenCalledWith('1//refresh');
+    expect(google.stopChannel).toHaveBeenCalledWith('ya29.anterior', expect.any(String), 'RID-viejo');
+    expect(google.deleteCalendar).toHaveBeenCalledWith('ya29.anterior', 'citas-nuevo@group.calendar.google.com');
+    expect(await adminQuery(`SELECT email, calendar_id FROM google_accounts`))
+      .toEqual([{ email: 'otra@gmail.com', calendar_id: 'citas-otra@group.calendar.google.com' }]);
+  });
+
+  it('con la misma cuenta y el calendario borrado, no revoca nada: mataría el acceso nuevo', async () => {
+    await callback().expect(200);
+    token = await createLink(admin, tenantId, 'google', { resourceId });
+    await callback().expect(200);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(google.revokeToken).not.toHaveBeenCalled();
+    expect(google.deleteCalendar).not.toHaveBeenCalled();
   });
 
   it('si crear el calendario falla, la conexión queda y el calendario se crea después', async () => {

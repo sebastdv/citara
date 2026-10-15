@@ -4,7 +4,7 @@ import { createDataSource } from '@citara/db';
 import { runInTenant } from '../../src/tenancy/tenant-context';
 import { googleEventId } from '../../src/google/event-id';
 import { GoogleApiError, GoogleAuthError } from '../../src/google/google.client';
-import { CalendarPullProcessor } from '../../src/google/calendar-pull.processor';
+import { CalendarPullProcessor, PullBusyError } from '../../src/google/calendar-pull.processor';
 import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, seedGoogleAccount, adminQuery,
          closeHelpers, buildScheduling } from '../helpers';
 
@@ -148,6 +148,60 @@ describe('CalendarPullProcessor', () => {
       .mockResolvedValueOnce(page([]));
     await run();
     expect(google.listEvents.mock.calls.map((c) => c[2].syncToken)).toEqual(['VIEJO', null]);
+  });
+
+  it('una cita que ya empezó no cambia por lo que el dueño haga con su evento en Google', async () => {
+    const a = await book(); await synced(a.id);
+    google.listEvents.mockResolvedValue(page([{ id: googleEventId(a.id), status: 'cancelled' }]));
+    expect(await pull.process({ tenantId, accountId }, new Date('2026-09-10T15:10:00Z')))
+      .toEqual({ cancelled: 0, moved: 0, rejected: 0, restored: 0 });
+    expect(await cita(a.id)).toMatchObject({ status: 'confirmed', s: 'synced' });
+  });
+
+  it('pasarla a "todo el día" o moverla al pasado se rechaza y la hora de Citara vuelve a Google', async () => {
+    const a = await book(); await synced(a.id);
+    google.listEvents.mockResolvedValueOnce(page([{ id: googleEventId(a.id), status: 'confirmed',
+      start: { date: '2026-09-10' }, end: { date: '2026-09-11' } }]));
+    expect(await run()).toMatchObject({ rejected: 1 });
+    expect(await cita(a.id)).toMatchObject({ status: 'confirmed', s: 'pending', v: 1 });
+
+    await synced(a.id);
+    google.listEvents.mockResolvedValueOnce(page([moved(a.id, '2026-09-07T15:00:00Z', '2026-09-07T15:30:00Z')]));
+    expect(await run()).toMatchObject({ rejected: 1, moved: 0 });
+    expect(new Date((await cita(a.id)).starts_at).toISOString()).toBe('2026-09-10T15:00:00.000Z');
+  });
+
+  it('si el calendario cambió a mitad de la lectura, no guarda un syncToken del calendario viejo', async () => {
+    google.listEvents.mockImplementation(async () => {
+      await adminQuery(`UPDATE google_accounts SET calendar_id = 'otro@group.calendar.google.com', sync_token = NULL`);
+      return page([]);
+    });
+    await run();
+    expect(await adminQuery(`SELECT sync_token FROM google_accounts`)).toEqual([{ sync_token: null }]);
+  });
+
+  it('un invalid_grant de un job viejo no tumba una cuenta que el dueño acaba de reconectar', async () => {
+    google.listEvents.mockImplementation(async () => {
+      await adminQuery(`UPDATE google_accounts SET refresh_token_encrypted = '\\x0102'::bytea`);
+      throw new GoogleAuthError('renovación del token: Google respondió invalid_grant');
+    });
+    await run();
+    expect(await adminQuery(`SELECT status FROM google_accounts`)).toEqual([{ status: 'active' }]);
+    expect(await adminQuery(`SELECT action FROM audit_log`)).toEqual([]);
+  });
+
+  it('una sola lectura por cuenta a la vez: la segunda se reintenta sin llamar a Google', async () => {
+    let release!: () => void;
+    google.listEvents.mockImplementationOnce(() => new Promise((r) => { release = () => r(page([])); }));
+    const first = run();
+    await vi.waitFor(() => expect(google.listEvents).toHaveBeenCalledTimes(1));
+    await expect(run()).rejects.toBeInstanceOf(PullBusyError);
+    expect(google.listEvents).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    expect(await adminQuery(`SELECT pull_lease_until FROM google_accounts`)).toEqual([{ pull_lease_until: null }]);
+    google.listEvents.mockResolvedValue(page([]));
+    await expect(run()).resolves.toBeDefined();
   });
 
   it('un acceso revocado deja la cuenta para reconectar', async () => {

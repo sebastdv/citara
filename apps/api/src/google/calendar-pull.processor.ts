@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 // Imports de VALOR: parámetros del constructor de un servicio Nest.
 import { DataSource, type EntityManager } from 'typeorm';
 import { GoogleApiError, GoogleAuthError, GoogleClient, type GoogleEvent } from './google.client';
@@ -8,9 +8,15 @@ import { appointmentIdFromEventId } from './event-id';
 import { RemindersService } from '../scheduling/reminders.service';
 import { runInTenant } from '../tenancy/tenant-context';
 import { recordAudit } from '../audit/audit';
+import { CLOCK, systemClock, type Clock } from '../clock';
 import type { AccountJob } from '../queues/calendar.queue';
 
 const PG_EXCLUSION_VIOLATION = '23P01';
+/** Más que cualquier lectura sana; si el worker muere a mitad, la cuenta se libera sola. */
+const PULL_LEASE = `5 minutes`;
+
+/** Otra lectura de la misma cuenta está en curso: el job se reintenta con backoff. */
+export class PullBusyError extends Error {}
 type Stats = { cancelled: number; moved: number; rejected: number; restored: number };
 
 /** Google → Citara (spec §7.3): lo que el dueño mueve o borra en el calendario "Citas". */
@@ -21,12 +27,20 @@ export class CalendarPullProcessor {
     private readonly tokens: GoogleTokens,
     private readonly google: GoogleClient,
     private readonly reminders: RemindersService,
+    // La agenda mide "ya pasó" con el mismo reloj con que se agenda.
+    @Inject(CLOCK) private readonly clock: Clock = systemClock,
   ) {}
 
-  async process(job: AccountJob, now = new Date()): Promise<Stats> {
+  async process(job: AccountJob, now = this.clock.now()): Promise<Stats> {
     const stats: Stats = { cancelled: 0, moved: 0, rejected: 0, restored: 0 };
     const acc = await runInTenant(this.ds, job.tenantId, (m) => loadAccount(m, job.accountId));
     if (!acc || acc.status !== 'active' || !acc.calendarId) return stats;
+    // Con UPDATE, TypeORM devuelve [filas, conteo].
+    const [, leased] = (await runInTenant(this.ds, acc.tenantId, (m) => m.query(
+      `UPDATE google_accounts SET pull_lease_until = now() + interval '${PULL_LEASE}'
+        WHERE id = $1 AND (pull_lease_until IS NULL OR pull_lease_until < now())`, [acc.id]))) as [unknown[], number];
+    // Reintentar, no descartar: la lectura en curso pudo leer antes del cambio que avisó este job.
+    if (leased === 0) throw new PullBusyError(`la cuenta ${acc.id} ya se está leyendo`);
     try {
       await this.readAll(acc, acc.calendarId, now, stats);
     } catch (err) {
@@ -39,6 +53,9 @@ export class CalendarPullProcessor {
         return stats;
       }
       throw err;
+    } finally {
+      await runInTenant(this.ds, acc.tenantId, (m) => m.query(
+        `UPDATE google_accounts SET pull_lease_until = NULL WHERE id = $1`, [acc.id]));
     }
     return stats;
   }
@@ -63,9 +80,12 @@ export class CalendarPullProcessor {
         for (const ev of page.items) await this.apply(m, acc, ev, now, stats);
       });
       if (page.nextPageToken) { pageToken = page.nextPageToken; continue; }
+      // Solo si sigue siendo el mismo calendario: si el chequeo lo recreó a mitad
+      // de la lectura, este token es del viejo y no sirve para el nuevo.
       await runInTenant(this.ds, acc.tenantId, (m) => m.query(
-        `UPDATE google_accounts SET sync_token = $2, last_pulled_at = $3, updated_at = now() WHERE id = $1`,
-        [acc.id, page.nextSyncToken, now]));
+        `UPDATE google_accounts SET sync_token = $2, last_pulled_at = $3, updated_at = now()
+          WHERE id = $1 AND calendar_id = $4`,
+        [acc.id, page.nextSyncToken, now, calendarId]));
       return;
     }
   }
@@ -85,6 +105,9 @@ export class CalendarPullProcessor {
       return;
     }
     if (a.status !== 'confirmed') return;
+    // Una cita que ya empezó es historia: lo que el dueño haga con ese evento
+    // (limpiar el calendario, moverlo) no la cancela ni la cambia en Citara.
+    if (new Date(a.starts_at).getTime() <= now.getTime()) return;
 
     if (ev.status === 'cancelled') {
       await m.query(`UPDATE appointments SET status = 'cancelled', updated_at = now() WHERE id = $1`, [a.id]);
@@ -94,11 +117,21 @@ export class CalendarPullProcessor {
       return;
     }
 
-    // Pasada a "todo el día" no es una hora: se ignora.
-    if (!ev.start?.dateTime || !ev.end?.dateTime) return;
+    const reject = async (details: Record<string, unknown>) => {
+      // No se aplica, y la hora de Citara vuelve a Google.
+      await m.query(
+        `UPDATE appointments SET google_sync_status = 'pending', google_sync_version = google_sync_version + 1
+          WHERE id = $1`, [a.id]);
+      await audit('appointment.move_rejected', details);
+      stats.rejected++;
+    };
+    // Pasada a "todo el día" no es una hora, y al pasado no se mueve una cita:
+    // se rechaza para que los dos lados no queden distintos.
+    if (!ev.start?.dateTime || !ev.end?.dateTime) { await reject({ allDay: true }); return; }
     const start = new Date(ev.start.dateTime), end = new Date(ev.end.dateTime);
-    if (!(end > start)) return;
+    if (!(end > start)) { await reject({ start: ev.start.dateTime, end: ev.end.dateTime }); return; }
     if (start.getTime() === new Date(a.starts_at).getTime() && end.getTime() === new Date(a.ends_at).getTime()) return;
+    if (start.getTime() <= now.getTime()) { await reject({ start: start.toISOString(), end: end.toISOString() }); return; }
 
     await m.query(`SAVEPOINT mover_desde_google`);
     try {
@@ -108,12 +141,8 @@ export class CalendarPullProcessor {
     } catch (err) {
       await m.query(`ROLLBACK TO SAVEPOINT mover_desde_google`);
       if ((err as { code?: string }).code !== PG_EXCLUSION_VIOLATION) throw err;
-      // Choca con otra cita: no se aplica, y la hora de Citara vuelve a Google.
-      await m.query(
-        `UPDATE appointments SET google_sync_status = 'pending', google_sync_version = google_sync_version + 1
-          WHERE id = $1`, [a.id]);
-      await audit('appointment.move_rejected', { start: start.toISOString(), end: end.toISOString() });
-      stats.rejected++;
+      // Choca con otra cita.
+      await reject({ start: start.toISOString(), end: end.toISOString() });
       return;
     }
     await this.reminders.rescheduleFor(m, acc.tenantId, a.id, start, now);

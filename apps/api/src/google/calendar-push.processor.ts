@@ -76,7 +76,8 @@ export class CalendarPushProcessor {
   }
 
   private async onError(job: PushJob, row: Row, err: unknown) {
-    const account = { id: row.account_id, tenantId: job.tenantId, resourceId: row.resource_id, calendarId: row.calendar_id };
+    const account = { id: row.account_id, tenantId: job.tenantId, resourceId: row.resource_id, calendarId: row.calendar_id,
+                      refreshTokenEncrypted: row.refresh_token_encrypted };
     if (err instanceof GoogleAuthError) {
       await runInTenant(this.ds, job.tenantId, (m) => markNeedsReauth(m, account, err.message));
       return { result: 'skipped' as const };
