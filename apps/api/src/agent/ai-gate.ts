@@ -1,11 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
+// Import de VALOR para el token de inyección.
+import { LLM, type LlmProvider } from './llm';
 
 export interface AgentConfig {
   version: number; enabled: boolean; model: string; effort: string;
   interpreterModel: string; instructions: string; monthlyBudgetUsd: number;
 }
-export type AiAvailability = { ok: true; config: AgentConfig } | { ok: false; reason: 'none' | 'disabled' | 'budget' };
+export type AiAvailability = { ok: true; config: AgentConfig } | { ok: false; reason: 'none' | 'disabled' | 'nokey' | 'budget' };
 
 /**
  * ¿Puede este negocio usar IA ahora? Configuración activa, encendida y con
@@ -14,12 +16,18 @@ export type AiAvailability = { ok: true; config: AgentConfig } | { ok: false; re
  */
 @Injectable()
 export class AiGate {
+  // Opcional: los tests y el banco lo construyen sin proveedor.
+  constructor(@Optional() @Inject(LLM) private readonly llm?: LlmProvider) {}
+
   async availability(m: EntityManager, tenantId: string, now = new Date()): Promise<AiAvailability> {
     const [c] = await m.query(
       `SELECT version, enabled, model, effort, interpreter_model, instructions, monthly_budget_usd
          FROM agent_configs WHERE is_active`);
     if (!c) return { ok: false, reason: 'none' };
     if (!c.enabled) return { ok: false, reason: 'disabled' };
+    // Sin API key cada llamada fallaría: el cliente recibiría una disculpa y un
+    // traspaso por cada mensaje. Mejor menús, igual que al llegar al tope.
+    if (this.llm?.configured && !this.llm.configured()) return { ok: false, reason: 'nokey' };
     const config: AgentConfig = {
       version: c.version, enabled: c.enabled, model: c.model, effort: c.effort,
       interpreterModel: c.interpreter_model, instructions: c.instructions, monthlyBudgetUsd: Number(c.monthly_budget_usd),
