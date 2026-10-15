@@ -55,15 +55,25 @@ check "el worker corre sin reinicios" eq "$(docker inspect --format '{{.State.St
 check "/healthz responde por Caddy con TLS" sh -c "curl -skf https://localhost:8443/healthz | grep -q '\"status\":\"ok\"'"
 check "el panel responde por Caddy" eq "$(curl -sk -o /dev/null -w '%{http_code}' https://localhost:8443/panel/login)" "200"
 check "http redirige a https" eq "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/healthz)" "308"
-published() { docker port "$(CITARA_TAG=x compose ps -q "$1")"; }
+published() {
+  local id; id="$(CITARA_TAG=x compose ps -q "$1")"
+  [ -n "$id" ] || fail "no existe el contenedor de $1"
+  docker port "$id"
+}
 for svc in postgres redis api worker; do
   [ -z "$(published "$svc")" ] || fail "$svc publica puertos: $(published "$svc")"
 done
 caddy_publishes_443() { published caddy | grep -q 443; }
 check "solo Caddy publica puertos" caddy_publishes_443
 
+check "Redis tiene tope de memoria (512 MB)" eq "$(CITARA_TAG=x compose exec -T redis redis-cli config get maxmemory | tail -n 1)" "536870912"
+
 out="$("$S" cli migrate.js)"
 check "migrar otra vez no hace nada" grep -q "Sin migraciones pendientes" <<<"$out"
+# Con una terminal de verdad (en bash 3.2 un arreglo vacío con set -u rompía este camino).
+if [ "$(uname)" = "Darwin" ]; then
+  check "la CLI funciona desde una terminal" grep -q "Sin migraciones pendientes" <<<"$(script -q /dev/null "$S" cli migrate.js 2>&1)"
+fi
 # Por la red de compose, como la app: dentro del contenedor de Postgres la imagen
 # confía en toda conexión local y cualquier clave entraría.
 as_app() { CITARA_TAG=x compose run --rm --no-deps -T -e PGPASSWORD="$1" --entrypoint psql postgres \
@@ -83,11 +93,26 @@ check "restaurar deja la base como en el respaldo" eq "$(sql "select string_agg(
 check "la API vuelve a responder tras restaurar" curl -skf -o /dev/null https://localhost:8443/healthz
 check "la base anterior queda guardada" test -n "$(sql "select datname from pg_database where datname like 'citara_prev_%'")"
 check "la base restaurada sigue sin TEMPORARY para la app" eq "$(sql "select has_database_privilege('citara_app', 'citara', 'TEMPORARY')")" "f"
+check "tras restaurar, la app conserva sus permisos y RLS" eq "$(sql "select has_table_privilege('citara_app', 'conversations', 'SELECT')::text || (select relrowsecurity and relforcerowsecurity from pg_class where relname = 'conversations')::text")" "truetrue"
+head -c 3000 "$dump" > "$WORK/truncado.dump"
+if "$S" restore "$WORK/truncado.dump" >/dev/null 2>&1; then fail "se restauró un respaldo truncado"; fi
+check "un respaldo truncado no se restaura y la base sigue igual" eq "$(sql "select string_agg(slug, ',') from tenants")" "uno"
+check "y la API sigue respondiendo" curl -skf -o /dev/null https://localhost:8443/healthz
 
 echo "== Respaldo nocturno y poda"
+mkdir "$ROOT/.deploy-lock"
+if CITARA_LOCK_WAIT=4 "$S" backup nightly >/dev/null 2>&1; then rmdir "$ROOT/.deploy-lock"; fail "el respaldo nocturno ignoró el lock"; fi
+rmdir "$ROOT/.deploy-lock"
+ok "el respaldo nocturno espera el lock de un despliegue en curso"
 for i in $(seq -w 1 16); do : > "$CITARA_BACKUP_DIR/daily-202601${i}-000000.dump"; done
 "$S" backup nightly >/dev/null
 check "se quedan 14 respaldos diarios" eq "$(ls -1 "$CITARA_BACKUP_DIR"/daily-*.dump | wc -l | tr -d ' ')" "14"
+
+echo "== Apagado limpio"
+CITARA_TAG=smoke-a compose stop -t 20 api >/dev/null 2>&1
+check "la API se apaga con SIGTERM, sin que Docker la mate" test "$(docker inspect --format '{{.State.ExitCode}}' "$(CITARA_TAG=x compose ps -aq api)")" != "137"
+CITARA_TAG=smoke-a compose start api >/dev/null 2>&1
+for i in $(seq 1 45); do curl -skf -o /dev/null https://localhost:8443/healthz && break; sleep 2; done
 
 echo "== Nueva versión y rollback"
 docker tag citara:smoke-a citara:smoke-b
@@ -106,7 +131,7 @@ for broken in apps/api/dist/src/main.js apps/worker/dist/src/main.js; do
   docker image rm citara:smoke-bad >/dev/null
 done
 
-# Al final, varios minutos después del primer despliegue: el worker no se cayó en ningún momento.
+# Tras el último cambio de versión el worker sigue en pie.
 check "el worker sigue sin reinicios al final" eq "$(docker inspect --format '{{.State.Status}} {{.RestartCount}}' "$(CITARA_TAG=x compose ps -q worker)")" "running 0"
 
 printf '\n\033[32m%s comprobaciones en verde\033[0m\n' "$PASS"

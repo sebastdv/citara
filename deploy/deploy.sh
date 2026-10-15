@@ -13,10 +13,13 @@ set -euo pipefail
 : "${CITARA_SSH:?Define CITARA_SSH=usuario@servidor}"
 DIR="${CITARA_DIR:-/opt/citara}"
 case "${1:-}" in
-  rollback|status) cmd=("$1") ;;
+  # Desacoplados de esta sesión: si se corta el SSH o pulsas Ctrl-C, solo dejas
+  # de mirar; la operación termina en el servidor (log en .deploy-last.log).
+  rollback) cmd=(detached rollback) ;;
+  status) cmd=(status) ;;
   logs) cmd=(logs "${2:-api}") ;;
   ""|-h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
-  *) cmd=(deploy "$1") ;;
+  *) cmd=(detached deploy "$1") ;;
 esac
-# -t: el despliegue muestra el progreso en vivo y Ctrl-C llega al servidor.
+# -t: el progreso se ve en vivo.
 exec ssh -t "$CITARA_SSH" "$DIR/deploy/server.sh" "${cmd[@]}"
