@@ -41,6 +41,13 @@ describe('resumen de un negocio', () => {
     expect(s!.failedOutbound24h).toBe(2);
   });
 
+  it('las consultas por negocio de messages tienen índice (la pantalla de estado no recorre la tabla)', async () => {
+    const idx: { indexdef: string }[] = await adminQuery(`SELECT indexdef FROM pg_indexes WHERE tablename = 'messages'`);
+    const defs = idx.map((i) => i.indexdef);
+    expect(defs).toContainEqual(expect.stringMatching(/\(tenant_id, origin, occurred_at DESC\)/));
+    expect(defs).toContainEqual(expect.stringMatching(/\(tenant_id, created_at\) WHERE .*direction.*status/));
+  });
+
   it('con otro contexto de RLS no ve el negocio', async () => {
     const a = await seedBiz('a', '1'), b = await seedBiz('b', '2');
     const c = await seedConv(a, '571');
