@@ -18,6 +18,9 @@ async function bootstrap() {
   // rawBody: true es indispensable — la firma HMAC se calcula sobre los bytes
   // originales, y reserializar el JSON los cambia.
   const app = await NestFactory.create(AppModule, { rawBody: true });
+  // SIGTERM (un despliegue, `docker compose stop`): cerrar el servidor y las
+  // conexiones en orden, en vez de esperar a que Docker lo mate a los 15 s.
+  app.enableShutdownHooks();
   // Detrás de Caddy, la IP del cliente viene en X-Forwarded-For: sin esto el
   // límite de intentos del panel contaría todo a la IP del proxy.
   const trust = process.env.TRUST_PROXY;

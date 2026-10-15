@@ -45,9 +45,11 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # AOF: los jobs de BullMQ sobreviven a un reinicio. noeviction: BullMQ lo exige;
-    # con memoria llena, Redis rechaza escrituras en vez de borrar jobs en silencio.
-    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
+    # AOF: los jobs de BullMQ sobreviven a un reinicio. noeviction: BullMQ lo
+    # exige; al llegar al tope, Redis rechaza escrituras en vez de borrar jobs en
+    # silencio. Sin maxmemory, el tope sería la RAM del VPS y el OOM del sistema
+    # podría matar a Postgres.
+    command: [redis-server, --appendonly, "yes", --maxmemory, 512mb, --maxmemory-policy, noeviction]
     volumes: [redisdata:/data]
     healthcheck:
       test: [CMD, redis-cli, ping]
@@ -58,6 +60,8 @@ services:
   api:
     image: citara:${CITARA_TAG:?falta CITARA_TAG}
     restart: unless-stopped
+    # init: un proceso init como PID 1 que reenvía SIGTERM a node y recoge zombis.
+    init: true
     command: [node, apps/api/dist/src/main.js]
     environment:
       <<: *app-env
@@ -79,6 +83,7 @@ services:
   worker:
     image: citara:${CITARA_TAG:?falta CITARA_TAG}
     restart: unless-stopped
+    init: true
     command: [node, apps/worker/dist/src/main.js]
     environment:
       <<: *app-env
@@ -97,7 +102,9 @@ services:
     environment:
       DOMAIN: ${DOMAIN:?falta DOMAIN}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # La carpeta, no el archivo: un archivo montado queda atado a su inodo, y
+      # el checkout de un despliegue lo reemplaza; Caddy seguiría con el viejo.
+      - ./caddy:/etc/caddy:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on: [api]
@@ -108,6 +115,7 @@ services:
   cli:
     image: citara:${CITARA_TAG:?falta CITARA_TAG}
     profiles: [cli]
+    init: true
     environment:
       <<: *app-env
       DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD}@postgres:5432/citara
