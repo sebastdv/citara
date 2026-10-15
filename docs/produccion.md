@@ -7,7 +7,7 @@ desde tu máquina. Esta guía va desde un servidor vacío hasta el primer negoci
 | Pieza | Dónde |
 |---|---|
 | Compose de producción | `deploy/compose.yml` |
-| Proxy y TLS | `deploy/Caddyfile` (Let's Encrypt automático) |
+| Proxy y TLS | `deploy/caddy/Caddyfile` (Let's Encrypt automático) |
 | Operaciones en el servidor | `deploy/server.sh` (despliegue, rollback, respaldos, restauración) |
 | Desde tu máquina | `deploy/deploy.sh`, `deploy/backup-pull.sh` |
 | CLI contra producción | `deploy/citara` |
@@ -72,6 +72,9 @@ Instala `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin` y
 ```bash
 usermod -aG docker citara
 ```
+
+Estar en el grupo `docker` equivale a ser root en ese servidor (se puede montar `/` en un
+contenedor). Por eso `citara` no lleva sudo, pero su llave SSH es tan sensible como la de root.
 
 La carpeta de la app, del usuario `citara`:
 
@@ -152,7 +155,12 @@ Qué hace, en orden (ver `deploy/server.sh`):
    `APP_DB_PASSWORD`. Si una migración falla, se detiene: la versión anterior sigue corriendo.
 6. Cambia la API y el worker a la versión nueva.
 7. Espera a que `/healthz` responda bien y a que el worker siga en pie sin reiniciarse. Si
-   no pasa, **vuelve solo a la versión anterior** y lo informa.
+   no pasa, **vuelve solo a la versión anterior** (y al checkout de esa versión) y lo informa.
+
+El despliegue corre en el servidor desacoplado de tu sesión: si se corta el SSH o pulsas
+Ctrl-C, solo dejas de mirar y la operación termina igual. Su salida queda en
+`/opt/citara/.deploy-last.log`. Si GitHub no responde, el despliegue se detiene en vez de
+desplegar lo último que se había descargado.
 
 El primer despliegue tarda unos minutos (compila y Caddy saca el certificado). Después crea
 tu operador del panel, en el servidor:
@@ -212,7 +220,7 @@ guárdalo en un disco cifrado.
 | Desplegar la punta de `main` | `./deploy/deploy.sh main` |
 | Desplegar una versión concreta | `./deploy/deploy.sh <sha o tag>` |
 | Volver a la anterior | `./deploy/deploy.sh rollback` (no recompila; alterna entre las dos últimas) |
-| Estado y últimos respaldos | `./deploy/deploy.sh status` |
+| Estado y últimos respaldos | `./deploy/deploy.sh status` (avisa si el último respaldo nocturno tiene más de 26 h) |
 | Logs | `./deploy/deploy.sh logs api` (o `worker`, `caddy`, `postgres`) |
 | CLI de la app | en el servidor: `./deploy/citara tenant list`, `./deploy/citara operator …` |
 
@@ -254,14 +262,17 @@ En el servidor:
 cd /opt/citara && ./deploy/server.sh restore backups/<archivo>.dump
 ```
 
-Restaura en una base aparte, te muestra cuántos negocios, conversaciones, mensajes y citas
+Restaura en una base aparte (si el respaldo está dañado, se detiene sin tocar nada), te muestra cuántos negocios, conversaciones, mensajes y citas
 hay ahora y cuántos en el respaldo, y solo con tu confirmación (escribir `restaurar`) la pone
 en lugar de la actual. La base actual queda guardada como `citara_prev_<fecha>`; cuando
 confirmes que todo está bien, el propio comando te dice cómo borrarla. Las colas de Redis se
-vacían: lo que tenían se refería a la base que sale.
+vacían: lo que tenían se refería a la base que sale. Después corre las migraciones, por si
+el respaldo es de antes de la última, y vuelve a levantar la app. Si algo falla a mitad, la
+vuelve a levantar igual y te muestra qué bases quedaron.
 
 Para restaurar en un servidor nuevo: pasos 2 a 5, y antes del primer despliegue copia el
-archivo con `scp` a `/opt/citara/backups/`. Despliega y luego restaura. Necesitas la misma
+archivo con `scp` a `/opt/citara/backups/`. Despliega y luego restaura (la restauración
+pone el respaldo al día con las migraciones del código desplegado). Necesitas la misma
 `DB_ENCRYPTION_KEY` que tenía el servidor viejo.
 
 ## 12. Si algo sale mal
