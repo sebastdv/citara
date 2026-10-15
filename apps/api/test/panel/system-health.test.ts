@@ -38,7 +38,8 @@ describe('respaldos (archivo de estado del nocturno)', () => {
 });
 
 describe('avisos generales', () => {
-  const ok = { backup: { configured: true as const, last: 'daily-x.dump', ageHours: 5 }, queues: [{ queue: 'outbound', failed: 0 }] };
+  const ok = { backup: { configured: true as const, last: 'daily-x.dump', ageHours: 5 }, queues: [{ queue: 'outbound', failed: 0 }],
+              agentsWithoutKey: 0 };
   it('todo bien: sin avisos', () => {
     expect(systemAlerts(ok)).toEqual([]);
   });
@@ -50,6 +51,10 @@ describe('avisos generales', () => {
     expect(systemAlerts({ ...ok, backup: { configured: true, last: 'd', ageHours: 26 } }).map((a) => a.severity)).toEqual(['critical']);
     expect(systemAlerts({ ...ok, backup: { configured: true, last: null, ageHours: null } }).map((a) => a.severity)).toEqual(['critical']);
     expect(systemAlerts({ ...ok, backup: { configured: false } }).map((a) => a.severity)).toEqual(['info']);
+  });
+  it('sin ANTHROPIC_API_KEY y con negocios que tienen el agente encendido, avisa: van solo con menús', () => {
+    expect(systemAlerts({ ...ok, agentsWithoutKey: 2 })).toEqual([expect.objectContaining({
+      severity: 'warning', message: expect.stringMatching(/ANTHROPIC_API_KEY.*2 negocios/) })]);
   });
   it('jobs fallidos son aviso; sin Redis es crítico', () => {
     expect(systemAlerts({ ...ok, queues: [{ queue: 'outbound', failed: 3 }] })[0])

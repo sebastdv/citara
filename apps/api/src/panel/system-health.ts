@@ -91,8 +91,12 @@ export class QueueStats {
 }
 
 /** Lo que vale para todo el servidor, no para un negocio. */
-export function systemAlerts(s: { backup: BackupStatus; queues: QueueFailures[] | null }): Alert[] {
+export function systemAlerts(s: { backup: BackupStatus; queues: QueueFailures[] | null; agentsWithoutKey: number }): Alert[] {
   const out: Alert[] = [];
+  // Sin clave el agente no corre y esos negocios atienden solo con menús, en silencio.
+  if (s.agentsWithoutKey > 0) {
+    out.push({ severity: 'warning', area: 'ia', message: `Falta ANTHROPIC_API_KEY: ${s.agentsWithoutKey} negocios con el agente encendido atienden solo con menús.` });
+  }
   if (!s.backup.configured) {
     out.push({ severity: 'info', area: 'negocio', message: 'No hay carpeta de respaldos configurada (normal en desarrollo).' });
   } else if (s.backup.error) {
