@@ -139,6 +139,8 @@ describe('describeMessage', () => {
       sections: [{ title: 'S', rows: [{ id: 'a', title: 'Corte' }] }] } })).toBe('Elige\n[Corte]');
     expect(describeMessage({ direction: 'out', type: 'template', body: null,
       payload: { kind: 'template', name: 'recordatorio', language: 'es', params: [] } })).toBe('Plantilla «recordatorio»');
+    expect(describeMessage({ direction: 'out', type: 'template', body: 'Recordatorio de 2 h: Ana · hoy 3:00 p. m. · Corte',
+      payload: { kind: 'template', name: 'recordatorio', language: 'es', params: [] } })).toBe('Recordatorio de 2 h: Ana · hoy 3:00 p. m. · Corte');
     expect(describeMessage({ direction: 'in', type: 'image', body: null, payload: {} })).toBe('[image]');
     expect(describeMessage({ direction: 'in', type: 'text', body: 'hola', payload: { kind: 'buttons' } })).toBe('hola');
   });

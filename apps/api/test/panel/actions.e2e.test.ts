@@ -152,6 +152,18 @@ describe('acciones del panel de punta a punta', () => {
     expect(await adminQuery(`SELECT * FROM messages`)).toEqual([]);
   });
 
+  it('el mismo envío dos veces A LA VEZ (doble clic) sale una sola vez', async () => {
+    const c = await seedConversation();
+    const page = await s.get(chat(c)).expect(200);
+    const body = { _csrf: csrfIn(page.text), texto: 'doble clic', envio: envioIn(page.text) };
+    const post = () => s.http().post(`${chat(c)}/responder`).set('Cookie', s.cookie).type('form').send(body);
+    const [r1, r2] = await Promise.all([post(), post()]);
+    expect([r1.status, r2.status]).toEqual([303, 303]);
+    await quiesce();
+    expect(sent).toEqual(['doble clic']);
+    expect(await adminQuery(`SELECT count(*)::int AS n FROM messages WHERE origin = 'operator'`)).toEqual([{ n: 1 }]);
+  });
+
   it('el mismo envío dos veces sale una sola vez', async () => {
     const c = await seedConversation();
     const page = await s.get(chat(c)).expect(200);

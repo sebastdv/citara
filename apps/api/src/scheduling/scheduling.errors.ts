@@ -13,6 +13,9 @@ export class TooSoonError extends SchedulingError {
 export class TooFarError extends SchedulingError {
   constructor(horizonDays: number) { super(`Solo se agenda con hasta ${horizonDays} días de anticipación`); }
 }
+export class TooManyAppointmentsError extends SchedulingError {
+  constructor(max: number) { super(`Ya tienes ${max} citas próximas: cancela o espera a que pase una para agendar otra`); }
+}
 export class NotFoundError extends SchedulingError {
   constructor(what = 'recurso') { super(`No se encontró ${what}`); }
 }

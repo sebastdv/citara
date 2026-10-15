@@ -84,6 +84,16 @@ describe('GoogleClient: calendario', () => {
     expect(JSON.parse(init.body).status).toBe('confirmed');
   });
 
+  it('borrar un calendario que ya no está no es un error; revocar manda el token a Google y nunca lanza', async () => {
+    fetchMock.mockResolvedValueOnce(ok(null, 404));
+    await expect(client.deleteCalendar('ya29', 'c@group')).resolves.toBeUndefined();
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    await expect(client.revokeToken('1//r')).resolves.toBeUndefined();
+    const [url, init] = fetchMock.mock.calls[1];
+    expect(url).toBe('https://oauth2.googleapis.com/revoke');
+    expect(String(init.body)).toBe('token=1%2F%2Fr');
+  });
+
   it('borrar un evento que ya no está no es un error', async () => {
     fetchMock.mockResolvedValue(ok(null, 410));
     await expect(client.deleteEvent('ya29', 'c@group', 'abc12')).resolves.toBeUndefined();
@@ -94,7 +104,14 @@ describe('GoogleClient: calendario', () => {
     const r = await client.listEvents('ya29', 'c@group', { syncToken: 'S1', pageToken: null });
     expect(r).toEqual({ items: [{ id: 'e1', status: 'cancelled' }], nextPageToken: null, nextSyncToken: 'S2' });
     const u = new URL(fetchMock.mock.calls[0][0]);
-    expect(Object.fromEntries(u.searchParams)).toEqual({ maxResults: '2500', syncToken: 'S1' });
+    expect(Object.fromEntries(u.searchParams)).toEqual({ maxResults: '2500', showDeleted: 'true', syncToken: 'S1' });
+  });
+
+  it('la lectura desde cero también pide lo borrado: un borrado durante el hueco no se pierde', async () => {
+    fetchMock.mockResolvedValue(ok({ items: [], nextSyncToken: 'S1' }));
+    await client.listEvents('ya29', 'c@group', { syncToken: null, pageToken: null });
+    const u = new URL(fetchMock.mock.calls[0][0]);
+    expect(Object.fromEntries(u.searchParams)).toEqual({ maxResults: '2500', showDeleted: 'true' });
   });
 
   it('un syncToken vencido es un error 410 que no se reintenta a ciegas', async () => {

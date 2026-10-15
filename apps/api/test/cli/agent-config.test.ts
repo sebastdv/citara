@@ -5,7 +5,9 @@ import { applyTenantConfig } from '../../src/cli/tenant-config';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentYamlSchema, listAgentVersions, rollbackAgentConfig } from '../../src/agent/agent-config';
+import { agentYamlSchema, configHash, listAgentVersions, rollbackAgentConfig } from '../../src/agent/agent-config';
+import { AGENT_TOOLS } from '../../src/agent/agent-tools';
+import { AGENDA_FLOW } from '../../src/flow-engine/flows/agenda';
 import { writeBenchResult } from '../../src/agent/bench/runner';
 import { listTenants } from '../../src/cli/tenants';
 import { resetDb, seedChannel, adminQuery, closeHelpers } from '../helpers';
@@ -28,6 +30,29 @@ afterAll(async () => { await admin.destroy(); await closeHelpers(); });
 beforeEach(async () => { await resetDb(); ({ tenantId } = await seedChannel()); });
 
 describe('configuración del agente desde el YAML', () => {
+  it('el intérprete no puede ser Opus: es el clasificador barato de cada mensaje del menú', () => {
+    expect(agentYamlSchema.safeParse({ interpreter_model: 'claude-opus-5-5' }).success).toBe(false);
+    expect(agentYamlSchema.safeParse({ interpreter_model: 'claude-sonnet-5-5' }).success).toBe(true);
+  });
+
+  it('el hash que exige el banco cambia si cambian las herramientas del agente (sus descripciones)', () => {
+    const c = agentYamlSchema.parse({});
+    const otras = AGENT_TOOLS.map((t, i) => (i === 0 ? { ...t, description: `${t.description} (cambiada)` } : t));
+    expect(configHash(c, otras)).not.toBe(configHash(c));
+    expect(configHash(c, AGENT_TOOLS)).toBe(configHash(c));
+  });
+
+  it('avisa si el agente queda encendido con un flujo propio sin ai_step: el agente nunca entraría', async () => {
+    const { ai_step: _omit, ...sinAgente } = AGENDA_FLOW as unknown as Record<string, unknown>;
+    const propio = { ...sinAgente, key: 'propio' };
+    const r = await applyTenantConfig(admin, { ...base, flow: propio, agent: {} }, { skipBench: true });
+    expect(r.warnings).toEqual([expect.stringContaining('ai_step')]);
+    const conAgenda = await applyTenantConfig(admin, { ...base, flow: 'agenda', agent: {} }, { skipBench: true });
+    expect(conAgenda.warnings).toEqual([]);
+    const apagado = await applyTenantConfig(admin, { ...base, flow: propio, agent: { enabled: false } }, { skipBench: true });
+    expect(apagado.warnings).toEqual([]);
+  });
+
   it('sin sección agent, el negocio no tiene IA', async () => {
     expect((await apply(undefined)).agent).toBeNull();
     expect(await versions()).toEqual([]);

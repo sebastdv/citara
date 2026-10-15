@@ -14,6 +14,8 @@ const AHORA = new Date('2026-09-08T12:00:00Z');
 const run = (name: string, args: unknown, who = contactId, extra: Partial<ToolContext> = {}): Promise<ToolResult> =>
   runInTenant(app, tenantId, (m) =>
     s.tools.run(name, args, { m, tenantId, contactId: who, conversationId, now: AHORA, ...extra } satisfies ToolContext));
+const estado = async (id: string) =>
+  (await adminQuery(`SELECT status, starts_at FROM appointments WHERE id = $1`, [id]))[0];
 const agendar = () => run('agendar_cita', {
   servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' });
 
@@ -157,6 +159,7 @@ describe('confirmación en dos tiempos (R4)', () => {
   it('rechaza un token inventado', async () => {
     const id = ((await agendar()).data as { id: string }).id;
     expect((await run('cancelar_cita', { cita_id: id, confirmation_token: 'inventado' })).ok).toBe(false);
+    expect((await estado(id)).status).toBe('confirmed');
   });
 
   it('el token de cancelar no sirve para reprogramar', async () => {
@@ -165,6 +168,7 @@ describe('confirmación en dos tiempos (R4)', () => {
     const res = await run('reprogramar_cita', { cita_id: id, nuevo_inicio: '2026-09-10T11:00:00-05:00',
                                                 confirmation_token: confirmationToken });
     expect(res.ok).toBe(false);
+    expect(await estado(id)).toEqual({ status: 'confirmed', starts_at: new Date('2026-09-10T15:00:00Z') });
   });
 
   it('no cancela la cita de otro contacto ni con un token válido', async () => {
@@ -172,6 +176,18 @@ describe('confirmación en dos tiempos (R4)', () => {
     const { confirmationToken } = await run('cancelar_cita', { cita_id: id });
     const intruso = await seedContact(tenantId, '573009990000');
     expect((await run('cancelar_cita', { cita_id: id, confirmation_token: confirmationToken }, intruso)).ok).toBe(false);
+    expect((await estado(id)).status).toBe('confirmed');
+  });
+
+  it('una cita que ya pasó no se cancela ni se mueve, ni siquiera con token', async () => {
+    const id = ((await agendar()).data as { id: string }).id;
+    const { confirmationToken } = await run('cancelar_cita', { cita_id: id });
+    const despues = { now: new Date('2026-09-10T15:30:00Z') }; // la cita empezó a las 15:00 UTC
+    const cancelar = await run('cancelar_cita', { cita_id: id, confirmation_token: confirmationToken }, contactId, despues);
+    const mover = await run('reprogramar_cita', { cita_id: id, nuevo_inicio: '2026-09-11T10:00:00-05:00' }, contactId, despues);
+    expect([cancelar.error, mover.error]).toEqual([expect.stringContaining('ya pasó'), expect.stringContaining('ya pasó')]);
+    expect(mover.confirmationToken).toBeUndefined();
+    expect((await estado(id)).status).toBe('confirmed');
   });
 
   it('reprogramar avisa antes de pedir confirmación si el horario nuevo no sirve', async () => {
@@ -192,7 +208,8 @@ describe('confirmación en dos tiempos (R4)', () => {
     const args = { cita_id: id, nuevo_inicio: '2026-09-10T11:00:00-05:00' };
     const { confirmationToken } = await run('reprogramar_cita', args);
     const res = await run('reprogramar_cita', { ...args, confirmation_token: confirmationToken });
-    expect(res.data).toMatchObject({ inicio: '2026-09-10T11:00:00-05:00' });
+    expect(res.data).toMatchObject({ id, inicio: '2026-09-10T11:00:00-05:00' });
+    expect(await estado(id)).toEqual({ status: 'confirmed', starts_at: new Date('2026-09-10T16:00:00Z') });
   });
 });
 
@@ -243,6 +260,25 @@ describe('confirmaciones atadas al turno (R4)', () => {
     await run('agendar_cita', { ...args, inicio: '2026-09-10T11:00:00-05:00' });
     expect((await adminQuery(`SELECT booked_by FROM appointments ORDER BY starts_at`)).map((r: { booked_by: string }) => r.booked_by))
       .toEqual(['agent', 'flow']);
+  });
+
+  it('agendar dos veces con el mismo token (un reintento) devuelve la misma cita, no "franja ocupada"', async () => {
+    const args = { servicio_id: serviceId, recurso_id: resourceId, inicio: '2026-09-10T10:00:00-05:00', nombre: 'Ana' };
+    const pedido = await run('agendar_cita', args, contactId, { turnId: T1, actor: 'agent' });
+    const conToken = { ...args, confirmation_token: pedido.confirmationToken };
+    const primera = await run('agendar_cita', conToken, contactId, { turnId: T2, actor: 'agent' });
+    const segunda = await run('agendar_cita', conToken, contactId, { turnId: T2, actor: 'agent' });
+    expect(segunda).toEqual(primera);
+    expect(await adminQuery(`SELECT id FROM appointments`)).toHaveLength(1);
+  });
+
+  it('cancelar dos veces con el mismo token (un reintento) responde bien la segunda vez', async () => {
+    const { id } = (await agendar()).data as { id: string };
+    const pedido = await run('cancelar_cita', { cita_id: id }, contactId, { turnId: T1, actor: 'agent' });
+    const conToken = { cita_id: id, confirmation_token: pedido.confirmationToken };
+    expect(await run('cancelar_cita', conToken, contactId, { turnId: T2, actor: 'agent' })).toMatchObject({ ok: true });
+    expect(await run('cancelar_cita', conToken, contactId, { turnId: T2, actor: 'agent' }))
+      .toMatchObject({ ok: true, data: { cancelada: true } });
   });
 
   it('pedir confirmación de una hora ocupada ya avisa que está ocupada', async () => {

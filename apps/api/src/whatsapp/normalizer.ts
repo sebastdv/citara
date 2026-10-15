@@ -103,6 +103,8 @@ function collectMessages(out: NormalizedWebhook, value: any, wabaId: string, pho
 
 function collectEchoes(out: NormalizedWebhook, value: any, wabaId: string, phoneNumberId: string) {
   for (const m of asArray(value?.message_echoes)) {
+    // Sin destinatario no hay a qué conversación atribuirlo: crearía un contacto con wa_id vacío.
+    if (!waId(m?.to) || !m?.id) continue;
     out.echoes.push({
       wamid: String(m?.id ?? ''),
       phoneNumberId,

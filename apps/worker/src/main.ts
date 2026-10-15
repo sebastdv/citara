@@ -11,9 +11,15 @@ import { config } from 'dotenv';
 config();
 
 import { NestFactory } from '@nestjs/core';
-import { AppModule, startWorkers } from '@citara/api';
+import { AppModule, bootEnvCheck, startWorkers } from '@citara/api';
 
 async function bootstrap() {
+  // PUBLIC_BASE_URL es la dirección que se le da a Google para sus avisos.
+  const env = bootEnvCheck(process.env, { meta: false });
+  if (env.errors.length) {
+    for (const e of env.errors) console.error(`[bootstrap] ${e}`);
+    process.exit(1);
+  }
   // createApplicationContext: sin servidor HTTP. Este proceso SOLO procesa
   // colas — compartir proceso con el servidor HTTP haría que el worker
   // compita por el event loop y sature el pool de conexiones mientras la

@@ -77,7 +77,12 @@ export class AgentProcessor {
         .catch((err: Error) => this.log.warn(`no se pudo renovar el lease: ${err.message}`));
     }, RENEW_EVERY_MS);
     try {
-      return await this.run({ ...job, owner });
+      const result = await this.run({ ...job, owner });
+      // Sin respuesta del agente (la conversación siguió por otro lado, o ya manda un
+      // humano), nadie encola el envío de este turno: lo que el flujo hubiera dejado
+      // en pending quedaría atascado. Se encola igual; el envío decide qué sale.
+      if (result === 'nothing' || result === 'skipped') await this.flushTurn(job);
+      return result;
     } finally {
       clearInterval(heartbeat);
       await releaseLease(this.ds, job.tenantId, job.conversationId, owner);
@@ -166,15 +171,29 @@ export class AgentProcessor {
         question: questionOf(step, session.vars), options: optionsOf(step, session.vars), text: job.input ?? '' });
     }
     if (r.action === 'agent' && flow.ai_step && gate.ok) {
-      await runInTenant(this.ds, job.tenantId, (m) => m.query(
+      // Solo si la sesión sigue donde estaba: el cliente pudo tocar otra opción mientras Haiku pensaba.
+      const [, moved] = (await runInTenant(this.ds, job.tenantId, (m) => m.query(
         `UPDATE conversation_sessions
             SET step_key = $2, ${CLEAR_AGENT},
                 agent_cursor = (SELECT created_at FROM messages WHERE id = $3) - interval '1 microsecond',
                 updated_at = now()
-          WHERE id = $1`, [session.id, flow.ai_step, job.inboundId]));
+          WHERE id = $1 AND status = 'active' AND step_key = $4`,
+        [session.id, flow.ai_step, job.inboundId, job.stepKey]))) as [unknown, number];
+      if (moved === 0) return 'nothing' as const;
       return 'to_agent' as const;
     }
     await this.finish(job, job.inboundId, async (m) => {
+      // Con la conversación ya bloqueada: si mientras Haiku pensaba el cliente escribió
+      // o tocó otra opción, su propio turno ya movió la sesión y esta interpretación sobra.
+      const [stale] = await m.query(
+        `SELECT 1 FROM conversation_sessions s
+          WHERE s.id = $1 AND (s.status <> 'active' OR s.step_key <> $2)
+         UNION ALL
+         SELECT 1 FROM messages
+          WHERE conversation_id = $3 AND direction = 'in' AND origin = 'customer'
+            AND created_at > (SELECT created_at FROM messages WHERE id = $4)
+         LIMIT 1`, [session.id, job.stepKey, job.conversationId, job.inboundId]);
+      if (stale) return null;
       const ctx = this.ctx(job, job.inboundId);
       const out = r.action === 'option'
         ? await this.flows.resume(m, ctx, { input: r.optionId, ai: true })
@@ -305,6 +324,12 @@ export class AgentProcessor {
       return;
     }
     await this.enqueueTurn(job, turnId);
+  }
+
+  private async flushTurn(job: AgentJob) {
+    const [{ n }] = await runInTenant(this.ds, job.tenantId, (m) => m.query(
+      `SELECT count(*)::int AS n FROM messages WHERE reply_to_id = $1 AND status = 'pending'`, [job.inboundId]));
+    if (n > 0) await this.enqueueTurn(job, job.inboundId);
   }
 
   private enqueueTurn(job: AgentJob, turnId: string) {

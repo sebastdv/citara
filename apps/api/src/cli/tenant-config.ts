@@ -16,10 +16,26 @@ const iso = z.string().refine((v) => DateTime.fromISO(v, { setZone: true }).isVa
 const hoursBlock = z.object({
   days: z.array(z.enum(['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'])).min(1),
   start: hhmm,
-  end: hhmm,
+  // 24:00 es el cierre a medianoche: con 23:59 la última franja se perdería.
+  end: z.union([hhmm, z.literal('24:00')]),
 }).refine((b) => b.end > b.start, { message: 'end debe ser posterior a start' });
-const flowSchema = z.object({ key: z.string(), entry: z.string(), steps: z.record(z.unknown()) })
-  .refine((f) => f.entry in f.steps, { message: 'el paso de entrada del flujo no existe' });
+const flowSchema = z.object({ key: z.string(), entry: z.string(), ai_step: z.string().optional(),
+  steps: z.record(z.unknown()) }).superRefine((f, ctx) => {
+  if (!(f.entry in f.steps)) ctx.addIssue({ code: 'custom', message: 'el paso de entrada del flujo no existe' });
+  if (f.ai_step !== undefined && (f.steps[f.ai_step] as { type?: unknown } | undefined)?.type !== 'ai_turn') {
+    ctx.addIssue({ code: 'custom', message: `ai_step '${f.ai_step}' no es un paso ai_turn del flujo` });
+  }
+  for (const [name, raw] of Object.entries(f.steps)) {
+    const step = (raw ?? {}) as Record<string, unknown>;
+    const targets = [step.next, step.on_invalid, step.on_success, step.on_empty, step.on_error,
+      ...(Array.isArray(step.buttons) ? step.buttons.map((b) => (b as { next?: unknown })?.next) : [])];
+    for (const t of targets) {
+      if (typeof t === 'string' && !(t in f.steps)) {
+        ctx.addIssue({ code: 'custom', message: `el paso '${name}' apunta a '${t}', que no existe` });
+      }
+    }
+  }
+});
 
 export const tenantConfigSchema = z.object({
   tenant: z.string().min(1),
@@ -159,7 +175,25 @@ export async function applyTenantConfig(
                              details: { version: agent.version, hash: agent.hash } });
     }
 
+    // Lo que no impide aplicar pero el operador tiene que saber.
+    const warnings: string[] = [];
+    for (const s of c.services) {
+      // Puede ser a propósito (nadie lo hace esta temporada), pero el cliente lo ve en el menú y nunca hay franjas.
+      if (!c.resources.some((r) => r.services.includes(s.key))) {
+        warnings.push(`Ningún recurso presta '${s.key}': aparece en el menú pero nunca va a tener horarios.`);
+      }
+    }
+    if (c.agent?.enabled !== false && c.agent) {
+      const [active] = await m.query(
+        `SELECT definition FROM flows WHERE tenant_id = $1 AND is_active AND is_default LIMIT 1`, [tenantId]);
+      const def = active?.definition as FlowDefinition | undefined;
+      if (def && !def.ai_step) {
+        warnings.push(`El agente quedó encendido, pero el flujo '${def.key}' no tiene ai_step: el agente nunca va a entrar. ` +
+                      `Usa flow: agenda o agrega ai_step y un paso ai_turn a tu flujo.`);
+      }
+    }
+
     return { tenantId, services: c.services.length, resources: c.resources.length,
-             hours, timeOff: c.time_off.length, flow, status: status as string, agent };
+             hours, timeOff: c.time_off.length, flow, status: status as string, agent, warnings };
   });
 }

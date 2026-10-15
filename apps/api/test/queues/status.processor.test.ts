@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
-import { StatusProcessor } from '../../src/queues/status.processor';
+import { AckAheadError, StatusProcessor } from '../../src/queues/status.processor';
 import { resetDb, seedChannel, adminQuery, closeHelpers } from '../helpers';
 
 let ds: DataSource;
 let processor: StatusProcessor;
-let tenantId: string;
+let tenantId: string, conversationId: string;
 
 const statusOf = async (wamid: string) =>
   (await adminQuery(`SELECT status FROM messages WHERE wamid = $1`, [wamid]))[0]?.status;
@@ -27,6 +27,7 @@ beforeEach(async () => {
   const [c] = await adminQuery(
     `INSERT INTO conversations (tenant_id, contact_id, channel_id) VALUES ($1, $2, $3) RETURNING id`,
     [tenantId, k.id, channelId]);
+  conversationId = c.id;
   await adminQuery(
     `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type, body, status)
      VALUES ($1, $2, 'wamid.S1', 'out', 'bot', 'text', 'Hola', 'sent'),
@@ -52,6 +53,20 @@ describe('StatusProcessor', () => {
   it('registra un fallo que Meta reporta después de haber aceptado', async () => {
     await apply('wamid.S1', 'failed');
     expect(await statusOf('wamid.S1')).toBe('failed');
+  });
+
+  it('un acuse que llega antes de que se guarde el wamid se reintenta, no se pierde', async () => {
+    const [m] = await adminQuery(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, status)
+       VALUES ($1, $2, 'out', 'bot', 'text', 'Hola', 'sending') RETURNING id`, [tenantId, conversationId]);
+    await expect(apply('wamid.NUEVO', 'delivered')).rejects.toBeInstanceOf(AckAheadError);
+    await adminQuery(`UPDATE messages SET status = 'sent', wamid = 'wamid.NUEVO' WHERE id = $1`, [m.id]);
+    expect(await apply('wamid.NUEVO', 'delivered')).toEqual({ updated: true });
+    expect(await statusOf('wamid.NUEVO')).toBe('delivered');
+  });
+
+  it('un acuse de un wamid desconocido sin envíos en vuelo se descarta sin reintentar', async () => {
+    expect(await apply('wamid.AJENO', 'delivered')).toEqual({ updated: false });
   });
 
   it('no toca los mensajes que no salieron por nosotros', async () => {

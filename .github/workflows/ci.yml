@@ -58,6 +58,15 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
 
+  scripts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck viene instalado en las imágenes de GitHub. -x sigue los `source`.
+      # --severity=warning: los `info` (estilo, como `A && B || C`) son a propósito.
+      - run: shellcheck -x --severity=warning deploy/*.sh deploy/citara deploy/smoke/smoke.sh
+
   image:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

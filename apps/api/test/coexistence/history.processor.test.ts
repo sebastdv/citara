@@ -79,6 +79,13 @@ describe('HistoryProcessor', () => {
     expect(ch.history_sync).toBe('declined');
   });
 
+  it('un rechazo que llega después del final no deshace lo importado', async () => {
+    await run(chunkOf('573000000001', [{ wamid: 'wamid.D1', fromCustomer: true, text: 'Hola', at: ago(30) }], 2, 100));
+    await run(normalizeWebhook(historyDeclinedPayload()).history[0]);
+    const [ch] = await adminQuery(`SELECT history_sync FROM whatsapp_channels`);
+    expect(ch.history_sync).toBe('done');
+  });
+
   it('al completar, deja en manos del dueño solo donde estuvo activo hace menos de N horas', async () => {
     // Una sola medición: Meta trae segundos, y recalcular `ago(2)` en la
     // aserción podría caer en el segundo siguiente.

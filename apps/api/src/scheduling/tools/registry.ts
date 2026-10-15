@@ -41,6 +41,8 @@ const day = z.string().refine((v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && DateTime.f
   'Fecha inválida: se espera AAAA-MM-DD');
 /** Un rango de consulta nunca pasa de esto: la transacción del turno está abierta mientras se calcula. */
 const MAX_RANGE_DAYS = 31;
+/** Una cita que ya empezó es historia: ni se cancela ni se mueve. */
+const PAST = 'Esa cita ya pasó: no se puede cancelar ni mover';
 const instant = (iso: string) => DateTime.fromISO(iso, { setZone: true }).toJSDate();
 
 /** Lo que dura una confirmación: más que eso, la persona ya está en otra cosa. */
@@ -234,6 +236,18 @@ export class ToolRegistry {
             }
             const invalid = checkToken(a.confirmation_token, parts, ctx);
             if (invalid) return { ok: false, error: invalid };
+            // Idempotente: el token ata contacto, servicio, recurso y hora. Si esa cita ya
+            // está confirmada, es este mismo pedido reintentado (un reintento del worker
+            // tras un error): se devuelve la cita en vez de "esa franja ya está ocupada".
+            const [prev] = await ctx.m.query(
+              `SELECT id, starts_at, status FROM appointments
+                WHERE contact_id = $1 AND service_id = $2 AND resource_id = $3 AND starts_at = $4 AND status = 'confirmed'`,
+              [ctx.contactId, a.servicio_id, a.recurso_id, startsAt]);
+            if (prev) {
+              const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+              return { ok: true, data: { id: prev.id, inicio: isoIn(prev.starts_at, timezone), estado: prev.status,
+                                         etiqueta: labelFor(prev.starts_at, timezone) } };
+            }
           }
           const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
           const cita = await booking.book(ctx.m, ctx.tenantId, {
@@ -256,7 +270,21 @@ export class ToolRegistry {
         async run(a, ctx) {
           const parts = ['cancelar_cita', a.cita_id, ctx.contactId];
           const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
-          if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
+          if (!cita) {
+            // Ya cancelada y con un token válido para ella: es este mismo pedido reintentado
+            // (el worker reintentó el turno tras un error), no "no encontré esa cita".
+            if (a.confirmation_token !== undefined && !checkToken(a.confirmation_token, parts, ctx)) {
+              const [gone] = await ctx.m.query(
+                `SELECT starts_at FROM appointments WHERE id = $1 AND contact_id = $2 AND status = 'cancelled'`,
+                [a.cita_id, ctx.contactId]);
+              if (gone) {
+                const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+                return { ok: true, data: { cancelada: true, etiqueta: labelFor(gone.starts_at, timezone) } };
+              }
+            }
+            return { ok: false, error: 'No encontré esa cita a tu nombre' };
+          }
+          if (cita.startsAt.getTime() <= ctx.now.getTime()) return { ok: false, error: PAST };
           if (a.confirmation_token === undefined) {
             const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
             return { ok: true, confirmationToken: issueToken(parts, ctx),
@@ -264,8 +292,8 @@ export class ToolRegistry {
           }
           const invalid = checkToken(a.confirmation_token, parts, ctx);
           if (invalid) return { ok: false, error: invalid };
-          await booking.cancel(ctx.m, a.cita_id, ctx.contactId);
           const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          await booking.cancel(ctx.m, a.cita_id, ctx.contactId);
           return { ok: true, data: { cancelada: true, etiqueta: labelFor(cita.startsAt, timezone) } };
         },
       },
@@ -283,6 +311,7 @@ export class ToolRegistry {
           const parts = ['reprogramar_cita', a.cita_id, ctx.contactId, nuevo.toISOString()];
           const cita = await booking.findForContact(ctx.m, a.cita_id, ctx.contactId);
           if (!cita) return { ok: false, error: 'No encontré esa cita a tu nombre' };
+          if (cita.startsAt.getTime() <= ctx.now.getTime()) return { ok: false, error: PAST };
           const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
           if (a.confirmation_token === undefined) {
             // Se verifica ANTES de pedir confirmación: confirmar un horario que no

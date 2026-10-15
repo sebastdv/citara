@@ -15,7 +15,8 @@ import { listAgentVersions, rollbackAgentConfig } from '../agent/agent-config';
 const USAGE = `Uso:
   pnpm tenant create <slug> "<nombre>" [zona]   crea el negocio en alta e imprime el enlace de conexión
   pnpm tenant link <slug>                         imprime un enlace de conexión nuevo
-  pnpm tenant suspend <slug> | resume <slug>      saca o devuelve el negocio a operación
+  pnpm tenant suspend <slug> ["motivo"]          saca al negocio de operación (el motivo queda en la bitácora)
+  pnpm tenant resume <slug> ["motivo"]           lo devuelve a operación si está completo
   pnpm tenant list                                estado de los negocios y sus canales
   pnpm tenant sync <slug>                         reintenta la sincronización de historial y contactos
   pnpm tenant google <slug> <recurso>             imprime el enlace para conectar el Google Calendar de un recurso
@@ -90,7 +91,7 @@ async function main() {
       case 'suspend':
       case 'resume':
         if (!args[0]) throw new Error(USAGE);
-        console.log(`'${args[0]}' quedó ${await setSuspended(admin, args[0], cmd === 'suspend')}`);
+        console.log(`'${args[0]}' quedó ${await setSuspended(admin, args[0], cmd === 'suspend', args[1])}`);
         break;
       case 'list':
         for (const t of await listTenants(admin)) {
@@ -105,7 +106,8 @@ async function main() {
         await enc.ready();
         const meta = new MetaOnboardingClient(process.env.META_GRAPH_VERSION ?? 'v25.0',
           process.env.META_APP_ID ?? '', process.env.META_APP_SECRET ?? '');
-        console.log(await syncTenant(admin, enc, meta, args[0]));
+        const r = await syncTenant(admin, enc, meta, args[0]);
+        console.log(Object.keys(r).length ? r : 'Nada que reintentar: contactos e historial ya se pidieron a Meta.');
         break;
       }
       default:

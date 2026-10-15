@@ -28,54 +28,24 @@ export class HistoryProcessor {
   async process(job: HistoryJob): Promise<{ imported: number }> {
     const { tenantId, channelId, chunk } = job;
 
+    if (chunk.declined) {
+      // Un rechazo que llega después del final (una reentrega) no deshace lo importado.
+      await runInTenant(this.ds, tenantId, (m) => m.query(
+        `UPDATE whatsapp_channels SET history_sync = 'declined' WHERE id = $1 AND history_sync <> 'done'`,
+        [channelId]));
+      return { imported: 0 };
+    }
+
+    // Una transacción por hilo: un chunk trae cientos de conversaciones y una
+    // sola transacción las tenía todas bloqueadas a la vez frente a los turnos
+    // en vivo. Reintentar el chunk es seguro: todo insert es idempotente.
+    let imported = 0;
+    for (const thread of chunk.threads) {
+      if (!thread.waId) continue;
+      imported += await runInTenant(this.ds, tenantId, (m) => this.importThread(m, tenantId, channelId, thread));
+    }
+
     return runInTenant(this.ds, tenantId, async (m) => {
-      if (chunk.declined) {
-        await m.query(`UPDATE whatsapp_channels SET history_sync = 'declined' WHERE id = $1`, [channelId]);
-        return { imported: 0 };
-      }
-
-      let imported = 0;
-      for (const thread of chunk.threads) {
-        if (!thread.waId) continue;
-        const fromCustomer = thread.messages.filter((x) => x.from === thread.waId);
-        const lastInbound = fromCustomer.length
-          ? new Date(Math.max(...fromCustomer.map((x) => x.timestamp.getTime())))
-          : null;
-
-        const [contact] = await m.query(
-          `INSERT INTO contacts (tenant_id, wa_id) VALUES ($1, $2)
-           ON CONFLICT (tenant_id, wa_id) DO UPDATE SET wa_id = EXCLUDED.wa_id
-           RETURNING id`,
-          [tenantId, thread.waId],
-        );
-        // GREATEST: la ventana de Meta cuenta mensajes reales del cliente,
-        // aunque sean previos a Citara, y nunca se encoge.
-        const [conversation] = await m.query(
-          `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (tenant_id, contact_id, channel_id) WHERE status <> 'closed'
-             DO UPDATE SET last_inbound_at = GREATEST(conversations.last_inbound_at,
-                                                      EXCLUDED.last_inbound_at),
-                           updated_at = now()
-           RETURNING id`,
-          [tenantId, contact.id, channelId, lastInbound],
-        );
-
-        for (const msg of thread.messages) {
-          if (!msg.wamid) continue;
-          const rows = await m.query(
-            `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type,
-                                   body, payload, occurred_at)
-             VALUES ($1, $2, $3, $4, 'history', $5, $6, $7, $8)
-             ON CONFLICT (wamid) WHERE wamid IS NOT NULL DO NOTHING
-             RETURNING id`,
-            [tenantId, conversation.id, msg.wamid, msg.from === thread.waId ? 'in' : 'out',
-             msg.type, msg.text, JSON.stringify(msg.raw), msg.timestamp],
-          );
-          imported += rows.length;
-        }
-      }
-
       // La regla corre en CADA chunk, no solo al terminar: un historial de 180
       // días puede tardar, y el dueño que escribió hace un rato debe quedar
       // protegido desde el primer chunk. Con datos parciales la regla solo
@@ -89,6 +59,50 @@ export class HistoryProcessor {
       }
       return { imported };
     });
+  }
+
+  private async importThread(
+    m: EntityManager, tenantId: string, channelId: string, thread: HistoryJob['chunk']['threads'][number],
+  ): Promise<number> {
+    const fromCustomer = thread.messages.filter((x) => x.from === thread.waId);
+    const lastInbound = fromCustomer.length
+      ? new Date(Math.max(...fromCustomer.map((x) => x.timestamp.getTime())))
+      : null;
+
+    const [contact] = await m.query(
+      `INSERT INTO contacts (tenant_id, wa_id) VALUES ($1, $2)
+       ON CONFLICT (tenant_id, wa_id) DO UPDATE SET wa_id = EXCLUDED.wa_id
+       RETURNING id`,
+      [tenantId, thread.waId],
+    );
+    // GREATEST: la ventana de Meta cuenta mensajes reales del cliente,
+    // aunque sean previos a Citara, y nunca se encoge.
+    const [conversation] = await m.query(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_id, last_inbound_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (tenant_id, contact_id, channel_id) WHERE status <> 'closed'
+         DO UPDATE SET last_inbound_at = GREATEST(conversations.last_inbound_at,
+                                                  EXCLUDED.last_inbound_at),
+                       updated_at = now()
+       RETURNING id`,
+      [tenantId, contact.id, channelId, lastInbound],
+    );
+
+    let imported = 0;
+    for (const msg of thread.messages) {
+      if (!msg.wamid) continue;
+      const rows = await m.query(
+        `INSERT INTO messages (tenant_id, conversation_id, wamid, direction, origin, type,
+                               body, payload, occurred_at)
+         VALUES ($1, $2, $3, $4, 'history', $5, $6, $7, $8)
+         ON CONFLICT (wamid) WHERE wamid IS NOT NULL DO NOTHING
+         RETURNING id`,
+        [tenantId, conversation.id, msg.wamid, msg.from === thread.waId ? 'in' : 'out',
+         msg.type, msg.text, JSON.stringify(msg.raw), msg.timestamp],
+      );
+      imported += rows.length;
+    }
+    return imported;
   }
 
   /** El bot solo responde donde el dueño no estuvo activo en las últimas N horas. */

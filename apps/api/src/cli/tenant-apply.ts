@@ -24,6 +24,7 @@ async function main() {
                 `${r.hours} bloques de horario, ${r.timeOff} ausencias, flujo ${r.flow ?? 'sin cambios'}, ` +
                 `estado ${r.status}` +
                 (r.agent ? `, agente v${r.agent.version}${r.agent.changed ? ' (nueva)' : ''}` : ''));
+    for (const w of r.warnings) console.warn(`AVISO: ${w}`);
   } finally {
     await ds.destroy();
   }

@@ -1,7 +1,14 @@
 import { DateTime, Interval } from 'luxon';
 
 export interface HoursBlock { weekday: number; start: string; end: string }
-export interface BusyInterval { start: Date; end: Date }
+export interface BusyInterval {
+  start: Date;
+  end: Date;
+  /** El buffer de la cita ocupada: su limpieza va después de ella. */
+  bufferMin?: number;
+  /** Una ausencia (time_off): como el cierre, ni se alarga ni la alarga la limpieza de la franja. */
+  absence?: boolean;
+}
 export interface Slot { start: Date; end: Date }
 
 export interface SlotInput {
@@ -10,6 +17,7 @@ export interface SlotInput {
   /** IANA, de tenants.timezone. Toda la aritmética de calendario depende de esto. */
   timezone: string;
   durationMin: number;
+  /** El buffer del servicio pedido: la limpieza que necesita la franja nueva al terminar. */
   bufferMin: number;
   granularityMin: number;
   minLeadMin: number;
@@ -24,6 +32,21 @@ const at = (day: DateTime, hhmm: string) => {
   return day.set({ hour, minute, second: 0, millisecond: 0 });
 };
 
+/** Por día, los bloques solapados o pegados (09-12 y 12-18) se vuelven uno: una cita puede cruzar el borde. */
+export function mergeBlocks(hours: HoursBlock[]): HoursBlock[] {
+  const out: HoursBlock[] = [];
+  const sorted = [...hours].sort((a, b) => a.weekday - b.weekday || a.start.localeCompare(b.start));
+  for (const h of sorted) {
+    const last = out.at(-1);
+    if (last && last.weekday === h.weekday && h.start <= last.end) {
+      if (h.end > last.end) last.end = h.end;
+    } else {
+      out.push({ ...h });
+    }
+  }
+  return out;
+}
+
 /**
  * Franjas libres de UN recurso. Función PURA: no consulta ni persiste.
  *
@@ -33,20 +56,23 @@ const at = (day: DateTime, hhmm: string) => {
  * incluido el del límite superior, y descarta lo que se salga del rango.
  */
 export function computeSlots(input: SlotInput): Slot[] {
-  const { timezone, durationMin, bufferMin, granularityMin, hours } = input;
+  const { timezone, durationMin, bufferMin, granularityMin } = input;
+  const hours = mergeBlocks(input.hours);
   const from = DateTime.fromJSDate(input.from);
   const to = DateTime.fromJSDate(input.to);
   const now = DateTime.fromJSDate(input.now).setZone(timezone);
   const earliest = now.plus({ minutes: input.minLeadMin });
   const latest = now.plus({ days: input.horizonDays });
 
-  // Lo ocupado se expande con el buffer a ambos lados.
-  const blocked = input.busy.map((b) => Interval.fromDateTimes(
-    DateTime.fromJSDate(b.start).minus({ minutes: bufferMin }),
-    DateTime.fromJSDate(b.end).plus({ minutes: bufferMin }),
-  ));
+  // El buffer es limpieza DESPUÉS de cada cita: una cita ocupa hasta el fin de
+  // su propio buffer, y la franja nueva necesita el suyo libre al terminar.
+  const blocked = input.busy.map((b) => ({
+    absence: b.absence ?? false,
+    interval: Interval.fromDateTimes(
+      DateTime.fromJSDate(b.start),
+      DateTime.fromJSDate(b.end).plus({ minutes: b.absence ? 0 : b.bufferMin ?? 0 })),
+  }));
 
-  const seen = new Set<number>();
   const slots: Slot[] = [];
   const lastDay = to.setZone(timezone).startOf('day');
 
@@ -61,9 +87,8 @@ export function computeSlots(input: SlotInput): Slot[] {
         if (start < from || end > to) continue;
         if (start < earliest || start > latest) continue;
         const candidate = Interval.fromDateTimes(start, end);
-        if (blocked.some((b) => b.overlaps(candidate))) continue;
-        if (seen.has(start.toMillis())) continue; // bloques solapados
-        seen.add(start.toMillis());
+        const withCleanup = Interval.fromDateTimes(start, end.plus({ minutes: bufferMin }));
+        if (blocked.some((b) => b.interval.overlaps(b.absence ? candidate : withCleanup))) continue;
         slots.push({ start: start.toJSDate(), end: end.toJSDate() });
       }
     }

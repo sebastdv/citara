@@ -100,5 +100,7 @@ describe('POST /connect/whatsapp/complete', () => {
     meta.exchangeCode.mockRejectedValueOnce(new Error('detalle interno con EAAG'));
     const res = await http().post('/connect/whatsapp/complete').send(body()).expect(500);
     expect(JSON.stringify(res.body)).not.toContain('EAAG');
+    // La página muestra este mensaje tal cual: debe servirle al cliente.
+    expect(res.body.message).toMatch(/No se pudo completar la conexión/);
   });
 });

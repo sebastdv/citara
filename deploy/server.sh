@@ -42,6 +42,12 @@ export CITARA_BACKUP_STATUS_DIR="$BACKUP_STATUS_DIR"
 HISTORY="${CITARA_HISTORY:-$ROOT/.deploy-history}"
 HEALTH_TIMEOUT="${CITARA_HEALTH_TIMEOUT:-90}"
 LOCK_WAIT="${CITARA_LOCK_WAIT:-1800}"
+# El nombre de la imagen: la prueba de humo usa otro para no tocar las de producción
+# ni las que tengas construidas a mano (la poda solo borra imágenes con este nombre).
+IMAGE="${CITARA_IMAGE:-citara}"
+export CITARA_IMAGE="$IMAGE"
+# La CLI corre con el uid de este usuario: así puede escribir bench-results/ y leer clientes/.
+export CITARA_UID="${CITARA_UID:-$(id -u)}" CITARA_GID="${CITARA_GID:-$(id -g)}"
 KEEP_DAILY=14
 KEEP_WEEKLY=8
 KEEP_PRE_DEPLOY_DAYS=30
@@ -96,7 +102,7 @@ current_tag() {
   local id image
   id="$(CITARA_TAG=none compose ps -q api 2>/dev/null || true)"
   image="$([ -n "$id" ] && docker inspect --format '{{.Config.Image}}' "$id" 2>/dev/null || true)"
-  case "$image" in citara:*) echo "${image#citara:}" ;; *) history_tag ;; esac
+  case "$image" in "$IMAGE":*) echo "${image#"$IMAGE":}" ;; *) history_tag ;; esac
 }
 
 previous_tag() {
@@ -161,6 +167,7 @@ lock() {
   local wait="${1:-0}" waited=0
   while ! mkdir "$ROOT/.deploy-lock" 2>/dev/null; do
     [ "$waited" -lt "$wait" ] || die "Hay otra operación en curso (si no es así, borra $ROOT/.deploy-lock)"
+    [ "$waited" -eq 0 ] && say "Hay otra operación en curso (un despliegue, un respaldo…): esperando hasta ${wait} s"
     sleep 5; waited=$((waited + 5))
   done
   LOCK_DIR="$ROOT/.deploy-lock"
@@ -172,8 +179,8 @@ prune_images() {
   local keep tag
   # Las últimas versiones distintas del historial, de la más reciente a la más vieja.
   keep="$(awk '{a[NR]=$3} END {for (i = NR; i > 0; i--) if (!seen[a[i]]++) print a[i]}' "$HISTORY" | head -n "$KEEP_IMAGES")"
-  for tag in $(docker image ls citara --format '{{.Tag}}'); do
-    printf '%s\n' "$keep" | grep -Fqx "$tag" || docker image rm "citara:$tag" >/dev/null 2>&1 || true
+  for tag in $(docker image ls "$IMAGE" --format '{{.Tag}}'); do
+    printf '%s\n' "$keep" | grep -Fqx "$tag" || docker image rm "$IMAGE:$tag" >/dev/null 2>&1 || true
   done
 }
 
@@ -257,11 +264,11 @@ cmd_deploy() {
   fi
   export CITARA_TAG="$tag"
 
-  if docker image inspect "citara:$tag" >/dev/null 2>&1; then
-    say "La imagen citara:$tag ya existe: no se recompila"
+  if docker image inspect "$IMAGE:$tag" >/dev/null 2>&1; then
+    say "La imagen $IMAGE:$tag ya existe: no se recompila"
   else
-    say "Construyendo citara:$tag"
-    docker build -t "citara:$tag" "$ROOT"
+    say "Construyendo $IMAGE:$tag"
+    docker build -t "$IMAGE:$tag" "$ROOT"
   fi
 
   compose up -d postgres redis
@@ -284,7 +291,7 @@ cmd_deploy() {
     return 0
   fi
 
-  if [ -n "$prev" ] && [ "$prev" != "$tag" ] && docker image inspect "citara:$prev" >/dev/null 2>&1; then
+  if [ -n "$prev" ] && [ "$prev" != "$tag" ] && docker image inspect "$IMAGE:$prev" >/dev/null 2>&1; then
     say "Volviendo a $prev"
     # Con el compose de SU versión, no con el del commit que falló.
     if [ -n "$RESTORE_CHECKOUT" ]; then git -C "$ROOT" checkout -q --detach "$RESTORE_CHECKOUT"; fi
@@ -300,7 +307,7 @@ cmd_rollback() {
   lock
   prev="$(previous_tag)"
   [ -n "$prev" ] || die "No hay una versión anterior en $HISTORY"
-  docker image inspect "citara:$prev" >/dev/null 2>&1 || die "La imagen citara:$prev ya no está; despliégala con: server.sh deploy $prev"
+  docker image inspect "$IMAGE:$prev" >/dev/null 2>&1 || die "La imagen $IMAGE:$prev ya no está; despliégala con: server.sh deploy $prev"
   if [ "${CITARA_SKIP_GIT:-0}" != "1" ]; then
     # El compose y el Caddyfile de esa versión, no los de la que se abandona.
     RESTORE_CHECKOUT="$(git -C "$ROOT" rev-parse HEAD)"
@@ -410,11 +417,13 @@ cmd_cli() {
   local script="${1:-}" tty=()
   [ -n "$script" ] || die "uso: server.sh cli <script.js> [args]"
   shift
+  # Un migrate suelto no puede correr a la vez que el de un despliegue (TypeORM no
+  # se bloquea solo). El lock va ANTES de mirar la versión: si había un despliegue
+  # en curso, al terminar ya corre la nueva.
+  if [ "$script" = "migrate.js" ]; then lock "$LOCK_WAIT"; fi
   export CITARA_TAG="${CITARA_TAG:-$(current_tag)}"
   [ -n "$CITARA_TAG" ] || die "No hay versión desplegada"
   mkdir -p "$ROOT/clientes" "$ROOT/bench-results"
-  # Un migrate suelto no puede correr a la vez que el de un despliegue (TypeORM no se bloquea solo).
-  if [ "$script" = "migrate.js" ]; then lock "$LOCK_WAIT"; fi
   # Sin terminal (scripts, la prueba de humo) no se pide TTY.
   [ -t 0 ] || tty=(-T)
   # ${tty[@]+…}: en bash < 4.4, un arreglo vacío con set -u es "unbound variable".

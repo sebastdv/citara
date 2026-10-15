@@ -23,7 +23,7 @@ export function describeMessage(r: { direction: string; type: string; body: stri
   switch (p?.kind) {
     case 'buttons': return `${p.body}\n${p.buttons.map((b) => `[${b.title}]`).join(' ')}`;
     case 'list': return `${p.body}\n${p.sections.flatMap((s) => s.rows).map((x) => `[${x.title}]`).join(' ')}`;
-    case 'template': return `Plantilla «${p.name}»`;
+    case 'template': return r.body ?? `Plantilla «${p.name}»`;
     default: return r.body ?? `[${r.type}]`;
   }
 }

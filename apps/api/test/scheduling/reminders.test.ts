@@ -77,13 +77,41 @@ describe('barrido', () => {
     const jobs = await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
 
     expect(jobs).toHaveLength(1);
-    const [msg] = await adminQuery(`SELECT origin, type, status, payload, conversation_id FROM messages`);
+    const [msg] = await adminQuery(`SELECT origin, type, status, body, payload, conversation_id FROM messages`);
     expect(msg).toMatchObject({ origin: 'reminder', type: 'template', status: 'pending' });
+    expect(msg.body).toMatch(/^Recordatorio de 24 h: Ana · .+ · /);
     expect(msg.payload).toMatchObject({ kind: 'template', name: 'recordatorio_cita_24h', language: 'es' });
     expect(msg.payload.params[0]).toBe('Ana');
     expect(jobs[0].job).toMatchObject({ tenantId, channelId, conversationId: msg.conversation_id, to: '573001112233' });
     const [r] = await reminders(cita.id);
     expect(r.status).toBe('queued');
+  });
+
+  it('si el barrido de un negocio falla (un deadlock, por ejemplo), los demás negocios se barren igual', async () => {
+    await agendar();
+    // Otro negocio activo antes en el orden, cuyo barrido revienta.
+    await adminQuery(`INSERT INTO tenants (slug, name, status) VALUES ('aaa-roto', 'Roto', 'active')`);
+    const real = (s.reminders as unknown as { sweepTenant: (...a: unknown[]) => Promise<unknown> }).sweepTenant.bind(s.reminders);
+    vi.spyOn(s.reminders as unknown as { sweepTenant: (...a: unknown[]) => Promise<unknown> }, 'sweepTenant')
+      .mockImplementation(async (m, id, ...rest) => {
+        if (id !== tenantId) throw new Error('deadlock detected');
+        return real(m, id, ...rest);
+      });
+    const jobs = await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    expect(jobs).toHaveLength(1);
+  });
+
+  it('no sale por una conversación abierta en un canal inactivo: usa el canal activo del negocio', async () => {
+    await adminQuery(`INSERT INTO conversations (tenant_id, contact_id, channel_id) VALUES ($1, $2, $3)`,
+      [tenantId, contactId, channelId]);
+    const [ch] = await adminQuery(`SELECT access_token_encrypted FROM whatsapp_channels`);
+    const [nuevo] = await adminQuery(
+      `INSERT INTO whatsapp_channels (tenant_id, waba_id, phone_number_id, access_token_encrypted)
+       VALUES ($1, '102290', '106541', $2) RETURNING id`, [tenantId, ch.access_token_encrypted]);
+    await adminQuery(`UPDATE whatsapp_channels SET status = 'inactive' WHERE id = $1`, [channelId]);
+    await agendar();
+    const jobs = await s.reminders.sweep(new Date('2026-09-09T15:01:00Z'));
+    expect(jobs.map((j) => j.job.channelId)).toEqual([nuevo.id]);
   });
 
   it('un segundo barrido no duplica', async () => {

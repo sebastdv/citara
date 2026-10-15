@@ -5,7 +5,7 @@ import { EncryptionService } from '../../src/crypto/encryption.service';
 import { ChannelResolver } from '../../src/tenancy/channel-resolver.service';
 import { createLink, peekLink } from '../../src/onboarding/links';
 import { MetaOnboardingError, type MetaOnboardingClient } from '../../src/onboarding/meta-onboarding.client';
-import { LinkInvalidError, OnboardingInputError, OnboardingService } from '../../src/onboarding/onboarding.service';
+import { LinkInvalidError, OnboardingInputError, OnboardingService, PhoneTakenError } from '../../src/onboarding/onboarding.service';
 import { resetDb, adminQuery, closeHelpers } from '../helpers';
 
 let admin: DataSource, app: DataSource, enc: EncryptionService;
@@ -41,7 +41,8 @@ describe('OnboardingService.completeWhatsapp', () => {
   it('registra el canal en coexistencia con el token cifrado, suscribe y pide las dos sincronizaciones', async () => {
     const r = await complete();
 
-    expect(r).toMatchObject({ tenantId, phoneNumberId: '106999', syncs: { smb_app_state_sync: 'requested', history: 'requested' } });
+    expect(r).toMatchObject({ tenantId, phoneNumberId: '106999' });
+    expect(await r.syncs).toEqual({ smb_app_state_sync: 'requested', history: 'requested' });
     const resolved = await new ChannelResolver(app, enc).resolveByPhoneNumberId('106999');
     expect(resolved).toMatchObject({ tenantId, accessToken: 'EAAG-del-negocio' });
     expect(meta.subscribeApp).toHaveBeenCalledWith('777', 'EAAG-del-negocio');
@@ -75,10 +76,48 @@ describe('OnboardingService.completeWhatsapp', () => {
   it('si falla la sincronización, el alta se conserva y queda registrado para reintentar', async () => {
     meta.requestSync.mockRejectedValue(new MetaOnboardingError('sincronización: Meta respondió 500', 500));
     const r = await complete();
-    expect(r.syncs).toEqual({ smb_app_state_sync: 'failed', history: 'failed' });
+    expect(await r.syncs).toEqual({ smb_app_state_sync: 'failed', history: 'failed' });
     expect(await adminQuery(`SELECT id FROM whatsapp_channels`)).toHaveLength(1);
     const failed = await adminQuery(`SELECT count(*)::int AS n FROM audit_log WHERE action = 'channel.sync_failed'`);
     expect(failed[0].n).toBe(2);
+  });
+
+  it('responde sin esperar las sincronizaciones: son dos llamadas más a Meta', async () => {
+    let release!: () => void;
+    meta.requestSync.mockImplementation(() => new Promise<void>((r) => { release = r; }));
+    const r = await complete();
+    expect(r.phoneNumberId).toBe('106999');
+    release(); release();
+    await vi.waitFor(() => expect(meta.requestSync).toHaveBeenCalledTimes(2));
+    release();
+    await r.syncs;
+  });
+
+  it('un número que ya es de otro negocio es un error para el cliente, no un 500', async () => {
+    const [otro] = await adminQuery(`INSERT INTO tenants (slug, name) VALUES ('otro', 'Otro') RETURNING id`);
+    await adminQuery(
+      `INSERT INTO whatsapp_channels (tenant_id, waba_id, phone_number_id, access_token_encrypted)
+       VALUES ($1, '888', '106999', '\\x00'::bytea)`, [otro.id]);
+    await expect(complete()).rejects.toBeInstanceOf(PhoneTakenError);
+    expect(await adminQuery(`SELECT tenant_id FROM whatsapp_channels`)).toEqual([{ tenant_id: otro.id }]);
+  });
+
+  it('una suspensión en curso gana: el enlace no se gasta en un negocio recién suspendido', async () => {
+    const suspend = admin.createQueryRunner();
+    await suspend.connect();
+    await suspend.startTransaction();
+    try {
+      await suspend.query(`UPDATE tenants SET status = 'suspended' WHERE id = $1`, [tenantId]);
+      const pending = complete();
+      // register_channel espera la fila del negocio hasta que la suspensión confirme.
+      await new Promise((r) => setTimeout(r, 300));
+      await suspend.commitTransaction();
+      await expect(pending).rejects.toBeInstanceOf(LinkInvalidError);
+    } finally {
+      if (suspend.isTransactionActive) await suspend.rollbackTransaction();
+      await suspend.release();
+    }
+    expect(await adminQuery(`SELECT id FROM whatsapp_channels`)).toEqual([]);
   });
 
   it('un enlace inválido no llega a hablar con Meta', async () => {

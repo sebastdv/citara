@@ -1,6 +1,6 @@
 import type { EntityManager } from 'typeorm';
 import { recordAudit } from '../audit/audit';
-import { giveControlToHuman, humanInControl, readControl, returnControlToBot } from '../conversations/control';
+import { giveControlToHuman, readControl, returnControlToBot } from '../conversations/control';
 import { canSendFreeform } from '../conversations/session-window';
 import type { MessageOutboundJob } from '../queues/outbound.queue';
 
@@ -46,15 +46,9 @@ export async function takeControl(
   m: EntityManager, a: { tenantId: string; conversationId: string; operatorId: string; now: Date },
 ): Promise<void> {
   await lock(m, a.conversationId);
-  const before = await readControl(m, a.conversationId);
+  // giveControlToHuman audita el paso de bot a humano, y el de otro humano al operador.
   await giveControlToHuman(m, { tenantId: a.tenantId, conversationId: a.conversationId, from: a.now,
                                 reason: 'operator', actor: actor(a.operatorId) });
-  // giveControlToHuman audita el paso de bot a humano; pasar de otro humano al
-  // operador también es una acción del panel y queda registrada.
-  if (humanInControl(before, a.now) && before.reason !== 'operator') {
-    await recordAudit(m, { tenantId: a.tenantId, actor: actor(a.operatorId), action: 'control.to_operator',
-                           conversationId: a.conversationId, details: { from: before.reason } });
-  }
 }
 
 export async function returnControl(

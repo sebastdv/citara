@@ -2,25 +2,30 @@ import { createHash } from 'node:crypto';
 import type { DataSource, EntityManager } from 'typeorm';
 import { z } from 'zod';
 import { AGENT_PROMPT_VERSION } from './prompt';
+import { AGENT_TOOLS } from './agent-tools';
 import { recordAudit } from '../audit/audit';
 
 export const AGENT_MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5'] as const;
+/** El intérprete clasifica cada respuesta del menú que no encaja: Opus ahí sería pagar de más por nada. */
+export const INTERPRETER_MODELS = ['claude-haiku-5-5', 'claude-sonnet-5-5'] as const;
 
 export const agentYamlSchema = z.object({
   enabled: z.boolean().default(true),
   // Decisión del usuario: Opus 5.5 por defecto. Bajarlo es una decisión sobre datos del banco.
   model: z.enum(AGENT_MODELS).default('claude-opus-5-5'),
   effort: z.enum(['low', 'medium', 'high', 'xhigh', 'max']).default('low'),
-  interpreter_model: z.enum(AGENT_MODELS).default('claude-haiku-5-5'),
+  interpreter_model: z.enum(INTERPRETER_MODELS).default('claude-haiku-5-5'),
   instructions: z.string().max(4000).default(''),
   monthly_budget_usd: z.number().min(0).max(10_000).default(20),
 }).strict();
 export type AgentYaml = z.infer<typeof agentYamlSchema>;
 
 /** Lo que cambia cómo se comporta el agente. El tope y el interruptor no cuentan. */
-export function configHash(c: AgentYaml): string {
+export function configHash(c: AgentYaml, tools: readonly unknown[] = AGENT_TOOLS): string {
+  // Las herramientas entran al hash: cambiar la descripción de una cambia cómo la usa
+  // el modelo, y eso también exige pasar el banco de nuevo.
   return createHash('sha256')
-    .update(JSON.stringify([AGENT_PROMPT_VERSION, c.model, c.effort, c.interpreter_model, c.instructions]))
+    .update(JSON.stringify([AGENT_PROMPT_VERSION, c.model, c.effort, c.interpreter_model, c.instructions, tools]))
     .digest('hex');
 }
 

@@ -87,6 +87,26 @@ describe('applyTenantConfig', () => {
     await expect(applyTenantConfig(admin, config({ timezone: 'America/Bogata' }))).rejects.toThrow(/zona/);
   });
 
+  it('rechaza un flujo propio con ai_step que no es ai_turn o con pasos que apuntan a la nada', async () => {
+    const flow = (over: Record<string, unknown>) => ({ key: 'propio', entry: 'hola',
+      steps: { hola: { type: 'message', text: 'Hola', next: 'fin' }, fin: { type: 'end' } }, ...over });
+    await expect(applyTenantConfig(admin, config({ flow: flow({ ai_step: 'hola' }) }))).rejects.toThrow(/ai_step 'hola'/);
+    await expect(applyTenantConfig(admin, config({ flow: flow({ steps: {
+      hola: { type: 'choice', text: '¿?', buttons: [{ id: 'a', title: 'A', next: 'perdido' }] } } }) })))
+      .rejects.toThrow(/'hola' apunta a 'perdido'/);
+    await expect(applyTenantConfig(admin, config({ flow: flow({}) }))).resolves.toMatchObject({ flow: 'propio' });
+  });
+
+  it('acepta un cierre a las 24:00 y avisa de un servicio que ningún recurso presta', async () => {
+    const r = await applyTenantConfig(admin, config({
+      services: [{ key: 'corte', name: 'Corte', duration_min: 30 }, { key: 'masaje', name: 'Masaje', duration_min: 60 }],
+      resources: [{ key: 'maria', name: 'María', services: ['corte'] }],
+      hours: [{ days: ['fri'], start: '18:00', end: '24:00' }],
+    }));
+    expect(await adminQuery(`SELECT to_char(end_time, 'HH24:MI') AS fin FROM business_hours`)).toEqual([{ fin: '24:00' }]);
+    expect(r.warnings).toEqual([expect.stringContaining("'masaje'")]);
+  });
+
   it('falla si el negocio no existe', async () => {
     await expect(applyTenantConfig(admin, config({ tenant: 'no-existe' }))).rejects.toThrow(/no-existe/);
   });

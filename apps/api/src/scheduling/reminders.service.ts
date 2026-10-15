@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 // Import de VALOR: servicio Nest con DataSource por constructor.
 import { DataSource } from 'typeorm';
 import type { EntityManager } from 'typeorm';
@@ -19,6 +19,8 @@ const STALE_24H_WITHIN_MS = 2 * 60 * 60_000;
 
 @Injectable()
 export class RemindersService {
+  private readonly log = new Logger(RemindersService.name);
+
   constructor(private readonly ds: DataSource) {}
 
   async scheduleFor(m: EntityManager, tenantId: string, appointmentId: string, startsAt: Date, now: Date) {
@@ -75,7 +77,14 @@ export class RemindersService {
 
     const jobs: MessageOutboundJob[] = [];
     for (const t of tenants) {
-      jobs.push(...await runInTenant(this.ds, t.id, (m) => this.sweepTenant(m, t.id, t.timezone, now)));
+      // Un negocio que falla (un deadlock con un turno que cancela una cita, por
+      // ejemplo) no corta la pasada de los demás: su transacción se revierte y sus
+      // recordatorios quedan pendientes para el próximo barrido, en un minuto.
+      try {
+        jobs.push(...await runInTenant(this.ds, t.id, (m) => this.sweepTenant(m, t.id, t.timezone, now)));
+      } catch (err) {
+        this.log.warn(`el barrido de recordatorios del negocio ${t.id} falló: ${(err as Error).message}`);
+      }
     }
 
     // Reparto por canal: un lote grande no puede salir de golpe.
@@ -122,10 +131,12 @@ export class RemindersService {
         language: 'es',
         params: [row.customer_name || row.contact_name || 'cliente', labelFor(row.starts_at, timezone), row.service_name],
       };
+      // El texto de la plantilla vive en Meta: el panel muestra este resumen.
+      const body = `Recordatorio de ${row.kind === '24h' ? '24 h' : '2 h'}: ${content.params.join(' · ')}`;
       const [msg] = await m.query(
-        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, payload, status)
-         VALUES ($1, $2, 'out', 'reminder', 'template', $3, 'pending') RETURNING id`,
-        [tenantId, conv.id, JSON.stringify(content)]);
+        `INSERT INTO messages (tenant_id, conversation_id, direction, origin, type, body, payload, status)
+         VALUES ($1, $2, 'out', 'reminder', 'template', $3, $4, 'pending') RETURNING id`,
+        [tenantId, conv.id, body, JSON.stringify(content)]);
       await m.query(`UPDATE reminders SET status = 'queued', message_id = $2 WHERE id = $1`, [row.id, msg.id]);
       jobs.push({ tenantId, channelId: conv.channelId, conversationId: conv.id, to: row.wa_id, messageId: msg.id });
     }
@@ -144,12 +155,17 @@ export class RemindersService {
     return jobs;
   }
 
-  /** La conversación de la cita si sigue abierta; si no, la abierta del contacto; si no, una nueva. */
+  /**
+   * La conversación de la cita si sigue abierta; si no, la abierta del contacto;
+   * si no, una nueva. Siempre en un canal activo: uno inactivo no envía nada y
+   * el recordatorio quedaría fallido aunque el negocio tenga otro número.
+   */
   private async conversationFor(m: EntityManager, tenantId: string, conversationId: string | null, contactId: string) {
     const [current] = await m.query(
-      `SELECT id, channel_id FROM conversations
-        WHERE status = 'open' AND (id = $1 OR contact_id = $2)
-        ORDER BY (id = $1) DESC, updated_at DESC LIMIT 1`, [conversationId, contactId]);
+      `SELECT c.id, c.channel_id FROM conversations c
+         JOIN whatsapp_channels ch ON ch.id = c.channel_id AND ch.status = 'active'
+        WHERE c.status = 'open' AND (c.id = $1 OR c.contact_id = $2)
+        ORDER BY (c.id = $1) DESC, c.updated_at DESC LIMIT 1`, [conversationId, contactId]);
     if (current) return { id: current.id as string, channelId: current.channel_id as string };
 
     // whatsapp_channels no lleva RLS: se filtra por tenant explícitamente.

@@ -21,3 +21,5 @@ export { FlowRunner } from './flow-engine/flow-runner.service';
 // Cableado de los consumidores de cola: lo usan apps/worker y los tests de
 // punta a punta, para que ambos ejerciten exactamente el mismo código.
 export { startWorkers } from './queues/workers';
+// El worker revisa el entorno al arrancar igual que la API (ver boot-env.ts).
+export { bootEnvCheck } from './boot-env';

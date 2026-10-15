@@ -2,7 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { AccountUpdateProcessor } from '../../src/coexistence/account-update.processor';
-import { resetDb, seedChannel, adminQuery, closeHelpers } from '../helpers';
+import { resetDb, seedChannel, seedCatalog, seedHours, seedFlow, adminQuery, closeHelpers } from '../helpers';
+import { AGENDA_FLOW } from '../../src/flow-engine/flows/agenda';
 
 let ds: DataSource;
 let processor: AccountUpdateProcessor;
@@ -61,6 +62,33 @@ describe('AccountUpdateProcessor', () => {
     expect(await statuses()).toEqual(['active']);
     const actions = (await adminQuery(`SELECT action FROM audit_log ORDER BY created_at`)).map((a: { action: string }) => a.action);
     expect(actions).toEqual(['channel.disconnected', 'channel.reconnected']);
+  });
+
+  it('si la auditoría falla, el canal no cambia: estado y rastro van juntos', async () => {
+    await adminQuery(`CREATE FUNCTION audit_boom() RETURNS trigger LANGUAGE plpgsql AS $$
+                        BEGIN RAISE EXCEPTION 'boom'; END $$`);
+    await adminQuery(`CREATE TRIGGER audit_boom BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION audit_boom()`);
+    try {
+      await expect(update('PARTNER_REMOVED')).rejects.toThrow(/boom/);
+      expect(await statuses()).toEqual(['active']);
+    } finally {
+      await adminQuery(`DROP TRIGGER audit_boom ON audit_log`);
+      await adminQuery(`DROP FUNCTION audit_boom()`);
+    }
+  });
+
+  it('una reconexión termina el alta de un negocio que había quedado a medias', async () => {
+    await seedCatalog(tenantId);
+    await seedHours(tenantId);
+    await seedFlow(tenantId, AGENDA_FLOW);
+    await update('PARTNER_REMOVED');
+    await adminQuery(`UPDATE tenants SET status = 'onboarding'`);
+    await update('ACCOUNT_RECONNECTED');
+    expect(await adminQuery(`SELECT status FROM tenants`)).toEqual([{ status: 'active' }]);
+  });
+
+  it('la base rechaza un estado de canal que el código no conoce', async () => {
+    await expect(adminQuery(`UPDATE whatsapp_channels SET status = 'activo'`)).rejects.toThrow(/status_check/);
   });
 
   it('una reconexión no reactiva un canal que el operador dejó inactivo', async () => {

@@ -51,12 +51,18 @@ export function loginView(nonce: string, p: { next: string; error?: string; emai
     </form>`);
 }
 
+/**
+ * El navegador descarta un salto de línea justo después de <textarea>: se pone
+ * uno de sobra para que un borrador que empieza con salto de línea no lo pierda.
+ */
+const TEXTAREA_LEAD = '\n';
+
 export function forbiddenView(nonce: string, p: { message: string; next: string; draft?: string }): string {
   return panelPage('No se pudo enviar', { nonce }, html`
     <h1>No se pudo enviar</h1>
     <p class="alerta" role="alert">${p.message}</p>
     ${p.draft ? html`<p>Esto es lo que habías escrito; cópialo antes de salir de esta página:</p>
-      <textarea readonly>${p.draft}</textarea>` : ''}
+      <textarea readonly>${TEXTAREA_LEAD}${p.draft}</textarea>` : ''}
     <p><a href="/panel/login?next=${encodeURIComponent(p.next)}">Entrar de nuevo</a></p>`);
 }
 
@@ -141,7 +147,7 @@ export function chatView(
     <form method="post" action="${url}/responder">${csrfField(ctx)}
       <input type="hidden" name="envio" value="${d.submissionId}">
       ${blocked ? html`<p class="alerta">${blocked}</p>` : ''}
-      <textarea name="texto" maxlength="4096" ${blocked ? html`disabled` : ''}>${d.draft ?? ''}</textarea>
+      <textarea name="texto" maxlength="4096" ${blocked ? html`disabled` : ''}>${TEXTAREA_LEAD}${d.draft ?? ''}</textarea>
       <p><button ${blocked ? html`disabled` : ''}>Enviar</button> <span class="meta">Enviar te da el control de la conversación.</span></p>
     </form>`);
 }

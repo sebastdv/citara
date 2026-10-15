@@ -56,13 +56,34 @@ describe('CLI del operador', () => {
     await connectChannel(tenantId);
     await applyTenantConfig(admin, agenda);
 
-    expect(await setSuspended(admin, 'nuevo', true)).toBe('suspended');
+    expect(await setSuspended(admin, 'nuevo', true, 'no pagó octubre')).toBe('suspended');
     expect(await peekLink(app, token, 'whatsapp')).toBeNull();
     expect(await setSuspended(admin, 'nuevo', false)).toBe('active');
     // Reanudar no revive los enlaces que había antes de suspender.
     expect(await peekLink(app, token, 'whatsapp')).toBeNull();
-    const actions = (await adminQuery(`SELECT action FROM audit_log ORDER BY created_at`)).map((a: { action: string }) => a.action);
-    expect(actions).toEqual(['tenant.suspended', 'tenant.resumed']);
+    const audits = await adminQuery(
+      `SELECT action, details FROM audit_log WHERE action LIKE 'tenant.%' AND action <> 'tenant.created' ORDER BY created_at`);
+    expect(audits).toEqual([
+      { action: 'tenant.suspended', details: { status: 'suspended', reason: 'no pagó octubre' } },
+      { action: 'tenant.resumed', details: { status: 'active' } }]);
+  });
+
+  it('crear el negocio y emitir enlaces queda en la bitácora', async () => {
+    await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await newLink(admin, 'nuevo');
+    expect(await adminQuery(`SELECT action, details FROM audit_log ORDER BY created_at, action DESC`)).toEqual([
+      { action: 'tenant.created', details: { slug: 'nuevo', timezone: 'America/Bogota' } },
+      { action: 'link.created', details: { purpose: 'whatsapp' } },
+      { action: 'link.created', details: { purpose: 'whatsapp' } }]);
+  });
+
+  it('la lista muestra el canal que opera, no el último creado si quedó inactivo', async () => {
+    const { tenantId } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await connectChannel(tenantId);
+    await adminQuery(
+      `INSERT INTO whatsapp_channels (tenant_id, waba_id, phone_number_id, display_phone_number, access_token_encrypted, status)
+       VALUES ($1, '777', '106000', '+57 300 999 9999', '\\x00'::bytea, 'inactive')`, [tenantId]);
+    expect(await listTenants(admin)).toEqual([expect.objectContaining({ channelStatus: 'active', mode: 'coexistence' })]);
   });
 
   it('un enlace nuevo reemplaza al perdido', async () => {
@@ -92,6 +113,22 @@ describe('CLI del operador', () => {
 
     const [t] = await listTenants(admin);
     expect(t.syncs).toEqual({ smb_app_state_sync: 'requested', history: 'failed' });
+  });
+
+  it('sync reintenta solo lo que falló: volver a pedir lo que salió daría un fallo falso', async () => {
+    const { tenantId } = await createTenant(admin, { slug: 'nuevo', name: 'Peluquería Nueva' });
+    await connectChannel(tenantId);
+    const meta = { requestSync: vi.fn().mockImplementation(async (_p: string, _t: string, type: string) => {
+      if (type === 'history') throw new Error('Meta respondió 500');
+    }) };
+    await syncTenant(admin, enc, meta as never, 'nuevo');
+    meta.requestSync.mockReset().mockResolvedValue(undefined);
+
+    expect(await syncTenant(admin, enc, meta as never, 'nuevo')).toEqual({ history: 'requested' });
+    expect(meta.requestSync.mock.calls.map((c) => c[2])).toEqual(['history']);
+    expect(await syncTenant(admin, enc, meta as never, 'nuevo')).toEqual({});
+    const [t] = await listTenants(admin);
+    expect(t.syncs).toEqual({ smb_app_state_sync: 'requested', history: 'requested' });
   });
 
   it('sync vuelve a pedir la sincronización con el token del canal', async () => {

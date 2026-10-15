@@ -55,6 +55,20 @@ describe('costos', () => {
     const [row] = await loadCosts(ds, { year: 2026, month: 10 });
     expect(row).toMatchObject({ agentUsd: 0, calls: 0, appointments: 0, usdPerAppointment: null, budgetUsd: null, enabled: null });
   });
+  it('un mes pasado usa el tope que regía entonces, no el de hoy', async () => {
+    const a = await seedBiz('a', '1');
+    await seedAgentConfig(a.tenantId, { monthlyBudgetUsd: 20 });
+    await adminQuery(`UPDATE agent_configs SET created_at = '2026-08-20T12:00:00Z', is_active = false`);
+    await seedAgentConfig(a.tenantId, { monthlyBudgetUsd: 50, version: 2 });
+    await adminQuery(`UPDATE agent_configs SET created_at = '2026-09-25T12:00:00Z' WHERE version = 2`);
+    expect((await loadCosts(ds, { year: 2026, month: 8 }))[0].budgetUsd).toBe(20);
+    expect((await loadCosts(ds, { year: 2026, month: 9 }))[0].budgetUsd).toBe(50);
+    // Un mes sin ninguna configuración todavía: sin IA.
+    expect((await loadCosts(ds, { year: 2026, month: 7 }))[0].budgetUsd).toBeNull();
+    // El mes en curso (o futuro): la configuración activa.
+    expect((await loadCosts(ds, { year: 2099, month: 1 }))[0].budgetUsd).toBe(50);
+  });
+
   it('cada negocio con lo suyo', async () => {
     const a = await seedBiz('a', '1'), b = await seedBiz('b', '2');
     await run(a.tenantId, '2026-10-10T12:00:00Z', 1);

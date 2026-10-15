@@ -30,20 +30,26 @@ export class GoogleConnectService {
 
     const ex = await this.google.exchangeCode(input.code);
     // El consentimiento granular deja desmarcar permisos: sin los de calendario no hay integración.
+    // Lo que Google ya emitió se revoca: no se va a usar, y no debe quedar vivo en su cuenta.
     if (REQUIRED_CALENDAR_SCOPES.some((s) => !ex.scopes.includes(s))) {
+      await this.google.revokeToken(ex.refreshToken ?? ex.accessToken);
       throw new OnboardingInputError(
         'Para conectar el calendario hay que aceptar todos los permisos que pide Google. ' +
         'Vuelve a abrir el enlace y marca todas las casillas.');
     }
     if (!ex.refreshToken) {
+      await this.google.revokeToken(ex.accessToken);
       throw new OnboardingInputError('Google no entregó un acceso permanente. Vuelve a abrir el enlace e inténtalo de nuevo.');
     }
 
-    const { timezone, previous } = await runInTenant(this.ds, link.tenantId, async (m) => {
+    const { timezone, old } = await runInTenant(this.ds, link.tenantId, async (m) => {
       const [t] = await m.query(`SELECT timezone FROM tenants WHERE id = $1`, [link.tenantId]);
-      const [a] = await m.query(`SELECT calendar_id FROM google_accounts WHERE resource_id = $1`, [link.resourceId]);
-      return { timezone: t.timezone as string, previous: (a?.calendar_id as string | null) ?? null };
+      const [a] = await m.query(
+        `SELECT id, email, calendar_id, refresh_token_encrypted, watch_channel_id, watch_resource_id
+           FROM google_accounts WHERE resource_id = $1`, [link.resourceId]);
+      return { timezone: t.timezone as string, old: a as PreviousAccount | undefined };
     });
+    const previous = old?.calendar_id ?? null;
     // Misma cuenta y calendario intacto: se reutiliza. Otra cuenta, o lo borró: uno nuevo.
     const reuse = previous ? await this.google.calendarExists(ex.accessToken, previous) : false;
 
@@ -66,7 +72,7 @@ export class GoogleConnectService {
         // el mismo id durante horas. Con calendario nuevo lo hace attachNewCalendar.
         if (reuse) await m.query(
           `UPDATE appointments SET google_sync_status = 'pending', google_sync_version = google_sync_version + 1
-            WHERE resource_id = $1 AND google_sync_status IN ('pending', 'failed') AND ends_at > now()`,
+            WHERE resource_id = $1 AND google_sync_status IN ('none', 'pending', 'failed') AND ends_at > now()`,
           [resourceId]);
         await recordAudit(m, { tenantId: link.tenantId, actor: 'onboarding', action: 'calendar.connected',
                                details: { resourceId, email: ex.email } });
@@ -80,6 +86,8 @@ export class GoogleConnectService {
     }
     // La renovación del token se hace con el refresh token nuevo.
     this.tokens.invalidate(accountId);
+    // Sin esperar: es limpieza, y la respuesta ya espera bastante a Google.
+    if (old && !reuse) void this.closePrevious(old, ex.email);
 
     let calendar: 'reused' | 'created' | 'pending' = 'reused';
     if (!reuse) {
@@ -96,4 +104,34 @@ export class GoogleConnectService {
     }
     return { resourceName: link.resourceName ?? 'el recurso', email: ex.email, calendar };
   }
+
+  /**
+   * Lo de la conexión anterior que ya no se va a usar: su canal de avisos (que
+   * seguiría disparando lecturas) y, si era otra cuenta de Google, su calendario
+   * "Citas" (que quedaría mostrando citas viejas) y su autorización. Con la
+   * misma cuenta no se revoca nada: revocar mataría también el token nuevo.
+   */
+  async closePrevious(old: PreviousAccount, newEmail: string | null): Promise<void> {
+    const ref = { id: `${old.id}:anterior`, refreshTokenEncrypted: old.refresh_token_encrypted };
+    const otherAccount = !!old.email && !!newEmail && old.email.toLowerCase() !== newEmail.toLowerCase();
+    try {
+      await this.tokens.withToken(ref, async (t) => {
+        if (old.watch_channel_id && old.watch_resource_id) {
+          await this.google.stopChannel(t, old.watch_channel_id, old.watch_resource_id);
+        }
+        if (otherAccount && old.calendar_id) await this.google.deleteCalendar(t, old.calendar_id);
+      });
+      if (otherAccount) await this.google.revokeToken(this.enc.decrypt(old.refresh_token_encrypted));
+    } catch (err) {
+      // La cuenta anterior pudo quedar revocada: no hay con qué limpiar, y no es grave.
+      this.log.warn(`no se pudo cerrar la conexión anterior de la cuenta ${old.id}: ${(err as Error).message}`);
+    } finally {
+      this.tokens.invalidate(ref.id);
+    }
+  }
+}
+
+interface PreviousAccount {
+  id: string; email: string | null; calendar_id: string | null; refresh_token_encrypted: Buffer;
+  watch_channel_id: string | null; watch_resource_id: string | null;
 }
