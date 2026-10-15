@@ -92,6 +92,15 @@ describe('regla de control (base de datos)', () => {
     expect(await audit()).toHaveLength(1);
   });
 
+  it('cambiar el motivo con el humano ya al mando sí se audita', async () => {
+    await runInTenant(ds, tenantId, (m) => giveControlToHuman(m, {
+      tenantId, conversationId, from: new Date(), reason: 'flow_handoff', actor: 'flow' }));
+    await runInTenant(ds, tenantId, (m) => giveControlToHuman(m, {
+      tenantId, conversationId, from: new Date(), reason: 'phone', actor: 'phone' }));
+    expect((await audit()).map((a: { action: string }) => a.action)).toEqual(['control.to_human', 'control.reason_changed']);
+    expect((await audit())[1].details).toEqual({ from: 'flow_handoff', to: 'phone' });
+  });
+
   it('devolver el control al bot cierra las sesiones a medias y lo audita', async () => {
     const flowId = await seedFlow(tenantId, DEMO_FLOW);
     await adminQuery(

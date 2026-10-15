@@ -23,9 +23,11 @@ export class AddControlToConversations1725301500000 implements MigrationInterfac
     // Una sesión que ya estaba en traspaso conserva el silencio bajo el modelo nuevo.
     await q.query(`
       UPDATE conversations c
-         SET control = 'human', human_until = now() + interval '12 hours',
+         SET control = 'human', human_until = now() + make_interval(hours => t.human_takeover_hours),
              control_reason = 'flow_handoff'
-       WHERE EXISTS (SELECT 1 FROM conversation_sessions s
+        FROM tenants t
+       WHERE t.id = c.tenant_id
+         AND EXISTS (SELECT 1 FROM conversation_sessions s
                       WHERE s.conversation_id = c.id AND s.status = 'handoff')
     `);
   }

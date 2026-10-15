@@ -81,12 +81,21 @@ export async function giveControlToHuman(
   )) as [unknown[], number];
   if (affected === 0) return;
 
-  // Se audita el CAMBIO de quién habla, no cada eco que alarga el plazo.
+  // Se audita el CAMBIO de quién habla, no cada eco que alarga el plazo. El
+  // motivo también cuenta: de 'flow_handoff' a 'phone' cambia si lo que el bot
+  // dejó pendiente sale o sobra.
   if (!humanInControl(before, new Date())) {
     await recordAudit(m, {
       tenantId: a.tenantId, actor: a.actor, action: 'control.to_human',
       conversationId: a.conversationId, details: { reason: a.reason },
     });
+  } else if (before.reason !== a.reason) {
+    // Que el operador tome lo que tenía otro humano es una acción del panel con nombre propio.
+    await recordAudit(m, a.reason === 'operator'
+      ? { tenantId: a.tenantId, actor: a.actor, action: 'control.to_operator',
+          conversationId: a.conversationId, details: { from: before.reason } }
+      : { tenantId: a.tenantId, actor: a.actor, action: 'control.reason_changed',
+          conversationId: a.conversationId, details: { from: before.reason, to: a.reason } });
   }
 }
 
