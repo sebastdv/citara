@@ -39,15 +39,27 @@ describe('avisos de un negocio', () => {
     expect(never[0].message).toContain('nunca');
   });
 
+  it('tras reconectar el número, el plazo del dueño cuenta desde la reconexión', () => {
+    // El último eco fue con el canal anterior, hace 20 días; el número se reconectó hace 2.
+    expect(sev(base({ mode: 'coexistence', lastPhoneEcho: daysAgo(20), channelCreatedAt: daysAgo(2) }))).toEqual([]);
+  });
+
   it('en un número dedicado (cloud_api) no hay dueño que vigilar', () => {
     expect(sev(base({ mode: 'cloud_api', channelCreatedAt: daysAgo(90) }))).toEqual([]);
   });
 
-  it('sincronización fallida o historial pendiente más de 24 h', () => {
-    expect(sev(base({ mode: 'coexistence', lastPhoneEcho: daysAgo(1), syncs: { history: 'failed' } })))
-      .toEqual(['warning:sincronización']);
+  it('sincronización fallida: aviso mientras se puede reintentar (24 h desde el alta), info después', () => {
+    const recent = base({ mode: 'coexistence', lastPhoneEcho: daysAgo(0.1), channelCreatedAt: daysAgo(0.5), syncs: { history: 'failed' } });
+    expect(sev(recent)).toEqual(['warning:sincronización']);
+    expect(alertsFor(recent, NOW)[0].message).toContain('pnpm tenant sync');
+    const late = base({ mode: 'coexistence', lastPhoneEcho: daysAgo(1), channelCreatedAt: daysAgo(3), syncs: { history: 'failed' } });
+    expect(sev(late)).toEqual(['info:sincronización']);
+    expect(alertsFor(late, NOW)[0].message).not.toContain('pnpm tenant sync');
+  });
+
+  it('historial pendiente más de 24 h: info (ya no depende del operador)', () => {
     expect(sev(base({ mode: 'coexistence', lastPhoneEcho: daysAgo(1), historySync: 'pending', channelCreatedAt: daysAgo(2) })))
-      .toEqual(['warning:sincronización']);
+      .toEqual(['info:sincronización']);
     expect(sev(base({ mode: 'coexistence', lastPhoneEcho: daysAgo(0.1), historySync: 'pending', channelCreatedAt: daysAgo(0.5) })))
       .toEqual([]);
   });

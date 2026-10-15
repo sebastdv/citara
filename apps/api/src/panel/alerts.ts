@@ -33,10 +33,14 @@ export function alertsFor(s: TenantSummary, now: Date): Alert[] {
   if (s.mode === 'coexistence' && s.channelStatus === 'active') {
     // Un eco es un mensaje que el dueño manda desde su celular: si deja de haberlos,
     // quizá no está abriendo la app. Es una señal aproximada (abrirla sin escribir no se ve).
-    const since = s.lastPhoneEcho ?? s.channelCreatedAt;
-    const days = since ? Math.floor((now.getTime() - since.getTime()) / DAY_MS) : 0;
+    // Lo más reciente entre el último eco y la conexión del número: reconectar
+    // reinicia el plazo de Meta, aunque el último eco sea del canal anterior.
+    const echo = s.lastPhoneEcho?.getTime() ?? null;
+    const connected = s.channelCreatedAt?.getTime() ?? null;
+    const since = Math.max(echo ?? -Infinity, connected ?? -Infinity);
+    const days = Number.isFinite(since) ? Math.floor((now.getTime() - since) / DAY_MS) : 0;
     if (days >= OWNER_WARNING_DAYS) {
-      const what = s.lastPhoneEcho
+      const what = echo !== null && echo >= (connected ?? -Infinity)
         ? `El dueño no escribe desde su celular hace ${days} días`
         : `El dueño nunca escribió desde su celular desde que se conectó el número (hace ${days} días)`;
       add(days >= OWNER_CRITICAL_DAYS ? 'critical' : 'warning', 'dueño',
@@ -44,13 +48,17 @@ export function alertsFor(s: TenantSummary, now: Date): Alert[] {
     }
   }
 
+  // Meta solo acepta pedir la sincronización dentro de las 24 h del alta: pasado
+  // eso no hay nada que hacer, y el aviso baja a info para no quedar como ruido.
+  const withinRetry = s.channelCreatedAt !== null && now.getTime() - s.channelCreatedAt.getTime() <= DAY_MS;
   for (const [type, result] of Object.entries(s.syncs)) {
-    if (result === 'failed') {
-      add('warning', 'sincronización', `Falló la sincronización de ${SYNC_NAMES[type] ?? type}: reintenta con pnpm tenant sync ${s.slug} (Meta la acepta dentro de las 24 h del alta).`);
-    }
+    if (result !== 'failed') continue;
+    const what = SYNC_NAMES[type] ?? type;
+    if (withinRetry) add('warning', 'sincronización', `Falló la sincronización de ${what}: reintenta con pnpm tenant sync ${s.slug} antes de que pasen 24 h desde el alta.`);
+    else add('info', 'sincronización', `Falló la sincronización de ${what} y ya pasaron las 24 h en que Meta permite reintentarla.`);
   }
-  if (s.historySync === 'pending' && s.channelCreatedAt && now.getTime() - s.channelCreatedAt.getTime() > DAY_MS) {
-    add('warning', 'sincronización', 'El historial lleva más de 24 h pendiente: el dueño puede no haber aceptado compartirlo.');
+  if (s.historySync === 'pending' && s.channelCreatedAt && !withinRetry) {
+    add('info', 'sincronización', 'El historial lleva más de 24 h pendiente: el dueño puede no haber aceptado compartirlo.');
   }
 
   for (const g of s.google) {
