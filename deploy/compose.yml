@@ -58,7 +58,7 @@ services:
     logging: *logging
 
   api:
-    image: citara:${CITARA_TAG:?falta CITARA_TAG}
+    image: ${CITARA_IMAGE:-citara}:${CITARA_TAG:?falta CITARA_TAG}
     restart: unless-stopped
     # init: un proceso init como PID 1 que reenvía SIGTERM a node y recoge zombis.
     init: true
@@ -87,7 +87,7 @@ services:
     logging: *logging
 
   worker:
-    image: citara:${CITARA_TAG:?falta CITARA_TAG}
+    image: ${CITARA_IMAGE:-citara}:${CITARA_TAG:?falta CITARA_TAG}
     restart: unless-stopped
     init: true
     command: [node, apps/worker/dist/src/main.js]
@@ -119,9 +119,12 @@ services:
   # La CLI de siempre (tenant, operator, migrate…) en un contenedor de un solo
   # uso: `./deploy/citara <comando>`. Es lo único con la conexión admin.
   cli:
-    image: citara:${CITARA_TAG:?falta CITARA_TAG}
+    image: ${CITARA_IMAGE:-citara}:${CITARA_TAG:?falta CITARA_TAG}
     profiles: [cli]
     init: true
+    # El uid del usuario del servidor (lo exporta server.sh): escribe bench-results/
+    # y lee clientes/, que son suyos, aunque no sea el 1000 del usuario node.
+    user: "${CITARA_UID:-1000}:${CITARA_GID:-1000}"
     environment:
       <<: *app-env
       DATABASE_ADMIN_URL: postgres://postgres:${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD}@postgres:5432/citara

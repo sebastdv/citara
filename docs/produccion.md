@@ -38,7 +38,10 @@ Actualizaciones, y que las de seguridad se instalen solas:
 apt update && apt -y upgrade && apt -y install unattended-upgrades git
 ```
 
-Un usuario para operar, con tu llave SSH:
+Un usuario para operar, con tu llave SSH. Si tu proveedor te hace entrar como `ubuntu` (AWS,
+algunos otros) en vez de `root`, corre estos pasos con `sudo -i` y copia la llave de
+`/home/ubuntu/.ssh/authorized_keys`: la de `root` suele traer un `command="echo Please login
+as ubuntu…"` que no te dejaría entrar.
 
 ```bash
 adduser --disabled-password --gecos "" citara && mkdir -p /home/citara/.ssh && cp ~/.ssh/authorized_keys /home/citara/.ssh/ && chown -R citara:citara /home/citara/.ssh && chmod 700 /home/citara/.ssh
@@ -49,6 +52,16 @@ SSH solo con llave:
 ```bash
 printf 'PasswordAuthentication no\nPermitRootLogin prohibit-password\n' > /etc/ssh/sshd_config.d/10-citara.conf && systemctl reload ssh
 ```
+
+Cuando compruebes que entras como `citara` (`ssh citara@<ip>` desde otra terminal, sin cerrar
+esta), cierra también la entrada directa como root:
+
+```bash
+sed -i 's/^PermitRootLogin .*/PermitRootLogin no/' /etc/ssh/sshd_config.d/10-citara.conf && systemctl reload ssh
+```
+
+Los pasos de root que quedan (systemd del respaldo, en el paso 6) se hacen entrando como
+`citara` y pasando a root con la consola web del proveedor, o antes de este cambio.
 
 Firewall: entra solo SSH, HTTP y HTTPS. **No bloquees la salida** (`ufw default deny
 outgoing`): Docker publica los puertos a través de la red de sus contenedores, y con la
@@ -227,7 +240,8 @@ guárdalo en un disco cifrado.
 
 **Un negocio nuevo** se sigue dando de alta como en local (ver
 [desarrollo-local.md](desarrollo-local.md)), con `./deploy/citara` en el servidor. El YAML del
-negocio va en `/opt/citara/clientes`:
+negocio va en `/opt/citara/clientes` (en el servidor git los ve como no rastreados; no molesta
+a los despliegues, que solo cambian de commit):
 
 ```bash
 scp clientes/peluqueria-ana.yaml citara@citas.tudominio.com:/opt/citara/clientes/

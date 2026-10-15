@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Corre en TU MÁQUINA: trae a ./backups el respaldo más reciente del servidor.
+# Corre en TU MÁQUINA: trae a backups/ del repo el respaldo más reciente del servidor.
 # Los respaldos viven en el disco del VPS; esta es la copia fuera de él.
 #
 #   CITARA_SSH=citara@mi-servidor ./deploy/backup-pull.sh
