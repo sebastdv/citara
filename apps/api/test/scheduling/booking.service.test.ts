@@ -2,10 +2,11 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll, vi } from 'vites
 import { DataSource, type EntityManager } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import { runInTenant } from '../../src/tenancy/tenant-context';
-import { NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError }
+import { MAX_UPCOMING_PER_CONTACT } from '../../src/scheduling/booking.service';
+import { NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError, TooManyAppointmentsError }
   from '../../src/scheduling/scheduling.errors';
 import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, addResource,
-         adminQuery, closeHelpers, buildScheduling } from '../helpers';
+         adminQuery, closeHelpers, seedGoogleAccount, buildScheduling } from '../helpers';
 
 let app: DataSource;
 let tenantId: string, serviceId: string, resourceId: string, contactId: string;
@@ -40,7 +41,26 @@ describe('BookingService.book', () => {
     const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
     expect(cita.startsAt.toISOString()).toBe(JUEVES_10AM.toISOString());
     expect(cita.endsAt.toISOString()).toBe('2026-09-10T15:30:00.000Z');
-    expect([cita.status, cita.googleSyncStatus]).toEqual(['confirmed', 'pending']);
+    // Sin Google conectado no hay nada que subir: no entra al índice de pendientes.
+    expect([cita.status, cita.googleSyncStatus]).toEqual(['confirmed', 'none']);
+  });
+
+  it('con Google conectado, la cita nace pendiente de subir, y cancelarla también lo queda', async () => {
+    await seedGoogleAccount(tenantId, resourceId);
+    const cita = await inTenant((m) => s.booking.book(m, tenantId, input()));
+    expect(cita.googleSyncStatus).toBe('pending');
+    await adminQuery(`UPDATE appointments SET google_sync_status = 'synced'`);
+    expect((await inTenant((m) => s.booking.cancel(m, cita.id, contactId))).googleSyncStatus).toBe('pending');
+  });
+
+  it('un contacto no puede tener más de 5 citas próximas; las pasadas no cuentan', async () => {
+    for (let i = 0; i < MAX_UPCOMING_PER_CONTACT; i++) {
+      await inTenant((m) => s.booking.book(m, tenantId, input(new Date(JUEVES_10AM.getTime() + i * 3_600_000))));
+    }
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input(new Date('2026-09-11T15:00:00Z')))))
+      .rejects.toBeInstanceOf(TooManyAppointmentsError);
+    await adminQuery(`UPDATE appointments SET status = 'cancelled' WHERE id = (SELECT id FROM appointments LIMIT 1)`);
+    await expect(inTenant((m) => s.booking.book(m, tenantId, input(new Date('2026-09-11T15:00:00Z'))))).resolves.toBeDefined();
   });
 
   it('lanza SlotTakenError si la franja ya está ocupada', async () => {

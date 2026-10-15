@@ -35,10 +35,39 @@ describe('computeSlots', () => {
       .toEqual(['09:00', '09:30', '10:30', '11:00', '11:30']); // 15:00Z = 10:00 Bogotá
   });
 
-  it('el buffer del servicio bloquea también los bordes de lo ocupado', () => {
+  it('el buffer es limpieza después de cada cita: la de antes y la nueva necesitan el suyo', () => {
     expect(starts({ ...base, bufferMin: 15,
-      busy: [{ start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z') }] }))
+      busy: [{ start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z'), bufferMin: 15 }] }))
       .toEqual(['09:00', '11:00', '11:30']);
+  });
+
+  it('cada cita ocupada usa SU buffer, no el del servicio que se pide', () => {
+    const cita = { start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z') }; // 10:00-10:30
+    // La de 10:00 no necesita limpieza: 10:30 queda libre aunque el servicio pedido tenga buffer.
+    expect(starts({ ...base, bufferMin: 0, busy: [{ ...cita, bufferMin: 0 }] }))
+      .toEqual(['09:00', '09:30', '10:30', '11:00', '11:30']);
+    // La de 10:00 deja 20 min de limpieza: 10:30 ya no cabe, aunque el pedido no tenga buffer.
+    expect(starts({ ...base, bufferMin: 0, busy: [{ ...cita, bufferMin: 20 }] }))
+      .toEqual(['09:00', '09:30', '11:00', '11:30']);
+  });
+
+  it('una ausencia no se agranda con el buffer: se trata como el cierre', () => {
+    const ausencia = { start: new Date('2026-09-10T15:00:00Z'), end: new Date('2026-09-10T15:30:00Z'), absence: true };
+    expect(starts({ ...base, bufferMin: 15, busy: [ausencia] }))
+      .toEqual(['09:00', '09:30', '10:30', '11:00', '11:30']);
+  });
+
+  it('un bloque que cierra a las 24:00 ofrece la última franja de la noche', () => {
+    const slots = computeSlots({ ...base, hours: [{ weekday: 4, start: '22:30', end: '24:00' }],
+      to: new Date('2026-09-12T00:00:00Z') });
+    expect(slots.map((s) => hhmm(s.start))).toEqual(['22:30', '23:00', '23:30']);
+    expect(slots.at(-1)!.end.toISOString()).toBe('2026-09-11T05:00:00.000Z'); // medianoche en Bogotá
+  });
+
+  it('dos bloques pegados del mismo día se unen: una cita puede cruzar el borde', () => {
+    const slots = starts({ ...base, durationMin: 60, granularityMin: 30,
+      hours: [{ weekday: 4, start: '09:00', end: '10:30' }, { weekday: 4, start: '10:30', end: '12:00' }] });
+    expect(slots).toEqual(['09:00', '09:30', '10:00', '10:30', '11:00']);
   });
 
   it('respeta la anticipación mínima', () => {

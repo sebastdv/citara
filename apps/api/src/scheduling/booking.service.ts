@@ -5,12 +5,20 @@ import type { EntityManager } from 'typeorm';
 import { AvailabilityService, type Bookability } from './availability.service';
 import { RemindersService } from './reminders.service';
 import {
-  NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooSoonError,
+  NotFoundError, OutsideHoursError, SlotTakenError, TooFarError, TooManyAppointmentsError, TooSoonError,
 } from './scheduling.errors';
 
 const PG_EXCLUSION_VIOLATION = '23P01';
+/**
+ * Citas futuras confirmadas por contacto. Alcanza para quien agenda para la
+ * familia, y evita que un solo número (o un bot) llene la agenda entera.
+ */
+export const MAX_UPCOMING_PER_CONTACT = 5;
 const COLUMNS = `id, service_id, resource_id, contact_id, conversation_id, starts_at, ends_at,
                  status, customer_name, notes, google_sync_status`;
+/** Hay que subirla a Google solo si el recurso tiene Google conectado; si no, `none`. */
+const SYNC_STATUS = (resource: string) => `CASE WHEN EXISTS (SELECT 1 FROM google_accounts g WHERE g.resource_id = ${resource})
+                                                THEN 'pending' ELSE 'none' END`;
 
 export interface BookInput {
   serviceId: string; resourceId: string; contactId: string; startsAt: Date;
@@ -41,6 +49,14 @@ export class BookingService {
       serviceId: input.serviceId, resourceId: input.resourceId, start: input.startsAt, now: input.now });
     await this.throwUnlessOk(m, tenantId, verdict);
 
+    // El candado por contacto hace el conteo exacto: dos reservas simultáneas del
+    // mismo número no pasan las dos con el tope en 4.
+    await m.query(`SELECT pg_advisory_xact_lock(hashtextextended($1 || ':citas', 0))`, [input.contactId]);
+    const [{ n }] = await m.query(
+      `SELECT count(*)::int AS n FROM appointments
+        WHERE contact_id = $1 AND status = 'confirmed' AND starts_at > $2`, [input.contactId, input.now]);
+    if (n >= MAX_UPCOMING_PER_CONTACT) throw new TooManyAppointmentsError(MAX_UPCOMING_PER_CONTACT);
+
     const [service] = await m.query(`SELECT duration_min FROM services WHERE id = $1`, [input.serviceId]);
     const endsAt = new Date(input.startsAt.getTime() + service.duration_min * 60_000);
 
@@ -51,14 +67,16 @@ export class BookingService {
     try {
       const [row] = await m.query(
         `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, conversation_id,
-                                   starts_at, ends_at, customer_name, notes, booked_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                                   starts_at, ends_at, customer_name, notes, booked_by, google_sync_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, ${SYNC_STATUS('$2::uuid')})
          RETURNING ${COLUMNS}`,
         [tenantId, input.resourceId, input.serviceId, input.contactId, input.conversationId ?? null,
          input.startsAt, endsAt, input.customerName, input.notes ?? null, input.bookedBy ?? 'flow']);
-      await m.query(`RELEASE SAVEPOINT reservar_cita`);
       const cita = toAppointment(row);
+      // Dentro del savepoint: si programar los recordatorios falla, el ROLLBACK TO
+      // del catch todavía existe y el error que sube es el real.
       await this.reminders.scheduleFor(m, tenantId, cita.id, cita.startsAt, input.now);
+      await m.query(`RELEASE SAVEPOINT reservar_cita`);
       return cita;
     } catch (err) {
       await m.query(`ROLLBACK TO SAVEPOINT reservar_cita`);
@@ -72,7 +90,7 @@ export class BookingService {
     // La propiedad se verifica en SQL (R3). Con UPDATE, TypeORM devuelve [filas, conteo].
     const [rows] = (await m.query(
       `UPDATE appointments SET status = 'cancelled', updated_at = now(),
-              google_sync_status = 'pending', google_sync_version = google_sync_version + 1
+              google_sync_status = ${SYNC_STATUS('appointments.resource_id')}, google_sync_version = google_sync_version + 1
         WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
         RETURNING ${COLUMNS}`, [appointmentId, contactId])) as [Row[], number];
     if (!rows[0]) throw new NotFoundError('esa cita');
@@ -105,7 +123,7 @@ export class BookingService {
       // contra las OTRAS filas, así que actualizar en sitio no choca consigo.
       const [rows] = (await m.query(
         `UPDATE appointments SET starts_at = $3, ends_at = $4, updated_at = now(),
-                google_sync_status = 'pending', google_sync_version = google_sync_version + 1
+                google_sync_status = ${SYNC_STATUS('appointments.resource_id')}, google_sync_version = google_sync_version + 1
           WHERE id = $1 AND contact_id = $2 AND status = 'confirmed'
           RETURNING ${COLUMNS}`, [appointmentId, contactId, newStart, endsAt])) as [Row[], number];
       if (!rows[0]) throw new NotFoundError('esa cita');

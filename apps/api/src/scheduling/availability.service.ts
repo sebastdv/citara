@@ -59,14 +59,15 @@ export class AvailabilityService {
         WHERE rs.service_id = $1 AND r.active AND ($2::uuid IS NULL OR r.id = $2)
         ORDER BY r.name`, [q.serviceId, q.resourceId]);
 
-    // Lo ocupado se busca con margen: el buffer de una cita justo fuera del
-    // rango puede bloquear el borde de una franja de adentro.
+    // Lo ocupado se busca con margen: la limpieza de la última franja del rango
+    // cae fuera de él. Las citas que terminan antes del rango se filtran por el
+    // fin de su propio buffer, en SQL.
     const margin = service.buffer_min * 60_000;
     // Lo ocupado en Google, de todos los recursos a la vez: es red, y el turno espera.
     const external = q.ignoreBusy
       ? resources.map(() => [] as BusyInterval[])
       : await Promise.all(resources.map((r) => this.external.busyFor(
-          m, r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin))));
+          m, r.id, q.from, new Date(q.to.getTime() + margin))));
     const out: ResourceSlot[] = [];
     for (const [i, r] of resources.entries()) {
       const own: HoursBlock[] = await m.query(
@@ -75,14 +76,15 @@ export class AvailabilityService {
       const hours: HoursBlock[] = own.length ? own : await m.query(
         `SELECT ${HOURS_COLUMNS} FROM business_hours WHERE resource_id IS NULL`);
       const busy: BusyInterval[] = q.ignoreBusy ? [] : await m.query(
-        `SELECT starts_at AS start, ends_at AS "end" FROM appointments
-          WHERE resource_id = $1 AND status = 'confirmed' AND starts_at < $3 AND ends_at > $2
-            AND ($4::uuid IS NULL OR id <> $4)
+        `SELECT a.starts_at AS start, a.ends_at AS "end", s.buffer_min AS "bufferMin", false AS absence
+           FROM appointments a JOIN services s ON s.id = a.service_id
+          WHERE a.resource_id = $1 AND a.status = 'confirmed' AND a.starts_at < $3
+            AND a.ends_at + make_interval(mins => s.buffer_min) > $2
+            AND ($4::uuid IS NULL OR a.id <> $4)
          UNION ALL
-         SELECT starts_at, ends_at FROM time_off
+         SELECT starts_at, ends_at, 0, true FROM time_off
           WHERE (resource_id = $1 OR resource_id IS NULL) AND starts_at < $3 AND ends_at > $2`,
-        [r.id, new Date(q.from.getTime() - margin), new Date(q.to.getTime() + margin),
-         q.excludeAppointmentId ?? null]);
+        [r.id, q.from, new Date(q.to.getTime() + margin), q.excludeAppointmentId ?? null]);
 
       for (const slot of computeSlots({
         from: q.from, to: q.to, now: q.now, timezone: settings.timezone,
