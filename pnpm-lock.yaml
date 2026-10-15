@@ -108,6 +108,9 @@ importers:
       bullmq:
         specifier: ^5.81.4
         version: 5.81.4
+      dotenv:
+        specifier: ^16.6.1
+        version: 16.6.1
       reflect-metadata:
         specifier: ^0.2.2
         version: 0.2.2

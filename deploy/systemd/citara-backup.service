@@ -1,0 +1,13 @@
+# Respaldo nocturno de Postgres (ver docs/produccion.md).
+# Instalar:  sudo cp deploy/systemd/citara-backup.* /etc/systemd/system/
+#            sudo systemctl daemon-reload && sudo systemctl enable --now citara-backup.timer
+[Unit]
+Description=Respaldo nocturno de la base de Citara
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+User=citara
+WorkingDirectory=/opt/citara
+ExecStart=/opt/citara/deploy/server.sh backup nightly

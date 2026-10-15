@@ -1,0 +1,13 @@
+# Solo para deploy/smoke/smoke.sh: el compose de producción en localhost, con
+# certificado interno de Caddy y puertos que no chocan con los de desarrollo.
+services:
+  api:
+    environment:
+      PUBLIC_BASE_URL: https://localhost:8443
+  caddy:
+    ports: !override ["8080:80", "8443:443"]
+    volumes: !override
+      # Las rutas se resuelven desde deploy/ (la carpeta del primer compose).
+      - ./smoke/caddy:/etc/caddy:ro
+      - caddy_data:/data
+      - caddy_config:/config

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Corre EN EL SERVIDOR: la CLI de Citara contra producción, en un contenedor de un solo uso.
+#
+#   ./deploy/citara tenant list
+#   ./deploy/citara tenant create <slug> "<nombre>"
+#   ./deploy/citara tenant:apply clientes/<negocio>.yaml     (el YAML en /opt/citara/clientes)
+#   ./deploy/citara operator create <correo>
+#   ./deploy/citara agent:bench clientes/<negocio>.yaml
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+case "${1:-}" in
+  tenant) script=tenant-cli.js ;;
+  tenant:apply) script=tenant-apply.js ;;
+  operator) script=operator-cli.js ;;
+  agent:bench) script=agent-bench.js ;;
+  migrate) script=migrate.js ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
+shift
+exec "$here/server.sh" cli "$script" "$@"

@@ -7,9 +7,15 @@ coverage/
 .env
 .env.*
 !.env.example
+!.env.production.example
 
 *.log
 .DS_Store
 .idea/
 .vscode/
 bench-results/
+
+# Lo que el servidor genera en su checkout (deploy/server.sh)
+backups/
+.deploy-history
+.deploy-lock/
