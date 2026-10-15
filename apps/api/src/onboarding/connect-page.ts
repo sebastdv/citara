@@ -31,7 +31,7 @@ const estado = (t) => { document.getElementById('estado').textContent = t; };
 const boton = document.getElementById('conectar');
 let sesion = null;
 window.addEventListener('message', (e) => {
-  try { if (!new URL(e.origin).hostname.endsWith('facebook.com')) return; } catch { return; }
+  try { if (!/(^|\\.)facebook\\.com$/.test(new URL(e.origin).hostname)) return; } catch { return; }
   try {
     const d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data;
     if (d && d.type === 'WA_EMBEDDED_SIGNUP') sesion = d;

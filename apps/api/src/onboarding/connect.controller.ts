@@ -1,12 +1,12 @@
 import {
-  BadGatewayException, BadRequestException, Body, Controller, Get, GoneException, HttpCode, HttpStatus,
-  Logger, Post, Query, Res, UnprocessableEntityException,
+  BadGatewayException, BadRequestException, Body, ConflictException, Controller, Get, GoneException, HttpCode,
+  HttpStatus, InternalServerErrorException, Logger, Post, Query, Res, UnprocessableEntityException,
 } from '@nestjs/common';
 import type { Response } from 'express';
 // Imports de VALOR: parámetros del constructor de un controlador Nest.
 import { DataSource } from 'typeorm';
 import { z } from 'zod';
-import { OnboardingService, LinkInvalidError, OnboardingInputError } from './onboarding.service';
+import { OnboardingService, LinkInvalidError, OnboardingInputError, PhoneTakenError } from './onboarding.service';
 import { MetaOnboardingError } from './meta-onboarding.client';
 import { peekLink } from './links';
 import { connectPage, invalidLinkPage } from './connect-page';
@@ -64,7 +64,11 @@ export class ConnectController {
         this.log.warn(`alta incompleta: ${err.message}`);
         throw new BadGatewayException('Meta no completó la conexión. Intenta de nuevo en unos minutos.');
       }
-      throw err;
+      if (err instanceof PhoneTakenError) throw new ConflictException(err.message);
+      // La página muestra el mensaje tal cual: el "Internal server error" de Nest
+      // no le dice nada al cliente. El detalle queda solo en el log.
+      this.log.error(`alta fallida: ${(err as Error).message}`);
+      throw new InternalServerErrorException('No se pudo completar la conexión. Intenta de nuevo en unos minutos.');
     }
   }
 }

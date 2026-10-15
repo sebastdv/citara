@@ -15,9 +15,17 @@ export class LinkInvalidError extends Error {
 /** Lo que mandó la página no alcanza para completar el alta. */
 export class OnboardingInputError extends Error {}
 
-const SYNC_TYPES: SyncType[] = ['smb_app_state_sync', 'history'];
-/** Lo que lanza register_channel cuando el enlace no está vigente. */
+/** El número ya está conectado a otro negocio: register_channel no lo cambia de dueño. */
+export class PhoneTakenError extends Error {
+  constructor() {
+    super('Este número de WhatsApp ya está conectado a otro negocio. Escríbele a quien te envió este enlace para revisarlo.');
+  }
+}
+
+export const SYNC_TYPES: SyncType[] = ['smb_app_state_sync', 'history'];
+/** Lo que lanza register_channel cuando el enlace no está vigente, y cuando el número es de otro negocio. */
 const LINK_INVALID_SQLSTATE = 'CT410';
+const PHONE_TAKEN_SQLSTATE = 'CT409';
 
 @Injectable()
 export class OnboardingService {
@@ -42,7 +50,8 @@ export class OnboardingService {
     if (!phone) {
       throw new OnboardingInputError(phones.length === 0
         ? 'La cuenta de WhatsApp no tiene números'
-        : 'La cuenta tiene varios números y no se indicó cuál conectar');
+        : 'Tu cuenta de WhatsApp Business tiene varios números y Meta no indicó cuál conectar. ' +
+          'Escríbele a quien te envió este enlace para conectarlo con el número correcto.');
     }
     await this.meta.subscribeApp(input.wabaId, accessToken);
 
@@ -63,23 +72,27 @@ export class OnboardingService {
         return row.id as string;
       });
     } catch (err) {
-      if ((err as { driverError?: { code?: string } }).driverError?.code === LINK_INVALID_SQLSTATE) {
-        throw new LinkInvalidError();
-      }
+      const code = (err as { driverError?: { code?: string } }).driverError?.code;
+      if (code === LINK_INVALID_SQLSTATE) throw new LinkInvalidError();
+      if (code === PHONE_TAKEN_SQLSTATE) throw new PhoneTakenError();
       throw err;
     }
 
-    // Fuera de la transacción: son llamadas a Meta. Un fallo no deshace el alta;
-    // el operador lo reintenta con `pnpm tenant sync` dentro de las 24 h.
-    const syncs = await this.requestSyncs(link.tenantId, phone.id, accessToken);
+    // Fuera de la transacción y sin esperarlas: son dos llamadas más a Meta y el
+    // cliente ya tiene su número conectado. Un fallo no deshace el alta; queda en
+    // la bitácora y el operador lo reintenta con `pnpm tenant sync` dentro de las 24 h.
+    const syncs = this.requestSyncs(link.tenantId, phone.id, accessToken).catch((err: Error) => {
+      this.log.warn(`no se pudieron registrar las sincronizaciones de ${phone.id}: ${err.message}`);
+      return {} as Partial<Record<SyncType, 'requested' | 'failed'>>;
+    });
     return { tenantId: link.tenantId, channelId, phoneNumberId: phone.id,
              displayPhoneNumber: phone.displayPhoneNumber, syncs };
   }
 
   /** Contactos e historial. Meta acepta cada uno una sola vez, dentro de 24 h del alta. */
-  async requestSyncs(tenantId: string, phoneNumberId: string, accessToken: string) {
-    const out = {} as Record<SyncType, 'requested' | 'failed'>;
-    for (const syncType of SYNC_TYPES) {
+  async requestSyncs(tenantId: string, phoneNumberId: string, accessToken: string, types: SyncType[] = SYNC_TYPES) {
+    const out = {} as Partial<Record<SyncType, 'requested' | 'failed'>>;
+    for (const syncType of types) {
       try {
         await this.meta.requestSync(phoneNumberId, accessToken, syncType);
         out[syncType] = 'requested';

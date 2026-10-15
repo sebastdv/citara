@@ -12,9 +12,19 @@ import { config } from 'dotenv';
 config();
 
 import { NestFactory } from '@nestjs/core';
+import { Logger } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { trustProxySetting } from './proxy-config';
+import { bootEnvCheck } from './boot-env';
 
 async function bootstrap() {
+  const log = new Logger('Bootstrap');
+  const env = bootEnvCheck(process.env);
+  for (const w of env.warnings) log.warn(w);
+  if (env.errors.length) {
+    for (const e of env.errors) log.error(e);
+    process.exit(1);
+  }
   // rawBody: true es indispensable — la firma HMAC se calcula sobre los bytes
   // originales, y reserializar el JSON los cambia.
   const app = await NestFactory.create(AppModule, { rawBody: true });
@@ -23,8 +33,9 @@ async function bootstrap() {
   app.enableShutdownHooks();
   // Detrás de Caddy, la IP del cliente viene en X-Forwarded-For: sin esto el
   // límite de intentos del panel contaría todo a la IP del proxy.
-  const trust = process.env.TRUST_PROXY;
-  if (trust) app.getHttpAdapter().getInstance().set('trust proxy', /^\d+$/.test(trust) ? Number(trust) : trust);
+  const trust = trustProxySetting(process.env);
+  if (trust.value !== undefined) app.getHttpAdapter().getInstance().set('trust proxy', trust.value);
+  if (trust.warning) log.warn(trust.warning);
   await app.listen(process.env.PORT ?? 3000);
 }
 void bootstrap();
