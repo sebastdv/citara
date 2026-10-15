@@ -1,5 +1,5 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { mkdtempSync, writeFileSync, utimesSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Queue, QueueEvents, UnrecoverableError, Worker } from 'bullmq';
@@ -8,28 +8,32 @@ import { OUTBOUND_QUEUE } from '../../src/queues/outbound.queue';
 
 const NOW = new Date('2026-10-20T12:00:00Z');
 const dirs: string[] = [];
-const dirWith = (files: Record<string, Date>) => {
-  const d = mkdtempSync(join(tmpdir(), 'citara-backups-')); dirs.push(d);
-  for (const [name, at] of Object.entries(files)) { writeFileSync(join(d, name), 'x'); utimesSync(join(d, name), at, at); }
+const stateDir = (content?: string) => {
+  const d = mkdtempSync(join(tmpdir(), 'citara-backup-status-')); dirs.push(d);
+  if (content !== undefined) writeFileSync(join(d, 'last-nightly'), content);
   return d;
 };
+const epoch = (d: Date) => Math.floor(d.getTime() / 1000);
 const hoursAgo = (h: number) => new Date(NOW.getTime() - h * 3600_000);
-afterAll(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
+afterAll(() => { for (const d of dirs) { chmodSync(d, 0o755); rmSync(d, { recursive: true, force: true }); } });
 
-describe('respaldos', () => {
+describe('respaldos (archivo de estado del nocturno)', () => {
   it('sin carpeta configurada no se sabe (desarrollo)', () => {
     expect(backupStatus(undefined, NOW)).toEqual({ configured: false });
   });
-  it('toma el diario más reciente e ignora los parciales, los semanales y los de antes de desplegar', () => {
-    const d = dirWith({
-      'daily-20261019-083000.dump': hoursAgo(27.5), 'daily-20261020-083000.dump': hoursAgo(3.5),
-      '.daily-20261020-120000.dump.partial': hoursAgo(0), 'pre-deploy-20261020-110000-abc.dump': hoursAgo(1),
-    });
-    expect(backupStatus(d, NOW)).toEqual({ configured: true, last: 'daily-20261020-083000.dump', ageHours: 3 });
+  it('lee el nombre y la hora del último nocturno', () => {
+    expect(backupStatus(stateDir(`daily-20261020-083000.dump ${epoch(hoursAgo(3.5))}\n`), NOW))
+      .toEqual({ configured: true, last: 'daily-20261020-083000.dump', ageHours: 3 });
   });
-  it('una carpeta vacía o inexistente es "sin respaldos"', () => {
-    expect(backupStatus(dirWith({}), NOW)).toEqual({ configured: true, last: null, ageHours: null });
+  it('sin archivo (nunca corrió) o carpeta inexistente: sin respaldos', () => {
+    expect(backupStatus(stateDir(), NOW)).toEqual({ configured: true, last: null, ageHours: null });
     expect(backupStatus('/no/existe/citara', NOW)).toEqual({ configured: true, last: null, ageHours: null });
+  });
+  it('un archivo ilegible o mal formado es un error, no "sin respaldos"', () => {
+    const d = stateDir('daily-x.dump 1');
+    chmodSync(join(d, 'last-nightly'), 0o000);
+    expect(backupStatus(d, NOW)).toEqual({ configured: true, last: null, ageHours: null, error: expect.stringContaining('EACCES') });
+    expect(backupStatus(stateDir('basura'), NOW)).toMatchObject({ configured: true, error: expect.stringContaining('mal formado') });
   });
 });
 
@@ -38,6 +42,10 @@ describe('avisos generales', () => {
   it('todo bien: sin avisos', () => {
     expect(systemAlerts(ok)).toEqual([]);
   });
+  it('un error leyendo el estado de los respaldos es crítico, con su propio mensaje', () => {
+    const [a] = systemAlerts({ ...ok, backup: { configured: true, last: null, ageHours: null, error: 'EACCES' } });
+    expect(a).toMatchObject({ severity: 'critical', message: expect.stringContaining('No se puede leer') });
+  });
   it('respaldo de 26 h o más, o ninguno, es crítico; sin carpeta es info', () => {
     expect(systemAlerts({ ...ok, backup: { configured: true, last: 'd', ageHours: 26 } }).map((a) => a.severity)).toEqual(['critical']);
     expect(systemAlerts({ ...ok, backup: { configured: true, last: null, ageHours: null } }).map((a) => a.severity)).toEqual(['critical']);
@@ -45,13 +53,13 @@ describe('avisos generales', () => {
   });
   it('jobs fallidos son aviso; sin Redis es crítico', () => {
     expect(systemAlerts({ ...ok, queues: [{ queue: 'outbound', failed: 3 }] })[0])
-      .toMatchObject({ severity: 'warning', message: expect.stringContaining('3 jobs fallidos') });
+      .toMatchObject({ severity: 'warning', message: expect.stringContaining('3 jobs fallidos en las últimas 24 h') });
     expect(systemAlerts({ ...ok, queues: null })[0]).toMatchObject({ severity: 'critical' });
   });
 });
 
 describe('QueueStats', () => {
-  it('cuenta los jobs fallidos de cada cola y sin Redis devuelve null', async () => {
+  it('cuenta los jobs fallidos de las últimas 24 h de cada cola, y sin Redis devuelve null', async () => {
     const probe = new Queue(OUTBOUND_QUEUE, { connection: { url: process.env.REDIS_URL } });
     await probe.obliterate({ force: true });
     await probe.add('x', {}, { jobId: 'falla-1' });
@@ -63,6 +71,9 @@ describe('QueueStats', () => {
     await failed;
     await worker.close(); await events.close();
 
+    // Un fallo de hace dos días no cuenta: el aviso se apaga solo.
+    const client = await probe.client;
+    await client.zadd(probe.toKey('failed'), Date.now() - 48 * 3600_000, 'falla-vieja');
     const stats = new QueueStats(process.env.REDIS_URL!);
     const counts = await stats.failed();
     expect(counts).toContainEqual({ queue: 'outbound', failed: 1 });

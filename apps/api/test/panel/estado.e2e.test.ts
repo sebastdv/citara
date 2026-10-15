@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { INestApplication } from '@nestjs/common';
-import { createTestApp, resetDb, adminQuery, closeHelpers } from '../helpers';
+import { createTestApp, resetDb, adminQuery, seedAgentConfig, closeHelpers } from '../helpers';
 import { seedBiz } from './seed';
 import { panelSession } from './session';
 
@@ -39,10 +39,23 @@ describe('pantalla de estado', () => {
   it('avisa si no hay respaldo nocturno y deja de avisar cuando aparece uno reciente', async () => {
     let res = await s.get('/panel/estado').expect(200);
     expect(res.text).toContain('No hay ningún respaldo nocturno');
-    writeFileSync(join(backups, 'daily-20261020-083000.dump'), 'x');
+    writeFileSync(join(backups, 'last-nightly'), `daily-20261020-083000.dump ${Math.floor(Date.now() / 1000) - 3600}\n`);
     res = await s.get('/panel/estado').expect(200);
     expect(res.text).not.toContain('No hay ningún respaldo nocturno');
     expect(res.text).toContain('daily-20261020-083000.dump');
+  });
+
+  it('si un negocio no se puede leer, la página sale igual y lo marca como crítico', async () => {
+    await seedBiz('bien', '1');
+    const roto = await seedBiz('roto', '2');
+    // Una zona horaria que Postgres no conoce hace fallar la consulta de ese negocio.
+    // (Se evalúa en el gasto de IA del mes: hace falta una configuración del agente.)
+    await seedAgentConfig(roto.tenantId);
+    await adminQuery(`UPDATE tenants SET timezone = 'Mars/Olympus' WHERE id = $1`, [roto.tenantId]);
+    const res = await s.get('/panel/estado').expect(200);
+    expect(res.text).toContain('No se pudo leer el estado de este negocio');
+    expect(res.text).toContain('Negocio BIEN');
+    expect(res.text.indexOf('Negocio ROTO')).toBeLessThan(res.text.indexOf('Negocio BIEN'));
   });
 
   it('está en la barra de navegación y pide sesión', async () => {
