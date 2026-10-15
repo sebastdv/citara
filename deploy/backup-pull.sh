@@ -6,8 +6,10 @@
 set -euo pipefail
 : "${CITARA_SSH:?Define CITARA_SSH=usuario@servidor}"
 DIR="${CITARA_DIR:-/opt/citara}"
+# En backups/ del repo (ignorado por git), no en la carpeta desde la que lo corras.
+dest="$(cd "$(dirname "$0")/.." && pwd)/backups"
 latest="$(ssh "$CITARA_SSH" "ls -1t $DIR/backups/*.dump 2>/dev/null | head -n 1")"
 [ -n "$latest" ] || { echo "No hay respaldos en $CITARA_SSH:$DIR/backups" >&2; exit 1; }
-mkdir -p backups && chmod 700 backups
-scp -p "$CITARA_SSH:$latest" backups/
-echo "Copiado: backups/$(basename "$latest"). Contiene datos de clientes: guárdalo cifrado."
+mkdir -p "$dest" && chmod 700 "$dest"
+scp -p "$CITARA_SSH:$latest" "$dest/"
+echo "Copiado: $dest/$(basename "$latest"). Contiene datos de clientes: guárdalo cifrado."
