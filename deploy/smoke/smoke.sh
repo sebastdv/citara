@@ -72,8 +72,9 @@ check "Redis tiene tope de memoria (512 MB)" eq "$(CITARA_TAG=x compose exec -T 
 out="$("$S" cli migrate.js)"
 check "migrar otra vez no hace nada" grep -q "Sin migraciones pendientes" <<<"$out"
 # Con una terminal de verdad (en bash 3.2 un arreglo vacío con set -u rompía este camino).
+# script(1) le da una al comando; su propia entrada va de /dev/null porque falla si es un socket.
 if [ "$(uname)" = "Darwin" ]; then
-  check "la CLI funciona desde una terminal" grep -q "Sin migraciones pendientes" <<<"$(script -q /dev/null "$S" cli migrate.js 2>&1)"
+  check "la CLI funciona desde una terminal" grep -q "Sin migraciones pendientes" <<<"$(script -q /dev/null "$S" cli migrate.js < /dev/null 2>&1)"
 fi
 # Por la red de compose, como la app: dentro del contenedor de Postgres la imagen
 # confía en toda conexión local y cualquier clave entraría.
