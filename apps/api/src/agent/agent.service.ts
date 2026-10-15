@@ -17,6 +17,8 @@ const MAX_TOKENS = 4096;
 
 /** Spec §7.2: al usuario nunca se le deja en silencio. */
 export const APOLOGY = 'Disculpa, tuve un problema para responderte. Te comunico con alguien del equipo.';
+/** Un traspaso que el modelo pidió sin escribir nada: el cliente no puede quedar en silencio. */
+export const HANDOFF = 'Te comunico con alguien del equipo; te responden por aquí.';
 
 export interface AgentSegment { system: string; model: string; effort: string; configVersion: number; transcript: MessageParam[] }
 export interface AgentTurnInput {
@@ -45,6 +47,11 @@ export class AgentService {
     // Append-only: lo previo va tal cual (caché y bloques de pensamiento), y se agrega el turno nuevo.
     const messages: MessageParam[] = [...i.segment.transcript, userTurn(i.now, i.timezone, i.texts, i.recent)];
     let action: AgentTurnResult['action'] = 'continue';
+    // Lo que ya pasó de verdad en este turno (una cita agendada, movida o cancelada):
+    // si el turno se degrada después, el cliente igual tiene que enterarse.
+    const effects: string[] = [];
+    // Lo que el modelo escribió junto a pasar_a_humano o volver_al_menu.
+    const beside: string[] = [];
 
     for (let call = 0; call < MAX_LLM_CALLS; call++) {
       const started = Date.now();
@@ -61,23 +68,27 @@ export class AgentService {
       } catch (err) {
         await this.record(i, null, Date.now() - started, [], null, (err as Error).message);
         this.log.warn(`el modelo falló en la conversación ${i.conversationId}: ${(err as Error).message}`);
-        return this.degrade(i);
+        return this.degrade(i, effects);
       }
       const uses = res.content.filter((b): b is ToolUse => b.type === 'tool_use');
       await this.record(i, res, Date.now() - started, uses.map((u) => u.name), res.stop_reason ?? null, null);
-      if (res.stop_reason === 'refusal') return this.degrade(i);
+      if (res.stop_reason === 'refusal') return this.degrade(i, effects);
       // Un tool_use sin ejecutar (respuesta cortada por max_tokens u otro motivo) no
       // se puede guardar: el siguiente turno llevaría un tool_use sin su resultado (400).
-      if (uses.length > 0 && res.stop_reason !== 'tool_use') return this.degrade(i);
+      if (uses.length > 0 && res.stop_reason !== 'tool_use') return this.degrade(i, effects);
       messages.push({ role: 'assistant', content: res.content as MessageParam['content'] });
 
       if (res.stop_reason !== 'tool_use' || uses.length === 0) {
         const text = res.content
           .flatMap((b) => (b.type === 'text' && b.text.trim() ? [b.text.trim()] : [])).join('\n\n');
-        if (!text && action === 'continue') return this.degrade(i);
-        return { replies: text ? [text] : [], action, transcript: messages, degraded: false };
+        if (!text && action === 'continue') return this.degrade(i, effects);
+        const replies = text ? [text] : beside.length ? [beside.join('\n\n')] : action === 'human' ? [HANDOFF] : [];
+        return { replies, action, transcript: messages, degraded: false };
       }
 
+      if (uses.some((u) => u.name === CONTROL_TOOLS.human || u.name === CONTROL_TOOLS.menu)) {
+        for (const b of res.content) if (b.type === 'text' && b.text.trim()) beside.push(b.text.trim());
+      }
       const results: Anthropic.Beta.Messages.BetaToolResultBlockParam[] = [];
       for (const use of uses) {
         if (use.name === CONTROL_TOOLS.human || use.name === CONTROL_TOOLS.menu) {
@@ -90,15 +101,20 @@ export class AgentService {
           now: i.now, turnId: i.turnId, actor: 'agent' }));
         results.push({ type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(out),
                        ...(out.ok ? {} : { is_error: true }) });
+        const effect = effectOf(use.name, out);
+        if (effect) effects.push(effect);
       }
       messages.push({ role: 'user', content: results });
     }
-    return this.degrade(i);
+    return this.degrade(i, effects);
   }
 
-  /** Disculpa y traspaso. La transcripción queda como estaba: el segmento termina con el traspaso. */
-  private degrade(i: AgentTurnInput): AgentTurnResult {
-    return { replies: [APOLOGY], action: 'human', transcript: i.segment.transcript, degraded: true };
+  /**
+   * Disculpa y traspaso, precedidos de lo que el turno alcanzó a hacer. La
+   * transcripción queda como estaba: el segmento termina con el traspaso.
+   */
+  private degrade(i: AgentTurnInput, effects: string[]): AgentTurnResult {
+    return { replies: [...effects, APOLOGY], action: 'human', transcript: i.segment.transcript, degraded: true };
   }
 
   private record(i: AgentTurnInput, res: LlmMessage | null, latencyMs: number, tools: string[],
@@ -109,6 +125,18 @@ export class AgentService {
       model: res?.model ?? i.segment.model, priceModel: i.segment.model, configVersion: i.segment.configVersion,
       usage: res?.usage ?? null, latencyMs, tools, stopReason, error,
     });
+  }
+}
+
+/** Lo que una herramienta cambió de verdad, dicho para el cliente; null si no cambió nada (o pidió confirmación). */
+function effectOf(tool: string, out: { ok: boolean; data?: unknown }): string | null {
+  const data = out.data as { requiere_confirmacion?: boolean; etiqueta?: string } | undefined;
+  if (!out.ok || !data || data.requiere_confirmacion) return null;
+  switch (tool) {
+    case 'agendar_cita': return `Tu cita quedó agendada para el ${data.etiqueta}.`;
+    case 'reprogramar_cita': return `Tu cita quedó movida al ${data.etiqueta}.`;
+    case 'cancelar_cita': return data.etiqueta ? `Tu cita del ${data.etiqueta} quedó cancelada.` : 'Tu cita quedó cancelada.';
+    default: return null;
   }
 }
 

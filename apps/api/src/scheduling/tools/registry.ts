@@ -265,7 +265,8 @@ export class ToolRegistry {
           const invalid = checkToken(a.confirmation_token, parts, ctx);
           if (invalid) return { ok: false, error: invalid };
           await booking.cancel(ctx.m, a.cita_id, ctx.contactId);
-          return { ok: true, data: { cancelada: true } };
+          const { timezone } = await availability.settings(ctx.m, ctx.tenantId);
+          return { ok: true, data: { cancelada: true, etiqueta: labelFor(cita.startsAt, timezone) } };
         },
       },
       {
