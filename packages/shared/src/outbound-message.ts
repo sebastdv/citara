@@ -1,5 +1,7 @@
 export type OutboundContent =
-  | { kind: 'text'; body: string }
+  // essential: el aviso de algo que ya pasó (una cita agendada, movida o cancelada).
+  // Sale aunque un humano haya tomado la conversación (ver OutboundProcessor).
+  | { kind: 'text'; body: string; essential?: true }
   | { kind: 'buttons'; body: string; buttons: { id: string; title: string }[] }
   | { kind: 'list'; body: string; button: string;
       sections: { title: string; rows: { id: string; title: string; description?: string }[] }[] }

@@ -25,7 +25,11 @@ export interface AgentTurnInput {
   tenantId: string; conversationId: string; contactId: string; turnId: string;
   now: Date; timezone: string; segment: AgentSegment; texts: string[]; recent?: string | null;
 }
-export interface AgentTurnResult { replies: string[]; action: 'continue' | 'menu' | 'human'; transcript: MessageParam[]; degraded: boolean }
+export interface AgentTurnResult {
+  replies: string[]; action: 'continue' | 'menu' | 'human'; transcript: MessageParam[]; degraded: boolean;
+  /** Lo que el turno hizo de verdad, dicho para el cliente (puede repetir algo de replies). */
+  effects: string[];
+}
 
 /**
  * Un turno del agente: llama al modelo, ejecuta las herramientas y vuelve a
@@ -82,8 +86,10 @@ export class AgentService {
         const text = res.content
           .flatMap((b) => (b.type === 'text' && b.text.trim() ? [b.text.trim()] : [])).join('\n\n');
         if (!text && action === 'continue') return this.degrade(i, effects);
-        const replies = text ? [text] : beside.length ? [beside.join('\n\n')] : action === 'human' ? [HANDOFF] : [];
-        return { replies, action, transcript: messages, degraded: false };
+        // Sin nada escrito, lo hecho se dice igual. Junto al texto del modelo no: ya lo contó.
+        const replies = text ? [text] : beside.length ? [beside.join('\n\n')]
+          : [...effects, ...(action === 'human' ? [HANDOFF] : [])];
+        return { replies, action, transcript: messages, degraded: false, effects };
       }
 
       if (uses.some((u) => u.name === CONTROL_TOOLS.human || u.name === CONTROL_TOOLS.menu)) {
@@ -114,7 +120,7 @@ export class AgentService {
    * transcripción queda como estaba: el segmento termina con el traspaso.
    */
   private degrade(i: AgentTurnInput, effects: string[]): AgentTurnResult {
-    return { replies: [...effects, APOLOGY], action: 'human', transcript: i.segment.transcript, degraded: true };
+    return { replies: [...effects, APOLOGY], action: 'human', transcript: i.segment.transcript, degraded: true, effects };
   }
 
   private record(i: AgentTurnInput, res: LlmMessage | null, latencyMs: number, tools: string[],

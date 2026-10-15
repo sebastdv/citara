@@ -228,9 +228,16 @@ export class AgentProcessor {
       now, timezone, segment, texts: pending.map((p) => p.body?.trim() || NO_TEXT), recent });
 
     await this.finish(job, first.id, async (m) => {
+      // Si el dueño intervino mientras el modelo pensaba, lo del bot se va a descartar al
+      // enviar (§6.3), salvo el aviso de lo que el turno ya hizo (una cita agendada,
+      // movida o cancelada): ese sale igual, marcado essential, aunque el modelo lo
+      // hubiera dicho a su manera en un texto que ya no va a salir.
+      const control = await readControl(m, job.conversationId);
+      const ownerTook = humanInControl(control, new Date()) && control.reason !== 'flow_handoff';
+      const bodies = ownerTook ? [...r.effects.filter((e) => !r.replies.includes(e)), ...r.replies] : r.replies;
       // Las respuestas van al primer entrante pendiente: es el turno cuyo envío aún no se encoló.
-      await insertBotReplies(m, job.tenantId, job.conversationId, first.id,
-                             r.replies.map((body) => ({ kind: 'text' as const, body })));
+      await insertBotReplies(m, job.tenantId, job.conversationId, first.id, bodies.map((body) =>
+        (r.effects.includes(body) ? { kind: 'text' as const, body, essential: true as const } : { kind: 'text' as const, body })));
       await m.query(
         `UPDATE conversation_sessions
             SET agent_system = $2, agent_transcript = $3, agent_model = $4, agent_effort = $5,

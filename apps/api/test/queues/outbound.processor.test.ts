@@ -250,6 +250,18 @@ describe('OutboundProcessor', () => {
     expect((await outRows()).map((r) => r.status)).toEqual(['superseded', 'superseded']);
   });
 
+  it('el aviso de una cita ya hecha (essential) sale aunque el dueño haya tomado la conversación', async () => {
+    const AVISO: OutboundContent = { kind: 'text', body: 'Tu cita quedó agendada para el jueves', essential: true };
+    const job = await seedTurn([AVISO, HOLA]);
+    await humanTookOver('phone');
+
+    await processor.process(job);
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    expect(sender.send.mock.calls[0][2]).toMatchObject({ body: 'Tu cita quedó agendada para el jueves' });
+    expect((await outRows()).map((r) => r.status)).toEqual(['sent', 'superseded']);
+  });
+
   it('si el dueño contesta mientras sale el primer mensaje, lo que sigue del bot no sale', async () => {
     // El control se mide por fila, en el reclamo: cada envío puede tardar
     // hasta 15 s, y leerlo una sola vez al inicio del job dejaba salir el resto.

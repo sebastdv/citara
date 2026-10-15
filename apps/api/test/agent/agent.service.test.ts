@@ -171,6 +171,31 @@ describe('AgentService', () => {
     expect(r2.replies).toEqual([expect.stringMatching(/jueves 10 de septiembre.*quedó cancelada/), APOLOGY]);
   });
 
+  it('si agenda y luego pasa al menú o a humano sin escribir nada, el cliente igual se entera', async () => {
+    const turnoConToken = async (control: string, final: object[]) => {
+      await adminQuery(`DELETE FROM appointments`);
+      const r1 = await respond(new ScriptedLlm([
+        () => reply([toolUse('t1', 'agendar_cita', agendar())], 'tool_use'),
+        () => reply([text('¿Confirmo?')]),
+      ]), ['Quiero un corte el jueves a las 10, soy Ana']);
+      return respond(new ScriptedLlm([
+        (p) => reply([toolUse('t2', 'agendar_cita', agendar({ confirmation_token: lastToolResult(p).confirmationToken })),
+                      toolUse('t3', control, control === 'pasar_a_humano' ? { motivo: 'x' } : {})], 'tool_use'),
+        () => reply(final),
+      ]), ['Sí'], { ...segment(), transcript: r1.transcript }, TURNO_2);
+    };
+    const menu = await turnoConToken('volver_al_menu', []);
+    expect(menu).toMatchObject({ action: 'menu', degraded: false });
+    expect(menu.replies).toEqual([expect.stringMatching(/quedó agendada/)]);
+    expect(menu.effects).toEqual(menu.replies);
+    const humano = await turnoConToken('pasar_a_humano', []);
+    expect(humano.replies).toEqual([expect.stringMatching(/quedó agendada/), HANDOFF]);
+    // Con texto final, el modelo ya lo dijo: no se repite, pero queda en effects para el worker.
+    const conTexto = await turnoConToken('volver_al_menu', [text('¡Listo, Ana! Quedaste el jueves.')]);
+    expect(conTexto.replies).toEqual(['¡Listo, Ana! Quedaste el jueves.']);
+    expect(conTexto.effects).toEqual([expect.stringMatching(/quedó agendada/)]);
+  });
+
   it('pedir confirmación no es un efecto: si falla después, solo hay disculpa', async () => {
     const r = await respond(new ScriptedLlm([
       () => reply([toolUse('t1', 'agendar_cita', agendar())], 'tool_use'),
@@ -198,7 +223,7 @@ describe('AgentService', () => {
   it('si el proveedor falla, pide disculpas, pasa a un humano y no toca la transcripción', async () => {
     const llm = new ScriptedLlm([() => new Error('Request timed out')]);
     const r = await respond(llm, ['Hola']);
-    expect(r).toEqual({ replies: [APOLOGY], action: 'human', transcript: [], degraded: true });
+    expect(r).toEqual({ replies: [APOLOGY], action: 'human', transcript: [], degraded: true, effects: [] });
     expect(await adminQuery(`SELECT usd, error FROM agent_runs`)).toEqual([{ usd: '0.000000', error: 'Request timed out' }]);
   });
 
