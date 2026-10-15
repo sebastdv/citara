@@ -228,7 +228,7 @@ La conversación es **híbrida**: los menús siguen siendo el camino principal y
    `pnpm build && pnpm operator create tu@correo.com`
 2. Arranca la API (`pnpm start:api`) y entra en `http://localhost:3000/panel/login`.
 3. Cambiar la contraseña cierra todas tus sesiones: `pnpm operator password tu@correo.com`.
-   Quitar el acceso: `pnpm operator disable tu@correo.com`.
+   Quitar el acceso: `pnpm operator disable tu@correo.com`; devolverlo: `pnpm operator enable tu@correo.com`.
 
 En producción, detrás de Caddy: `PUBLIC_BASE_URL=https://…` (la cookie sale con `Secure` y
 los formularios solo se aceptan desde ese origen) y `TRUST_PROXY=1`, para que el límite de

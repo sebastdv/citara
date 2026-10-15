@@ -100,7 +100,10 @@ export class OutboundProcessor {
 
       // Spec §6.3: si un humano intervino después de que el bot produjera esto,
       // ya sobra. Se mide AHORA, justo antes de enviar.
-      if (row.origin === 'bot' && botRepliesSuperseded(control, new Date())) {
+      // El aviso de algo ya hecho (essential) es la excepción: el cliente tiene que
+      // enterarse de su cita aunque el dueño haya intervenido mientras el bot pensaba.
+      const essential = row.payload.kind === 'text' && row.payload.essential === true;
+      if (row.origin === 'bot' && !essential && botRepliesSuperseded(control, new Date())) {
         await this.transition(tenantId, row.id, 'pending', 'superseded');
         continue;
       }
@@ -120,7 +123,7 @@ export class OutboundProcessor {
         continue;
       }
 
-      if (row.origin === 'bot') {
+      if (row.origin === 'bot' && !essential) {
         // El control se vuelve a medir aquí, dentro del reclamo atómico: el
         // dueño pudo contestar mientras salía la fila anterior.
         if (!(await this.claimBotReply(tenantId, row.id))) {

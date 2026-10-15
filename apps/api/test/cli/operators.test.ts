@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { createDataSource } from '@citara/db';
 import type { DataSource } from 'typeorm';
-import { createOperator, setOperatorPassword, disableOperator } from '../../src/cli/operators';
+import { createOperator, setOperatorPassword, disableOperator, enableOperator } from '../../src/cli/operators';
 import { verifyPassword } from '../../src/panel/password';
 import { resetDb, adminQuery, closeHelpers } from '../helpers';
 
@@ -46,5 +46,12 @@ describe('operadores por CLI', () => {
     expect(await adminQuery(`SELECT * FROM operator_sessions`)).toEqual([]);
     await expect(setOperatorPassword(admin, 'nadie@citara.co', 'clave-de-prueba-123')).rejects.toThrow(/No existe/);
     await expect(disableOperator(admin, 'nadie@citara.co')).rejects.toThrow(/No existe/);
+  });
+  it('volver a activar un operador deshabilitado', async () => {
+    await createOperator(admin, 'op@citara.co', 'clave-de-prueba-123');
+    await disableOperator(admin, 'op@citara.co');
+    await enableOperator(admin, 'OP@citara.co');
+    expect((await adminQuery(`SELECT disabled_at FROM operators`))[0].disabled_at).toBeNull();
+    await expect(enableOperator(admin, 'nadie@citara.co')).rejects.toThrow(/No existe/);
   });
 });

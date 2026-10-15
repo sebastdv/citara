@@ -413,6 +413,8 @@ cmd_cli() {
   export CITARA_TAG="${CITARA_TAG:-$(current_tag)}"
   [ -n "$CITARA_TAG" ] || die "No hay versión desplegada"
   mkdir -p "$ROOT/clientes" "$ROOT/bench-results"
+  # Un migrate suelto no puede correr a la vez que el de un despliegue (TypeORM no se bloquea solo).
+  if [ "$script" = "migrate.js" ]; then lock "$LOCK_WAIT"; fi
   # Sin terminal (scripts, la prueba de humo) no se pide TTY.
   [ -t 0 ] || tty=(-T)
   # ${tty[@]+…}: en bash < 4.4, un arreglo vacío con set -u es "unbound variable".

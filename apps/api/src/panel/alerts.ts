@@ -43,8 +43,14 @@ export function alertsFor(s: TenantSummary, now: Date): Alert[] {
       const what = echo !== null && echo >= (connected ?? -Infinity)
         ? `El dueño no escribe desde su celular hace ${days} días`
         : `El dueño nunca escribió desde su celular desde que se conectó el número (hace ${days} días)`;
+      // Lo que queda, en tiempo real: con días enteros redondeados, a los 14 justos
+      // decía "vence hoy" cuando el plazo ya había pasado.
+      const leftMs = OWNER_CRITICAL_DAYS * DAY_MS - (now.getTime() - since);
+      const leftDays = Math.floor(leftMs / DAY_MS);
+      const deadline = leftMs <= 0 ? 'ya pasó el plazo' : leftDays === 0 ? 'queda menos de un día'
+        : leftDays === 1 ? 'queda 1 día' : `quedan ${leftDays} días`;
       add(days >= OWNER_CRITICAL_DAYS ? 'critical' : 'warning', 'dueño',
-        `${what}. Meta corta la sincronización si no abre la app de WhatsApp Business en ${OWNER_CRITICAL_DAYS} días: pídele que la abra.`);
+        `${what}. Meta corta la sincronización si no abre la app de WhatsApp Business en ${OWNER_CRITICAL_DAYS} días (${deadline}): pídele que la abra.`);
     }
   }
 

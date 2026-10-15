@@ -6,6 +6,8 @@ export type LlmMessage = Anthropic.Beta.Messages.BetaMessage;
 /** Lo único que el agente necesita del proveedor. Los tests inyectan uno guionado. */
 export interface LlmProvider {
   create(params: LlmParams): Promise<LlmMessage>;
+  /** false si no hay con qué llamar (sin API key); sin el método, se asume que sí. */
+  configured?(): boolean;
 }
 export const LLM = Symbol('LLM');
 
@@ -24,6 +26,8 @@ export class AnthropicProvider implements LlmProvider {
     private readonly clientFactory: () => Anthropic =
       () => new Anthropic({ apiKey: this.apiKey, timeout: TIMEOUT_MS, maxRetries: MAX_RETRIES }),
   ) {}
+
+  configured(): boolean { return Boolean(this.apiKey); }
 
   create(params: LlmParams): Promise<LlmMessage> {
     // Perezoso: sin ANTHROPIC_API_KEY la app arranca y funciona con menús.

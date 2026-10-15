@@ -166,6 +166,33 @@ describe('el agente de punta a punta', () => {
     expect(await adminQuery(`SELECT status FROM messages WHERE origin = 'bot'`)).toEqual([{ status: 'superseded' }]);
   });
 
+  it('si el dueño contesta mientras el agente cierra una cita, el cliente igual recibe el aviso de la cita', async () => {
+    opus.push(
+      () => msg([use('t1', 'agendar_cita', booking())], 'tool_use'),
+      () => msg([text('¿Confirmo un corte mañana martes a las 10:00 a nombre de Ana?')]),
+    );
+    await say('Quiero un corte mañana a las 10, soy Ana');
+    await quiesce();
+    // Sin vaciar `sent`: el MetaSender falso arma el wamid con su longitud, y uno repetido choca.
+    const before = sent.length;
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    opus.push(
+      (p) => msg([use('t2', 'agendar_cita', booking({ confirmation_token: lastToolResult(p).confirmationToken }))], 'tool_use'),
+      async () => { await gate; return msg([text('¡Listo, Ana! Te esperamos.')]); },
+    );
+    await say('Sí');
+    await new Promise((r) => setTimeout(r, 600));
+    await post(echoPayload({ wamid: 'wamid.DUENO3', to: '573001112233', text: 'Hola Ana, ya te atiendo yo' }));
+    await new Promise((r) => setTimeout(r, 300));
+    release();
+    await quiesce();
+    expect(await adminQuery(`SELECT status FROM appointments`)).toEqual([{ status: 'confirmed' }]);
+    // La respuesta del bot se descarta (el dueño tomó la conversación), pero no el aviso de la cita.
+    expect(sent.slice(before)).toEqual([expect.stringMatching(/quedó agendada/)]);
+  }, 20_000);
+
   it('si el dueño contestó mientras el agente pensaba, el traspaso del agente no pisa su control', async () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });

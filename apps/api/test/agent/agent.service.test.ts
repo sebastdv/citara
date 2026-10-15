@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { DataSource } from 'typeorm';
 import { createDataSource } from '@citara/db';
 import type { LlmMessage, LlmParams, LlmProvider } from '../../src/agent/llm';
-import { AgentService, APOLOGY, type AgentSegment } from '../../src/agent/agent.service';
+import { AgentService, APOLOGY, HANDOFF, type AgentSegment } from '../../src/agent/agent.service';
 import { resetDb, seedChannel, seedCatalog, seedHours, seedContact, adminQuery, closeHelpers,
          buildScheduling } from '../helpers';
 
@@ -141,10 +141,89 @@ describe('AgentService', () => {
     expect(await respond(menu, ['mejor muéstrame el menú'])).toMatchObject({ action: 'menu', replies: [] });
   });
 
+  it('si el modelo falla después de agendar, el cliente se entera de que su cita quedó hecha', async () => {
+    const r1 = await respond(new ScriptedLlm([
+      () => reply([toolUse('t1', 'agendar_cita', agendar())], 'tool_use'),
+      () => reply([text('¿Confirmo?')]),
+    ]), ['Quiero un corte el jueves a las 10, soy Ana']);
+    const r2 = await respond(new ScriptedLlm([
+      (p) => reply([toolUse('t2', 'agendar_cita', agendar({ confirmation_token: lastToolResult(p).confirmationToken }))], 'tool_use'),
+      () => new Error('Request timed out'),
+    ]), ['Sí'], { ...segment(), transcript: r1.transcript }, TURNO_2);
+    expect(await adminQuery(`SELECT status FROM appointments`)).toEqual([{ status: 'confirmed' }]);
+    expect(r2).toMatchObject({ degraded: true, action: 'human' });
+    expect(r2.replies).toEqual([expect.stringMatching(/quedó agendada para el jueves 10 de septiembre/), APOLOGY]);
+  });
+
+  it('si el modelo falla después de cancelar, también lo dice', async () => {
+    const [cita] = await adminQuery(
+      `INSERT INTO appointments (tenant_id, resource_id, service_id, contact_id, starts_at, ends_at, customer_name)
+       VALUES ($1, $2, $3, $4, '2026-09-10T15:00:00Z', '2026-09-10T15:30:00Z', 'Ana') RETURNING id`,
+      [tenantId, resourceId, serviceId, contactId]);
+    const r1 = await respond(new ScriptedLlm([
+      () => reply([toolUse('t1', 'cancelar_cita', { cita_id: cita.id })], 'tool_use'),
+      () => reply([text('¿La cancelo?')]),
+    ]), ['cancela mi cita']);
+    const r2 = await respond(new ScriptedLlm([
+      (p) => reply([toolUse('t2', 'cancelar_cita', { cita_id: cita.id, confirmation_token: lastToolResult(p).confirmationToken })], 'tool_use'),
+      () => reply([], 'refusal'),
+    ]), ['sí'], { ...segment(), transcript: r1.transcript }, TURNO_2);
+    expect(r2.replies).toEqual([expect.stringMatching(/jueves 10 de septiembre.*quedó cancelada/), APOLOGY]);
+  });
+
+  it('si agenda y luego pasa al menú o a humano sin escribir nada, el cliente igual se entera', async () => {
+    const turnoConToken = async (control: string, final: object[]) => {
+      await adminQuery(`DELETE FROM appointments`);
+      const r1 = await respond(new ScriptedLlm([
+        () => reply([toolUse('t1', 'agendar_cita', agendar())], 'tool_use'),
+        () => reply([text('¿Confirmo?')]),
+      ]), ['Quiero un corte el jueves a las 10, soy Ana']);
+      return respond(new ScriptedLlm([
+        (p) => reply([toolUse('t2', 'agendar_cita', agendar({ confirmation_token: lastToolResult(p).confirmationToken })),
+                      toolUse('t3', control, control === 'pasar_a_humano' ? { motivo: 'x' } : {})], 'tool_use'),
+        () => reply(final),
+      ]), ['Sí'], { ...segment(), transcript: r1.transcript }, TURNO_2);
+    };
+    const menu = await turnoConToken('volver_al_menu', []);
+    expect(menu).toMatchObject({ action: 'menu', degraded: false });
+    expect(menu.replies).toEqual([expect.stringMatching(/quedó agendada/)]);
+    expect(menu.effects).toEqual(menu.replies);
+    const humano = await turnoConToken('pasar_a_humano', []);
+    expect(humano.replies).toEqual([expect.stringMatching(/quedó agendada/), HANDOFF]);
+    // Con texto final, el modelo ya lo dijo: no se repite, pero queda en effects para el worker.
+    const conTexto = await turnoConToken('volver_al_menu', [text('¡Listo, Ana! Quedaste el jueves.')]);
+    expect(conTexto.replies).toEqual(['¡Listo, Ana! Quedaste el jueves.']);
+    expect(conTexto.effects).toEqual([expect.stringMatching(/quedó agendada/)]);
+  });
+
+  it('pedir confirmación no es un efecto: si falla después, solo hay disculpa', async () => {
+    const r = await respond(new ScriptedLlm([
+      () => reply([toolUse('t1', 'agendar_cita', agendar())], 'tool_use'),
+      () => new Error('boom'),
+    ]), ['Quiero un corte el jueves a las 10, soy Ana']);
+    expect(r.replies).toEqual([APOLOGY]);
+  });
+
+  it('el texto que acompaña a pasar_a_humano llega al cliente aunque la respuesta final venga vacía', async () => {
+    const r = await respond(new ScriptedLlm([
+      () => reply([text('Claro, te paso con alguien del equipo.'), toolUse('t1', 'pasar_a_humano', { motivo: 'lo pidió' })], 'tool_use'),
+      () => reply([]),
+    ]), ['quiero hablar con una persona']);
+    expect(r).toMatchObject({ action: 'human', replies: ['Claro, te paso con alguien del equipo.'], degraded: false });
+  });
+
+  it('un traspaso sin ningún texto avisa con la frase fija: el cliente no queda en silencio', async () => {
+    const r = await respond(new ScriptedLlm([
+      () => reply([toolUse('t1', 'pasar_a_humano', { motivo: 'lo pidió' })], 'tool_use'),
+      () => reply([]),
+    ]), ['quiero hablar con una persona']);
+    expect(r).toMatchObject({ action: 'human', replies: [HANDOFF] });
+  });
+
   it('si el proveedor falla, pide disculpas, pasa a un humano y no toca la transcripción', async () => {
     const llm = new ScriptedLlm([() => new Error('Request timed out')]);
     const r = await respond(llm, ['Hola']);
-    expect(r).toEqual({ replies: [APOLOGY], action: 'human', transcript: [], degraded: true });
+    expect(r).toEqual({ replies: [APOLOGY], action: 'human', transcript: [], degraded: true, effects: [] });
     expect(await adminQuery(`SELECT usd, error FROM agent_runs`)).toEqual([{ usd: '0.000000', error: 'Request timed out' }]);
   });
 

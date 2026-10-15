@@ -7,7 +7,7 @@ import type { Response } from 'express';
 import { DataSource, type EntityManager } from 'typeorm';
 import { OutboundQueue } from '../queues/outbound.queue';
 import { runInTenant } from '../tenancy/tenant-context';
-import { LoginRedirectFilter, PanelGuard, pageCtx, sessionCookie, type PanelRequest } from './panel-auth';
+import { LoginRedirectFilter, PanelForbiddenFilter, PanelGuard, pageCtx, sessionCookie, type PanelRequest } from './panel-auth';
 import { destroySession } from './sessions';
 import { panelPage, sendHtml, type PageCtx } from './layout';
 import { html } from './html';
@@ -36,7 +36,7 @@ const str = (v: unknown) => (typeof v === 'string' && v ? v.slice(0, 64) : undef
 
 @Controller('panel')
 @UseGuards(PanelGuard)
-@UseFilters(LoginRedirectFilter)
+@UseFilters(LoginRedirectFilter, PanelForbiddenFilter)
 export class PanelController {
   private readonly log = new Logger(PanelController.name);
 

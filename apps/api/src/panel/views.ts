@@ -51,6 +51,15 @@ export function loginView(nonce: string, p: { next: string; error?: string; emai
     </form>`);
 }
 
+export function forbiddenView(nonce: string, p: { message: string; next: string; draft?: string }): string {
+  return panelPage('No se pudo enviar', { nonce }, html`
+    <h1>No se pudo enviar</h1>
+    <p class="alerta" role="alert">${p.message}</p>
+    ${p.draft ? html`<p>Esto es lo que habías escrito; cópialo antes de salir de esta página:</p>
+      <textarea readonly>${p.draft}</textarea>` : ''}
+    <p><a href="/panel/login?next=${encodeURIComponent(p.next)}">Entrar de nuevo</a></p>`);
+}
+
 /** Por qué no se le puede escribir ahora al cliente; null si se puede. */
 export function sendRestriction(chat: ChatView, now: Date): string | null {
   if (chat.tenantStatus !== 'active') return 'El negocio no está activo: no sale nada.';

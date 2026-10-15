@@ -66,7 +66,10 @@ describe('costos', () => {
     expect(parseMonth('2026-03')).toEqual({ year: 2026, month: 3 });
     expect(parseMonth('2026-13', new Date('2026-11-01T04:00:00Z'))).toEqual({ year: 2026, month: 10 });
     expect(parseMonth(undefined, new Date('2026-11-01T05:00:00Z'))).toEqual({ year: 2026, month: 11 });
-    expect(parseMonth('1999-01', new Date('2026-11-01T05:00:00Z'))).toEqual({ year: 1999, month: 1 });
+    // Fuera de 2000-2100 (p. ej. 0000-01, que hacía fallar make_timestamp): el mes actual.
+    expect(parseMonth('0000-01', new Date('2026-11-01T05:00:00Z'))).toEqual({ year: 2026, month: 11 });
+    expect(parseMonth('1999-01', new Date('2026-11-01T05:00:00Z'))).toEqual({ year: 2026, month: 11 });
+    expect(parseMonth('2100-12')).toEqual({ year: 2100, month: 12 });
   });
   it('la pantalla muestra «—» sin citas y el gasto con el tope', async () => {
     const a = await seedBiz('a', '1');

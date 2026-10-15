@@ -5,12 +5,13 @@ config();
 
 import { createInterface } from 'node:readline';
 import { createDataSource } from '@citara/db';
-import { createOperator, disableOperator, setOperatorPassword } from './operators';
+import { createOperator, disableOperator, enableOperator, setOperatorPassword } from './operators';
 
 const USAGE = `Uso:
   pnpm operator create <correo>     crea el operador del panel (pide la contraseña)
   pnpm operator password <correo>   cambia la contraseña y cierra sus sesiones
-  pnpm operator disable <correo>    le quita el acceso y cierra sus sesiones`;
+  pnpm operator disable <correo>    le quita el acceso y cierra sus sesiones
+  pnpm operator enable <correo>     le devuelve el acceso (con la contraseña de antes)`;
 
 /** Lee una línea sin mostrarla en la terminal. */
 function readHidden(prompt: string): Promise<string> {
@@ -30,11 +31,11 @@ async function askPassword(): Promise<string> {
 
 async function main() {
   const [cmd, email] = process.argv.slice(2);
-  if (!cmd || !email || !['create', 'password', 'disable'].includes(cmd)) throw new Error(USAGE);
+  if (!cmd || !email || !['create', 'password', 'disable', 'enable'].includes(cmd)) throw new Error(USAGE);
   const url = process.env.DATABASE_ADMIN_URL;
   if (!url) throw new Error('DATABASE_ADMIN_URL no está definida');
   // La contraseña se pide antes de conectar: no se deja una conexión abierta esperando al teclado.
-  const password = cmd === 'disable' ? '' : await askPassword();
+  const password = cmd === 'disable' || cmd === 'enable' ? '' : await askPassword();
   const admin = createDataSource(url);
   await admin.initialize();
   try {
@@ -44,6 +45,9 @@ async function main() {
     } else if (cmd === 'password') {
       await setOperatorPassword(admin, email, password);
       console.log('Contraseña cambiada. Sus sesiones abiertas se cerraron.');
+    } else if (cmd === 'enable') {
+      await enableOperator(admin, email);
+      console.log('Operador habilitado de nuevo.');
     } else {
       await disableOperator(admin, email);
       console.log('Operador deshabilitado. Sus sesiones abiertas se cerraron.');

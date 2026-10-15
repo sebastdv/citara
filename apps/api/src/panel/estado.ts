@@ -38,5 +38,6 @@ export async function loadEstado(ds: DataSource, queues: QueueStats, backupDir: 
   tenants.sort((a, b) => rank(a.worst) - rank(b.worst) || a.summary.slug.localeCompare(b.summary.slug));
   const backup = backupStatus(backupDir, now);
   const failures = await queues.failed();
-  return { system: { alerts: systemAlerts({ backup, queues: failures }), backup, queues: failures }, tenants };
+  const agentsWithoutKey = process.env.ANTHROPIC_API_KEY ? 0 : tenants.filter((t) => t.summary.ai?.enabled).length;
+  return { system: { alerts: systemAlerts({ backup, queues: failures, agentsWithoutKey }), backup, queues: failures }, tenants };
 }

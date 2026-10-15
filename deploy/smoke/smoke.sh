@@ -104,8 +104,9 @@ check "y la API sigue respondiendo" curl -skf -o /dev/null https://localhost:844
 echo "== Respaldo nocturno y poda"
 mkdir "$ROOT/.deploy-lock"
 if CITARA_LOCK_WAIT=4 "$S" backup nightly >/dev/null 2>&1; then rmdir "$ROOT/.deploy-lock"; fail "el respaldo nocturno ignoró el lock"; fi
+if CITARA_LOCK_WAIT=4 "$S" cli migrate.js >/dev/null 2>&1; then rmdir "$ROOT/.deploy-lock"; fail "un migrate suelto ignoró el lock"; fi
 rmdir "$ROOT/.deploy-lock"
-ok "el respaldo nocturno espera el lock de un despliegue en curso"
+ok "el respaldo nocturno y un migrate suelto esperan el lock de un despliegue en curso"
 for i in $(seq -w 1 16); do : > "$CITARA_BACKUP_DIR/daily-202601${i}-000000.dump"; done
 "$S" backup nightly >/dev/null
 check "la API ve el estado del último nocturno (pantalla de estado)" sh -c "docker exec \"\$1\" cat /app/backup-status/last-nightly | grep -q '^daily-'" _ "$(CITARA_TAG=x compose ps -q api)"

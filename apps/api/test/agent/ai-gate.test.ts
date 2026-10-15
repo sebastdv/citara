@@ -4,6 +4,7 @@ import { createDataSource } from '@citara/db';
 import { runInTenant } from '../../src/tenancy/tenant-context';
 import { AiGate } from '../../src/agent/ai-gate';
 import { recordRun } from '../../src/agent/runs';
+import { AnthropicProvider } from '../../src/agent/llm';
 import { resetDb, seedChannel, seedAgentConfig, adminQuery, closeHelpers } from '../helpers';
 
 let app: DataSource;
@@ -23,6 +24,16 @@ describe('AiGate', () => {
     expect(await inTenant((m) => gate.availability(m, tenantId))).toEqual({ ok: false, reason: 'none' });
     await seedAgentConfig(tenantId, { enabled: false });
     expect(await inTenant((m) => gate.availability(m, tenantId))).toEqual({ ok: false, reason: 'disabled' });
+  });
+
+  it('sin ANTHROPIC_API_KEY no hay IA aunque el negocio la tenga configurada: va con menús', async () => {
+    await seedAgentConfig(tenantId);
+    const sinClave = new AiGate(new AnthropicProvider(undefined));
+    expect(await inTenant((m) => sinClave.availability(m, tenantId))).toEqual({ ok: false, reason: 'nokey' });
+    const vacia = new AiGate(new AnthropicProvider(''));
+    expect(await inTenant((m) => vacia.availability(m, tenantId))).toEqual({ ok: false, reason: 'nokey' });
+    const conClave = new AiGate(new AnthropicProvider('sk-ant-prueba'));
+    expect(await inTenant((m) => conClave.availability(m, tenantId))).toMatchObject({ ok: true });
   });
 
   it('con presupuesto disponible devuelve la configuración activa', async () => {

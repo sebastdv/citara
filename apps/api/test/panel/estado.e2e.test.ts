@@ -58,6 +58,13 @@ describe('pantalla de estado', () => {
     expect(res.text.indexOf('Negocio ROTO')).toBeLessThan(res.text.indexOf('Negocio BIEN'));
   });
 
+  it('sin ANTHROPIC_API_KEY, un negocio con el agente encendido hace salir el aviso', async () => {
+    const a = await seedBiz('a', '1');
+    expect((await s.get('/panel/estado').expect(200)).text).not.toContain('ANTHROPIC_API_KEY');
+    await seedAgentConfig(a.tenantId);
+    expect((await s.get('/panel/estado').expect(200)).text).toContain('Falta ANTHROPIC_API_KEY');
+  });
+
   it('está en la barra de navegación y pide sesión', async () => {
     expect((await s.get('/panel').expect(200)).text).toContain('href="/panel/estado"');
     await s.http().get('/panel/estado').expect(303);
