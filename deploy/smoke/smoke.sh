@@ -10,6 +10,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/citara-smoke.XXXXXX")"
 export CITARA_ROOT="$ROOT" CITARA_PROJECT=citara-smoke CITARA_SKIP_GIT=1 CITARA_YES=1
 export CITARA_ENV_FILE="$WORK/env" CITARA_BACKUP_DIR="$WORK/backups" CITARA_HISTORY="$WORK/history"
+export CITARA_BACKUP_STATUS_DIR="$WORK/backup-status"
 export CITARA_COMPOSE_OVERRIDE="$ROOT/deploy/smoke/compose.override.yml"
 S="$ROOT/deploy/server.sh"
 PASS=0
@@ -106,7 +107,9 @@ rmdir "$ROOT/.deploy-lock"
 ok "el respaldo nocturno espera el lock de un despliegue en curso"
 for i in $(seq -w 1 16); do : > "$CITARA_BACKUP_DIR/daily-202601${i}-000000.dump"; done
 "$S" backup nightly >/dev/null
-check "la API ve los respaldos (pantalla de estado)" sh -c "docker exec \"\$1\" ls /app/backups | grep -q '^daily-'" _ "$(CITARA_TAG=x compose ps -q api)"
+check "la API ve el estado del último nocturno (pantalla de estado)" sh -c "docker exec \"\$1\" cat /app/backup-status/last-nightly | grep -q '^daily-'" _ "$(CITARA_TAG=x compose ps -q api)"
+check "la API no ve los respaldos" sh -c "! docker exec \"\$1\" ls /app/backups >/dev/null 2>&1" _ "$(CITARA_TAG=x compose ps -q api)"
+check "la carpeta de respaldos queda en 700" eq "$(stat -f %Lp "$CITARA_BACKUP_DIR" 2>/dev/null || stat -c %a "$CITARA_BACKUP_DIR")" "700"
 check "se quedan 14 respaldos diarios" eq "$(ls -1 "$CITARA_BACKUP_DIR"/daily-*.dump | wc -l | tr -d ' ')" "14"
 
 echo "== Apagado limpio"

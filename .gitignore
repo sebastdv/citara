@@ -17,5 +17,6 @@ bench-results/
 
 # Lo que el servidor genera en su checkout (deploy/server.sh)
 backups/
+backup-status/
 .deploy-history
 .deploy-lock/
