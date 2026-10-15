@@ -147,6 +147,20 @@ describe('normalizeWebhook — coexistencia', () => {
     expect(n.echoes[0].to).toBe('573001112233');
   });
 
+  it('descarta un eco sin destinatario o sin id: no hay conversación a la que atribuirlo', () => {
+    const sinTo = echoPayload({ wamid: 'wamid.E3', to: '' });
+    const sinId = echoPayload({ wamid: '', to: '573001112233' });
+    expect(normalizeWebhook(sinTo).echoes).toEqual([]);
+    expect(normalizeWebhook(sinId).echoes).toEqual([]);
+  });
+
+  it('un eco de sticker queda como unsupported, igual que un sticker entrante', () => {
+    const p = echoPayload({ wamid: 'wamid.ES', to: '573001112233', type: 'sticker' }) as any;
+    p.entry[0].changes[0].value.message_echoes[0].sticker = { id: 'MEDIA.S1' };
+    expect(normalizeWebhook(p).echoes).toEqual([expect.objectContaining(
+      { wamid: 'wamid.ES', to: '573001112233', type: 'unsupported', text: null, mediaId: null })]);
+  });
+
   it('un eco sin timestamp se toma como recién llegado, no como de 1970', () => {
     const p = echoPayload({ wamid: 'wamid.ET', to: '573001112233' }) as any;
     delete p.entry[0].changes[0].value.message_echoes[0].timestamp;

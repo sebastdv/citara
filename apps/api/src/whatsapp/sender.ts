@@ -16,6 +16,13 @@ export type MetaSendErrorKind = 'permanent' | 'retry' | 'window' | 'ambiguous';
  * - `ambiguous`: pudo haber llegado (timeout, conexión cortada tras enviar,
  *   200 sin wamid). Reenviarlo arriesga duplicarle el mensaje al usuario.
  */
+/**
+ * Meta rechaza la plantilla entera si un parámetro trae saltos de línea,
+ * tabuladores o más de cuatro espacios seguidos, o si llega vacío. Un nombre
+ * capturado del cliente puede traer cualquiera de esos.
+ */
+export const templateParam = (text: string): string => text.replace(/\s+/g, ' ').trim() || '-';
+
 export class MetaSendError extends Error {
   constructor(
     message: string,
@@ -138,7 +145,7 @@ export class MetaSender {
           name: content.name,
           language: { code: content.language },
           components: content.params.length
-            ? [{ type: 'body', parameters: content.params.map((text) => ({ type: 'text', text })) }]
+            ? [{ type: 'body', parameters: content.params.map((text) => ({ type: 'text', text: templateParam(text) })) }]
             : [],
         },
       };

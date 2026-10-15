@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MetaSender, MetaSendError } from '../../src/whatsapp/sender';
+import { MetaSender, MetaSendError, templateParam } from '../../src/whatsapp/sender';
 
 const channel = { tenantId: 't', channelId: 'c', wabaId: 'w',
                   phoneNumberId: '106540', accessToken: 'TOKEN' };
@@ -156,6 +156,13 @@ describe('MetaSender', () => {
         components: [{ type: 'body', parameters: [
           { type: 'text', text: 'Ana' }, { type: 'text', text: 'jueves 10:00' }, { type: 'text', text: 'Corte' }] }] },
     });
+  });
+});
+
+describe('templateParam', () => {
+  it('aplana saltos de línea y espacios que Meta rechaza, y no deja un parámetro vacío', () => {
+    expect(templateParam('Ana\nMaría\t  López     ')).toBe('Ana María López');
+    expect(templateParam(' \n ')).toBe('-');
   });
 });
 
