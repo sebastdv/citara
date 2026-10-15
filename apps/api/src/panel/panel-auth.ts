@@ -1,12 +1,13 @@
 import {
-  CanActivate, Catch, ForbiddenException, HttpException, HttpStatus, Injectable,
+  CanActivate, Catch, HttpException, HttpStatus, Injectable,
   type ArgumentsHost, type ExceptionFilter, type ExecutionContext,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
 // Import de VALOR: parámetro del constructor de un provider Nest.
 import { DataSource } from 'typeorm';
 import { ABSOLUTE_DAYS, findSession, sameSecret, SESSION_COOKIE, type OperatorSession } from './sessions';
-import { newNonce, type PageCtx } from './layout';
+import { newNonce, sendHtml, type PageCtx } from './layout';
+import { forbiddenView } from './views';
 
 export interface PanelRequest extends Request { operator?: OperatorSession; sessionToken?: string }
 
@@ -53,6 +54,37 @@ export class LoginRequired extends HttpException {
   constructor(readonly next: string) { super('Inicia sesión', HttpStatus.SEE_OTHER); }
 }
 
+/** Un POST sin sesión válida o sin CSRF: 403, pero como página del panel (ver PanelForbiddenFilter). */
+export class PanelForbidden extends HttpException {
+  constructor(message: string) { super(message, HttpStatus.FORBIDDEN); }
+}
+
+/** De dónde venía el POST, solo si es del propio panel: a ahí se vuelve tras entrar. */
+function backTo(req: Request): string {
+  try {
+    const ref = new URL(String(req.headers.referer ?? ''));
+    return ref.origin === publicOrigin() ? safeNext(ref.pathname + ref.search) : '/panel';
+  } catch {
+    return '/panel';
+  }
+}
+
+/**
+ * Sin esto, Nest respondía JSON y el operador perdía lo que estaba escribiendo:
+ * la página devuelve su texto en un recuadro para copiarlo y un enlace para volver a entrar.
+ */
+@Catch(PanelForbidden)
+export class PanelForbiddenFilter implements ExceptionFilter {
+  catch(e: PanelForbidden, host: ArgumentsHost) {
+    const req = host.switchToHttp().getRequest<Request>();
+    const res = host.switchToHttp().getResponse<Response>();
+    const draft = (req.body as Record<string, unknown> | undefined)?.texto;
+    const nonce = newNonce();
+    sendHtml(res, 403, forbiddenView(nonce, { message: e.message, next: backTo(req),
+      draft: typeof draft === 'string' && draft.trim() ? draft.slice(0, 4096) : undefined }), nonce);
+  }
+}
+
 @Catch(LoginRequired)
 export class LoginRedirectFilter implements ExceptionFilter {
   catch(e: LoginRequired, host: ArgumentsHost) {
@@ -73,12 +105,12 @@ export class PanelGuard implements CanActivate {
     const read = req.method === 'GET' || req.method === 'HEAD';
     if (!session) {
       if (read) throw new LoginRequired(req.originalUrl);
-      throw new ForbiddenException('Tu sesión venció. Vuelve a entrar.');
+      throw new PanelForbidden('Tu sesión venció. Vuelve a entrar.');
     }
     if (!read) {
       const sent = (req.body as Record<string, unknown> | undefined)?._csrf;
       if (typeof sent !== 'string' || !sameSecret(sent, session.csrf) || foreignOrigin(req)) {
-        throw new ForbiddenException('La solicitud no vino del panel.');
+        throw new PanelForbidden('La solicitud no vino del panel. Vuelve a cargar la página e inténtalo de nuevo.');
       }
     }
     req.operator = session;

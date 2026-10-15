@@ -94,6 +94,21 @@ describe('guard', () => {
   it('sin sesión, un POST da 403', async () => {
     await http().post('/panel/logout').type('form').send({}).expect(403);
   });
+  it('un POST con la sesión vencida da una página para volver a entrar, con el texto escrito para copiarlo', async () => {
+    const chat = '/panel/negocios/a/conversaciones/11111111-1111-4111-8111-111111111111';
+    const res = await http().post(`${chat}/responder`).set('Referer', `http://localhost:3000${chat}`).type('form')
+      .send({ texto: 'lo que escribí <b>', envio: 'x' }).expect(403);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.headers['content-security-policy']).toBeDefined();
+    expect(res.text).toContain('Tu sesión venció');
+    expect(res.text).toContain(`href="/panel/login?next=${encodeURIComponent(chat)}"`);
+    expect(res.text).toContain('lo que escribí &lt;b&gt;</textarea>');
+  });
+  it('un Referer de otro sitio no se usa como destino al volver a entrar', async () => {
+    const res = await http().post('/panel/logout').set('Referer', 'https://evil.com/x').type('form').send({}).expect(403);
+    expect(res.text).toContain('href="/panel/login?next=%2Fpanel"');
+  });
+
   it('con sesión pero sin CSRF, o con Origin ajeno, un POST da 403', async () => {
     const cookie = cookieOf(await login());
     const page = await http().get('/panel').set('Cookie', cookie).expect(200);
